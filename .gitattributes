@@ -1,0 +1,2 @@
+# cmd.exe は CRLF 前提でバッチを解釈するため、.bat は常に CRLF でチェックアウトする
+*.bat text eol=crlf

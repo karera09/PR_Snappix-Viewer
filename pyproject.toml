@@ -1,0 +1,154 @@
+[project]
+name = "snappix-viewer"
+version = "0.0.3"
+description = "Snappix Viewer — high-performance local/NAS image library viewer + AI tag scanner"
+# Upper-bounded to versions PyInstaller can freeze; bump only after
+# confirming PyInstaller support, since an unsupported interpreter would
+# break `build_portable.py` with no earlier warning.
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "PySide6>=6.7",
+    "loguru>=0.7",
+    # post.md / text preview rendering (viewer/content_view.py).
+    "markdown-it-py>=3.0",
+    "linkify-it-py>=2.0",
+    # Brute-force semantic-search vector math in the viewer (image_vectors /
+    # tag-vector dot products). See viewer/vector_index.py.  Dev/test + AI
+    # plugin vendor source only: the PLAIN frozen viewer EXCLUDES numpy
+    # (snappix_viewer.spec) — the paid AI plugin ships it in its vendor/
+    # (build_portable.py::assemble_ai_plugin copies it from this venv).
+    # vector_index must therefore only ever be imported lazily via
+    # viewer/ai_pack.py.
+    "numpy>=1.26",
+    # viewer_state.json schema (viewer/state.py).
+    "pydantic>=2.7",
+    "Pillow>=10.3",
+]
+
+[project.optional-dependencies]
+# The AI tag scanner (plugins/snappix_ai/tagger/). Heavy: torch ships its own CUDA
+# runtime DLLs (GPU inference on NVIDIA, CPU fallback elsewhere). Model
+# weights are NOT a dependency — the user supplies them (docs/tagger-models.md).
+tagger = [
+    "torch>=2.5,<2.6",
+    # <1.0.16: model.pth は timm VisionTransformer を丸ごと pickle したチェック
+    # ポイントで、timm 1.0.16 の Attention リファクタ（forward が新インスタンス
+    # 属性 norm / attn_dim を参照）以降は unpickle した旧インスタンスで全推論が
+    # AttributeError になる。1.0.15 は 1.0.3 と推論出力が一致することを確認済み
+    # （2026-07-18）。
+    "timm>=1.0,<1.0.16",
+    # 既定モデルのアプリ内ダウンロード（tagger/model_fetch.py）の TLS 信頼
+    # ストア・フォールバック。素の Windows はルート CA ストアが最小構成で、
+    # 必要なルート CA は SChannel がオンデマンド取得する — 凍結 Python の
+    # OpenSSL はそれができず、新品 PC では初回の取得が必ず
+    # CERTIFICATE_VERIFY_FAILED になる（#110）。certifi は**純データ**の CA
+    # バンドル（コード依存ではない）なので「huggingface_hub 等の依存追加禁止」
+    # の例外として許容する（2026-08-29 の判断）。取得物の完全性は従来どおり
+    # ピン留め SHA-256 が担保し、CA バンドルは接続確立のための手段でしかない。
+    # 実際には timm → huggingface_hub 経由で既に入っているが、model_fetch が
+    # 直接使う以上、意図した直接依存として明示する。
+    "certifi>=2024.2.2",
+]
+# 凍結 exe の UI オートメーションスモーク（tools/exe_smoke/smoke.py）用。
+# dev に入れないのは、pytest 実行には不要な COM/UIA スタック（comtypes /
+# pywin32）を通常の dev 環境へ持ち込まないため（Windows 専用マーカー付き
+# なので Linux の uv sync はどちらでも壊れない）。実マウス・実キーボードを
+# 奪って動くため CI ワークフローには載せないこと（リリース前チェックと
+# VM 内実行専用 — tools/exe_smoke/smoke.py の docstring 参照）。
+uitest = [
+    "pywinauto>=0.6.9; sys_platform == 'win32'",
+]
+dev = [
+    "pytest>=8.2",
+    # Parallel test execution across worker processes (`-n auto`). Each xdist
+    # worker is a separate process, so the per-suite conftests each build their
+    # own session-scoped QApplication (no cross-worker Qt sharing) and the
+    # tmp_path_factory-based path isolation keeps workers from colliding.
+    "pytest-xdist>=3.6",
+    "pyinstaller>=6.10",
+    # Lint gate: pyflakes ("F") rules catch undefined names / shadowed imports.
+    "ruff>=0.15,<0.16",
+]
+
+[project.scripts]
+# 引数解釈は _dispatch.run() の 1 箇所だけ（launcher.py / python -m snappix と
+# 同じ経路）。app:main を直に指すと生成ラッパーが無引数で呼ぶため、
+# --root も位置引数のフォルダも黙って捨てられる。
+snappix-viewer = "snappix._dispatch:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/snappix"]
+
+# torch comes from the CUDA 12.1 wheel index so the frozen tag scanner
+# bundles GPU-capable binaries (PyPI's default Windows wheels are CPU-only).
+# torchvision (pulled in by timm) is NOT pinned to this index and freezes
+# from PyPI's CPU build — the tagger never imports torchvision directly, so
+# GPU tagging is unaffected.
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+
+[tool.ruff]
+target-version = "py311"
+# PyInstaller spec files are Python — lint them too (issue #130-6: the build
+# entry points ``*.spec`` / ``build_portable.py`` / ``launcher.py`` / ``tools/``
+# used to sit outside the lint gate; CI now runs ``ruff check .``).
+# ``local-testing/`` is the git-ignored VM-verification scratch area
+# (issue #109 項目2), not product code.
+extend-include = ["*.spec"]
+extend-exclude = ["build", "dist", "local-testing"]
+
+[tool.ruff.lint]
+# "F" (pyflakes) plus the bug-catching, low-noise groups adopted by the
+# 2026-08-28 project review:
+# "B" (bugbear: zip strict / mutable defaults / loop-var misuse — the
+# "asymmetric pair" defect class's cheapest tripwires), "A" (builtin
+# shadowing), "PIE" (misc correctness). Style-heavy groups (SIM / C4) stay
+# off per CLAUDE.md's review policy (no style nits); RUF001-003 false-
+# positive on the Japanese comments; PLE1205 assumes stdlib %-logging and
+# would flag loguru's correct brace-style calls, so PLE stays off.
+select = ["F", "B", "A", "PIE"]
+
+[tool.ruff.lint.per-file-ignores]
+# ``scan_worker.py`` is a deliberate backwards-compat façade that re-exports
+# every name the pre-split monolith exposed; its "unused" imports are the
+# re-exports themselves.
+"src/snappix/viewer/scan_worker.py" = ["F401"]
+# PyInstaller injects ``Analysis`` / ``PYZ`` / ``EXE`` / ``COLLECT`` /
+# ``SPECPATH`` into a spec's namespace at build time; to pyflakes they are
+# undefined names.  A genuinely undefined name in a spec fails the build
+# itself on the first run, so nothing is lost by muting F821 here.
+"*.spec" = ["F821"]
+
+[tool.pytest.ini_options]
+# The plugin-free viewer suite (tests/), each repo plugin's own suite
+# (plugins/<id>/tests/ — self-contained conftests; absent in the public
+# viewer-only repo, where the globs simply match nothing), and the tagger
+# tool's pure-logic suite (the tagger lives inside the official AI plugin
+# but remains an independent process/tool with its own tests).
+testpaths = ["tests", "plugins/*/tests", "plugins/*/tagger/tests"]
+# xdist (`-n auto`) must distribute whole FILES to workers, not individual
+# tests (#83).  The default `load` / CI's former `worksteal` hand out tests
+# one by one, which breaks two assumptions the suite is built on: (a) many
+# viewer files share one module-scoped ViewerWindow and their tests run
+# against it in file order (an interleaved worker rebuilds that heavy window
+# repeatedly and runs tests without their in-file predecessors), and (b) the
+# resulting duplicate cold-window scans multiply CPU load and blow the
+# fixed pump timeouts.  Inert without `-n` (serial runs are unaffected);
+# pytest-xdist is always present in the dev extra, so the option resolves.
+addopts = ["--dist=loadfile"]
+filterwarnings = [
+    "error",
+]
+markers = [
+    "real_app_paths: opt out of the per-test get_paths() isolation (tests/conftest.py) for tests that assert against the real repo tree",
+    "scenario: real-library scenario tests (generated images/ZIP/post.md via tools/ui_review/make_library). Kept deselectable so CI can exclude them (-m 'not scenario') if the wall-clock budget (+20s) is exceeded",
+]
