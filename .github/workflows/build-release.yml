@@ -52,13 +52,14 @@ jobs:
         shell: bash
         run: |
           tag="${{ inputs.tag || github.ref_name }}"
-          version=$(uv run python -c "import build_portable as b; print(b.release_version())")
-          if [ "$tag" != "v${version}" ]; then
-            echo "tag ${tag} does not match the pyproject version ${version}" >&2
+          # release_version() は既に "v<版数>" なので、そのままタグ名と比べる。
+          expected=$(uv run python -c "import build_portable as b; print(b.release_version())")
+          if [ "$tag" != "$expected" ]; then
+            echo "tag ${tag} does not match the pyproject version (expected ${expected})" >&2
             exit 1
           fi
           echo "TAG=${tag}" >> "$GITHUB_ENV"
-          echo "VERSION=${version}" >> "$GITHUB_ENV"
+          echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
 
       - name: Build the plain distribution
         run: uv run python build_portable.py
