@@ -47,6 +47,10 @@ version tag names the whole release.
 * **dist/SHA256SUMS.txt / dist/README-assets.txt** — the release manifest and
   the Japanese reader's guide (what each asset is, how to re-join the split
   parts, how to verify a hash, how to install a plugin).
+* **dist/public/** — the same two files rendered from the viewer asset alone,
+  for the PUBLIC repository's release (plain viewer only, no plugin named;
+  the public repository's build-release workflow attaches them next to the
+  viewer zip it built).
 
 The pack STAGING folders are intermediates, not artefacts: each hook builds
 its pack under ``build/packs/<id>/`` (``api.pack_dir()``), and the host
@@ -76,7 +80,8 @@ Steps:
   8. Zip every repo plugin into dist/plugins/<id>-v<版数>.zip and verify them
      (drop-in layout + each hook's ``check_zip``) — then split the oversize
      ones into ``.zip.NNN`` parts.
-  9. Write SHA256SUMS.txt + README-assets.txt and verify the final layout.
+  9. Write SHA256SUMS.txt + README-assets.txt (the full pair, and the
+     viewer-only pair under dist/public/) and verify the final layout.
 
 Hook protocol — a ``plugins/<id>/build_hook.py`` may define any of:
 
@@ -149,6 +154,18 @@ PACKS_DIR = BUILD_DIR / "packs"
 #: Release manifest + reader's guide written next to the assets.
 SUMS_NAME = "SHA256SUMS.txt"
 README_ASSETS_NAME = "README-assets.txt"
+
+#: The PUBLIC release's manifest pair (same two names, viewer-only content).
+#: The public repository's release carries the plain viewer and nothing else
+#: (plugins are distributed separately — CLAUDE.md 公開リポジトリ分離), and
+#: its manifests must not even NAME a plugin pack, so the pair is rendered
+#: from the viewer asset alone by the same two renderers.  A sibling folder
+#: because both files keep their names (a release asset is named after its
+#: file).  The public repository's build-release workflow (which runs this
+#: same script on the plugin-free public tree) attaches dist/public/ next to
+#: the viewer zip it built; the local build's copy is the self-check that the
+#: pair never names a plugin.
+PUBLIC_DIR = DIST_ROOT / "public"
 
 #: Split threshold for a release asset (MiB).  GitHub refuses a single release
 #: asset over 2 GiB; 1900 MiB leaves room without making the part count silly.
@@ -2932,13 +2949,43 @@ def render_assets_readme(assets: list[ReleaseAsset]) -> str:
     return "\n".join(lines)
 
 
+def public_release_assets(assets: list[ReleaseAsset]) -> list[ReleaseAsset]:
+    """The subset of *assets* the PUBLIC release carries: the viewer only."""
+    viewer_name = viewer_zip_path().name
+    return [a for a in assets if a.name == viewer_name]
+
+
 def write_release_manifest(assets: list[ReleaseAsset]) -> None:
-    """Write SHA256SUMS.txt + README-assets.txt next to the assets."""
-    (DIST_ROOT / SUMS_NAME).write_text(render_sums(assets), encoding="utf-8")
-    (DIST_ROOT / README_ASSETS_NAME).write_text(
+    """Write SHA256SUMS.txt + README-assets.txt next to the assets, and the
+    viewer-only pair for the public release into :data:`PUBLIC_DIR`.
+
+    Both pairs come from the same *assets* list and the same two renderers in
+    the same step, so the public pair can never describe a different build
+    than the full one.
+    """
+    _write_manifest_pair(DIST_ROOT, assets)
+    PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
+    _write_manifest_pair(PUBLIC_DIR, public_release_assets(assets))
+    print(
+        f"[build] Wrote {SUMS_NAME} + {README_ASSETS_NAME} into dist/ "
+        f"and dist/{PUBLIC_DIR.name}/ (viewer only)"
+    )
+
+
+def _write_manifest_pair(folder: Path, assets: list[ReleaseAsset]) -> None:
+    (folder / SUMS_NAME).write_text(render_sums(assets), encoding="utf-8")
+    (folder / README_ASSETS_NAME).write_text(
         render_assets_readme(assets), encoding="utf-8", newline="\r\n"
     )
-    print(f"[build] Wrote {SUMS_NAME} + {README_ASSETS_NAME} into dist/")
+
+
+def _sums_names(sums: Path) -> set[str]:
+    """File names listed in a ``SHA256SUMS.txt`` (``<hash>  <name>`` lines)."""
+    return {
+        line.split("  ", 1)[1]
+        for line in sums.read_text(encoding="utf-8").splitlines()
+        if "  " in line
+    }
 
 
 _PART_SUFFIX_RE = re.compile(r"^(?P<stem>.+\.zip)\.(?P<index>\d{3})$")
@@ -2976,13 +3023,60 @@ def split_sequence_offenders(names: Iterable[str]) -> list[str]:
     return offenders
 
 
+def public_manifest_offenders(
+    viewer_files: set[str], plugin_files: list[str]
+) -> list[str]:
+    """Negatives for the public release's manifest pair in :data:`PUBLIC_DIR`.
+
+    The pair is attached to the PUBLIC repository's release, so it must hold
+    exactly the two manifests, its hash list must name exactly the viewer's
+    downloadable files, and neither file may name a plugin pack (the public
+    side must not learn which plugins exist — CLAUDE.md 公開リポジトリ分離).
+    """
+    problems: list[str] = []
+    if not PUBLIC_DIR.is_dir():
+        return [f"{PUBLIC_DIR}: missing from the release layout"]
+    expected = {SUMS_NAME, README_ASSETS_NAME}
+    present = {p.name for p in PUBLIC_DIR.iterdir()}
+    for name in sorted(expected - present):
+        problems.append(f"{PUBLIC_DIR / name}: missing from the release layout")
+    for name in sorted(present - expected):
+        problems.append(
+            f"{PUBLIC_DIR / name}: unexpected entry — only the two manifests "
+            "belong in the public release folder"
+        )
+    sums = PUBLIC_DIR / SUMS_NAME
+    if sums.is_file():
+        listed = _sums_names(sums)
+        # A split viewer contributes its parts AND the re-joined whole.
+        rejoined = {viewer_zip_path().name} if any(
+            _PART_SUFFIX_RE.match(n) for n in viewer_files
+        ) else set()
+        for name in sorted(viewer_files - listed):
+            problems.append(f"{PUBLIC_DIR.name}/{SUMS_NAME}: no hash listed for {name}")
+        for name in sorted(listed - viewer_files - rejoined):
+            problems.append(
+                f"{PUBLIC_DIR.name}/{SUMS_NAME}: lists {name}, which is not a "
+                "public release asset"
+            )
+    for manifest in sorted(present & expected):
+        text = (PUBLIC_DIR / manifest).read_text(encoding="utf-8")
+        for name in plugin_files:
+            if name in text:
+                problems.append(
+                    f"{PUBLIC_DIR.name}/{manifest}: names the plugin asset {name}"
+                )
+    return problems
+
+
 def check_release_layout() -> None:
     """Verify dist/ holds the release layout and nothing else.
 
     ``dist/`` is what ``tools/release_assets.py upload`` enumerates, so a
     stray file there would be attached to the GitHub release.  Expected:
     the viewer folder, the plain zip, plugins/ (one zip or one complete part
-    run per plugin), and the two manifest files.
+    run per plugin), the two manifest files, and public/ with the viewer-only
+    manifest pair for the public repository's release.
     """
     problems: list[str] = []
 
@@ -3006,7 +3100,10 @@ def check_release_layout() -> None:
         problems.append(
             f"{viewer_zip}: neither the zip nor its split parts are present"
         )
-    expected_top = {DIST_DIR.name, PLUGIN_ZIP_DIR.name, SUMS_NAME, README_ASSETS_NAME}
+    expected_top = {
+        DIST_DIR.name, PLUGIN_ZIP_DIR.name, PUBLIC_DIR.name, SUMS_NAME,
+        README_ASSETS_NAME,
+    }
     for entry in sorted(DIST_ROOT.iterdir()):
         if entry.name in expected_top:
             continue
@@ -3030,18 +3127,13 @@ def check_release_layout() -> None:
             problems.append(
                 f"{expected}: neither the zip nor its split parts are present"
             )
+    viewer_files = {n for n in top_files if n not in (SUMS_NAME, README_ASSETS_NAME)}
     sums = DIST_ROOT / SUMS_NAME
     if sums.is_file():
-        listed = {
-            line.split("  ", 1)[1]
-            for line in sums.read_text(encoding="utf-8").splitlines()
-            if "  " in line
-        }
-        downloadable = {
-            n for n in top_files if n not in (SUMS_NAME, README_ASSETS_NAME)
-        } | set(plugin_files)
-        for name in sorted(downloadable - listed):
+        listed = _sums_names(sums)
+        for name in sorted((viewer_files | set(plugin_files)) - listed):
             problems.append(f"{SUMS_NAME}: no hash listed for {name}")
+    problems.extend(public_manifest_offenders(viewer_files, plugin_files))
     if problems:
         raise SystemExit(
             "[build] release layout verification failed:\n"
@@ -3146,6 +3238,7 @@ def main(argv: list[str] | None = None) -> int:
         for n, _h in asset.parts
     ]
     outputs += [f"dist/{SUMS_NAME}", f"dist/{README_ASSETS_NAME}"]
+    outputs += [f"dist/{PUBLIC_DIR.name}/ (viewer-only manifests for the public release)"]
     print("[build] Done. Output: " + " + ".join(outputs))
     return 0
 

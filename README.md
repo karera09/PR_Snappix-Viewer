@@ -76,7 +76,19 @@ snappix-viewer/
 - Windows 10 バージョン 1703（Creators Update）以降 / Windows 11 (64bit)
   - 同梱の Qt が OS 側の `icuuc.dll` を必要とします（Windows へ標準搭載されたのは Windows 10 バージョン 1703 から）。それより前の Windows 10 では起動できません
 
+## 配布物の出どころと検証
+
+- 最終版の配布 zip（`snappix-viewer-v<版数>.zip`）は、この公開リポジトリの GitHub Actions（`.github/workflows/build-release.yml`）が版数タグごとにビルドして Release に添付したものです。手元でビルドした物は配布しません
+- 各 zip には来歴証明（GitHub Artifact Attestations）が付きます。GitHub CLI で、その zip がこのリポジトリのどのコミット・どの実行から作られたかを検証できます
+
+```
+gh attestation verify snappix-viewer-v<版数>.zip --repo karera09/PR_Snappix-Viewer
+```
+
+- 同じ木から自分でビルドすることもできます（Windows。`build.bat` を実行すると成果物が `dist/` に置かれます）
+
 ## ライセンス・規約
 
-- 本ソフトウェアの利用条件は同梱の「利用規約・免責事項.txt」を参照してください
+- 本ソフトウェアのソースコードは Apache License 2.0（[LICENSE](LICENSE)）の下で公開しています。ソースコードの利用・改変・再配布はこのライセンスに従います
+- 配布物（ビルド済みの実行ファイル一式）の利用条件は同梱の「利用規約・免責事項.txt」を参照してください
 - 同梱する第三者ソフトウェアのライセンス表記は「THIRD_PARTY_LICENSES.txt」を参照してください

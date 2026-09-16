@@ -1,7 +1,11 @@
 [project]
 name = "snappix-viewer"
-version = "0.0.3"
+version = "0.0.4"
 description = "Snappix Viewer — high-performance local/NAS image library viewer + AI tag scanner"
+# 公開ソースのライセンス（本体規約第8条の「ソースライセンス」）。plugins/ は
+# 本プロジェクトの配布物に含まれず、この許諾の対象外（各プラグインの README 参照）。
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 # Upper-bounded to versions PyInstaller can freeze; bump only after
 # confirming PyInstaller support, since an unsupported interpreter would
 # break `build_portable.py` with no earlier warning.

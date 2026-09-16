@@ -1,0 +1,100 @@
+name: build-release
+
+# 版数タグ（v<pyproject 版数>）の push で素配布をビルドし、このリポジトリの
+# Release へ添付する。最終版として配布する zip はこのワークフローが作った
+# ものだけ — 手元でビルドした物は配布しない。ビルドは Windows ランナーで
+# build_portable.py をそのまま走らせる（tagger extra は不要。素配布は torch を
+# 含まない）。成果物には actions/attest-build-provenance で来歴証明を付け、
+# 第三者が `gh attestation verify <zip> --repo <owner>/<repo>` で「どのコミット
+# のどの実行が作ったか」を検証できるようにする。
+#
+# 手動起動（workflow_dispatch）は既存タグの再ビルド用（タグを打った後に
+# ランナー側の事情で落ちたときのやり直し）。同じタグの Release が既にあれば
+# 添付だけ --clobber で置き換える。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "ビルドするタグ（例: v0.0.4）"
+        required: true
+        type: string
+
+permissions:
+  contents: write # Release の作成と添付
+  id-token: write # 来歴証明の署名
+  attestations: write # 来歴証明の保存
+
+jobs:
+  build:
+    # ランナーイメージは明示して固定する（"latest" は予告なく入れ替わる）。
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.12.7"
+          enable-cache: true
+
+      # --locked: uv.lock が pyproject と食い違っていれば止める（ロックが正）。
+      - name: Sync dependencies (dev extra)
+        run: uv sync --extra dev --locked
+
+      # タグ名は pyproject の版数から導いた名前と一致していなければならない。
+      - name: Check the tag matches pyproject
+        shell: bash
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version=$(uv run python -c "import build_portable as b; print(b.release_version())")
+          if [ "$tag" != "v${version}" ]; then
+            echo "tag ${tag} does not match the pyproject version ${version}" >&2
+            exit 1
+          fi
+          echo "TAG=${tag}" >> "$GITHUB_ENV"
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+
+      - name: Build the plain distribution
+        run: uv run python build_portable.py
+
+      - name: Show the release assets
+        shell: bash
+        run: |
+          ls -l dist dist/public
+          cat dist/public/SHA256SUMS.txt
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/snappix-viewer-v*.zip*
+            dist/public/SHA256SUMS.txt
+
+      - name: Create the release and attach the assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            {
+              echo "Snappix Viewer ${TAG}"
+              echo
+              echo "この Release の zip は、GitHub Actions の build-release ワークフロー（実行 ${GITHUB_RUN_ID}）がこのタグのソースからビルドしたものです。"
+              echo
+              echo '```'
+              cat dist/public/SHA256SUMS.txt
+              echo '```'
+              echo
+              echo "来歴の検証: \`gh attestation verify snappix-viewer-v${VERSION}.zip --repo ${GITHUB_REPOSITORY}\`"
+            } > release-notes.md
+            gh release create "$TAG" --verify-tag --title "Snappix Viewer ${TAG}" --notes-file release-notes.md
+          fi
+          # マニフェストは素配布だけから描いた dist/public/ の対（build_portable.py::PUBLIC_DIR）。
+          gh release upload "$TAG" dist/snappix-viewer-v*.zip* dist/public/SHA256SUMS.txt dist/public/README-assets.txt --clobber
