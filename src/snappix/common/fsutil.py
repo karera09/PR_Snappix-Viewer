@@ -42,8 +42,7 @@ def relative_parts(root: Path, base: Path) -> tuple[str, ...] | None:
     ``PureWindowsPath`` root because their anchors differ otherwise.  Returns
     an empty tuple when *base == root*.
 
-    照合は ``os.path.normcase`` 済みの成分同士で行う（レビュー 2026-08-27
-    #111）: Windows では大小文字が同一視されるので、外部ツール由来やコマンド
+    照合は ``os.path.normcase`` 済みの成分同士で行う: Windows では大小文字が同一視されるので、外部ツール由来やコマンド
     ライン起動で casing のずれた root（``d:\\photos\\sub`` と登録ライブラリ
     ``D:\\Photos``）でもライブラリ基準が外れない。ケース非区別はこのリポジトリ
     の他のパス照合（``main_window._subtree_overlaps`` / ``nav_rail`` /
@@ -70,19 +69,17 @@ def pick_library_base(
 
     Returns ``(base, display_label, relative_parts)`` for the **shallowest
     (outermost)** base that is an ancestor-or-self of *root*, or ``None`` when
-    *root* sits outside every library (UIレビュー 07-25 #54 — 最も深い基準を
-    採ると入れ子登録で再ルート化してしまう）。
+    *root* sits outside every library (最も深い基準を採ると入れ子登録で
+    再ルート化してしまう）。
 
-    UIレビュー07-25 追修: この規則を関数 1 つに集約する。パンくず（#54 で
-    「最も浅い」へ修正済み）と全文検索ダイアログの「検索対象」表記が別々に
-    基準を選んでいて、入れ子登録のライブラリでは 2 つの画面が別のライブラリ名
-    を名乗っていた。両者ともここを通す。
+    この規則は関数 1 つに集約する。パンくずと全文検索ダイアログの「検索対象」
+    表記が別々に基準を選ぶと、入れ子登録のライブラリでは 2 つの画面が別の
+    ライブラリ名を名乗ってしまう。両者ともここを通す。
 
-    UIレビュー 2026-08-28 N-49: 横断キュレーション一覧のタイル説明
+    横断キュレーション一覧のタイル説明
     (``viewer.user_meta_parts.resolve._curation_display_name``) も同じ基準を使う
-    ため、この 2 つ
-    の純パス演算だけを Qt を引き込まない ``common`` 側へ移した
-    (``viewer.breadcrumb`` は再エクスポートするだけ — 既存の import 経路は不変)。
+    ため、この 2 つの純パス演算は Qt を引き込まない ``common`` 側に置く
+    (``viewer.breadcrumb`` は再エクスポートするだけ)。
     ``user_meta`` はワーカースレッドで動く Qt 非依存層なので、PySide6 を import
     する ``breadcrumb`` へは依存させられない。
 
@@ -104,11 +101,10 @@ def pick_library_base(
 def tail_display_labels(raws: "list[str]") -> dict[str, str]:
     """Raw path strings → short display labels (last segment, disambiguated).
 
-    UIレビュー 2026-08-28 の後続裁定（N-42 系統の統一）: 表示名を持たない
-    ライブラリの見え方を「末尾フォルダ名」へ全面的に寄せる。生パスの全文は
-    ツールチップの仕事で、ラベルは場所の**名前**を名乗る（ライブラリ管理
-    ダイアログ / ナビレール / パンくず基点が既にこの規則 — ファイル ▸
-    ライブラリ submenu だけが生パス全文で取り残されていた）。
+    表示名を持たないライブラリの見え方は全画面で「末尾フォルダ名」に揃える。
+    生パスの全文はツールチップの仕事で、ラベルは場所の**名前**を名乗る
+    （ライブラリ管理ダイアログ / ナビレール / パンくず基点 / ファイル ▸
+    ライブラリ submenu が同じ規則）。
 
     末尾セグメントが他の登録ルートと衝突するときだけ ``親/名前`` へ 1 段
     伸ばす（``D:/A/photos`` と ``E:/B/photos`` → ``A/photos`` / ``B/photos``）。

@@ -28,7 +28,6 @@ from loguru import logger
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import (
     QAction,
-    QFontMetrics,
     QGuiApplication,
     QKeySequence,
     QShortcut,
@@ -60,6 +59,7 @@ from ..common.format import format_bytes
 from ..common.i18n import t
 from ..common.ui import (
     FONT_CAPTION_PT,
+    ElidedLabel,
     align_header,
     demote_close_default,
     hint_style,
@@ -69,6 +69,7 @@ from .folder_scan import IMAGE_SUFFIXES
 from .image_metadata import ImageMetadata, extract_image_metadata
 from .qimage_decode import enable_clear_button, read_image_size
 from ._runnable import GuardedStream
+from .context_menus import copy_path_to_clipboard
 
 # tags.db category codes (mirrors tagger/engine.py CAT_*; re-declared
 # here so the viewer stays decoupled from the tagger tree).  Values are i18n
@@ -89,13 +90,13 @@ _CAT_LABELS = {0: "viewer.detail_window.cat_general", 9: "viewer.detail_window.r
 # 1 箇所足して全席で揃える。
 _IMAGE_SUFFIXES = IMAGE_SUFFIXES
 
-# 埋め込みメタデータ節（PNG テキストチャンク）のスクロール領域の高さ上限
-# (レビュー 2026-08-27 #33)。チャンク 1 件ぶんの箱 (140px 上限) + 見出し行が
+# 埋め込みメタデータ節（PNG テキストチャンク）のスクロール領域の高さ上限。
+# チャンク 1 件ぶんの箱 (140px 上限) + 見出し行が
 # 収まり、2 件目が見えて「続きがある」と分かる程度。これを超えた分は窓では
 # なくスクロールバーが受け持つ。
 _META_BOX_MAX_H = 260
 
-# 同じ節の高さ**下限**（UIレビュー 2026-08-28 N-17）。上限だけがあって下限が
+# 同じ節の高さ**下限**。上限だけがあって下限が
 # 無かったため、縦の余りをタグ表側がストレッチで総取りし、250 字級の SD
 # プロンプトが「1 行分の覗き窓」に潰れていた（M05 の主目的が未達）。
 # 140 = `_build_text_chunk` の 1 チャンク箱の上限と同値＝チャンク 1 件が
@@ -105,7 +106,7 @@ _META_BOX_MIN_H = 140
 # テキストチャンク 1 件ぶんの箱の高さ上限（`_build_text_chunk`）。複数チャンクを
 # 積んだときに 1 件が節を専有しないための上限で、`_META_BOX_MIN_H` と同値。
 # チャンクが 1 件しか無く節が縦のストレッチを受け取っているときは、この上限が
-# 「渡された高さを使えない」原因になるので `_sync_meta_stretch` が外す（N-33）。
+# 「渡された高さを使えない」原因になるので `_sync_meta_stretch` が外す。
 _META_CHUNK_MAX_H = 140
 
 # Qt の「上限なし」番兵（QWIDGETSIZE_MAX）。タグ表が空ページの間はメタ節へ
@@ -188,7 +189,7 @@ def _read_fs_info(path: Path) -> tuple[str, str, str]:
 
 
 def _read_tag_detail(path: Path, tag_index) -> dict | None:
-    """Read one image's tags.db row off the GUI thread (項目#73).
+    """Read one image's tags.db row off the GUI thread.
 
     ``TagIndex.image_detail`` は完全一致で見つからないと
     ``WHERE LOWER(path) = LOWER(?)`` のフォールバックへ落ち、``LOWER(path)``
@@ -229,8 +230,8 @@ class DetailWindow(QDialog):
         self.setModal(False)
         self._tag_index = tag_index
         # ユーザーキュレーション（★ / あとで見る / ユーザータグ）の読み取り元。
-        # user_meta.db は本体所有なので AI パック無効（素の配布）でも表示できる
-        # (UIレビュー 07-25 #94)。``None`` なら 3 行とも出さない。
+        # user_meta.db は本体所有なので AI パック無効（素の配布）でも表示できる。
+        # ``None`` なら 3 行とも出さない。
         self._user_meta = user_meta
         # AI 機能パック（有償プラグイン）の可用性。False = 素の配布では
         # tags.db 由来の行・AI タグ表・案内文を UI に出さない（構築時に確定、
@@ -239,9 +240,9 @@ class DetailWindow(QDialog):
 
         self._ai_ui = ai_pack.available()
         # 素の配布はタグ表が無く内容が半分程度 — 既定サイズも詰めて
-        # 情報グループ下の大きな余白を残さない (UIレビュー #32)。
+        # 情報グループ下の大きな余白を残さない。
         # 460px でもなお内容量（情報グループ + ボタン行）に対して下 2/3 が
-        # 空白だったので内容相当まで詰める (UIレビュー 07-25 #45)。
+        # 空白だったので内容相当まで詰める。
         # adjustSize は選択追従（メタデータ節の出入り）で高さが跳ねるため不可。
         self.resize(420, 720 if self._ai_ui else 260)
         # Whether semantic (vector) search is usable — gates the 「この画像で
@@ -250,7 +251,7 @@ class DetailWindow(QDialog):
         self._similar_available = bool(similar_available)
         self._path: Path | None = None
         self._all_tags: list[tuple[str, float, int]] = []
-        # 項目#31: 選択追従の読みは窓所有の :class:`GuardedStream`（既定の
+        # 選択追従の読みは窓所有の :class:`GuardedStream`（既定の
         # 1 スレッド専用プール）へ。共有グローバルプールだと高速選択移動で
         # 古いタスクが無制限に滞留して共有枠を食い、窓を閉じても捨てられない。
         # 専用プールなら同時実行は常に 1 本で、``submit`` が未着手キューを
@@ -265,7 +266,7 @@ class DetailWindow(QDialog):
         # Embedded metadata (PNG generation info / EXIF — M05).
         self._meta_stream = GuardedStream(self)
         self._meta_stream.bind(self._on_metadata)
-        # tags.db 参照（項目#73）。行が無い / 読めない着地は ``None`` なので
+        # tags.db 参照。行が無い / 読めない着地は ``None`` なので
         # ``bind_failed`` が受け、FS 情報だけの表示へ落とす。
         self._tag_stream = GuardedStream(self)
         self._tag_stream.bind(self._on_tag_detail)
@@ -283,20 +284,27 @@ class DetailWindow(QDialog):
         self._name_label.setStyleSheet("font-weight: bold;")
         self._name_label.setWordWrap(True)
         self._name_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        # 幅の要求には参加させない（下のパス行と同じ Ignored + 最小幅 0）:
+        # wordWrap でも折り返し位置の無い名前（英数字と _ だけ）は
+        # minimumSizeHint が文字列全幅になり、QDialog がそれを窓の最小幅として
+        # 強制するので窓が画面外まで広がり縮められなかった。折り返せる名前は
+        # 従来どおり折り返し、折れない分は右で切れる — 全文はツールチップ。
+        self._name_label.setMinimumWidth(0)
+        self._name_label.setSizePolicy(
+            QSizePolicy.Ignored, self._name_label.sizePolicy().verticalPolicy()
+        )
         outer.addWidget(self._name_label)
 
-        # パスは中央省略（Qt.ElideMiddle）で頭とファイル名の両端を残す —
-        # 従来の QLineEdit は末尾を字の途中で切り捨てていた
-        # (UIレビュー 07-25 #45)。全文はツールチップで読める。
-        self._path_text = ""
-        self._path_label = QLabel("")
-        self._path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        # パスは共有部品で中央省略（全文はツールチップ）。選択の代わりに
+        # 情報パネルと同じ「フルパスをコピー」を右クリックに置く。
+        self._path_label = ElidedLabel()
         self._path_label.setStyleSheet(hint_style())
-        # 省略後の幅を sizeHint にしないと縮小方向のフィードバックが起きる。
-        self._path_label.setMinimumWidth(0)
-        self._path_label.setSizePolicy(
-            QSizePolicy.Ignored, self._path_label.sizePolicy().verticalPolicy()
+        self._path_label.setContextMenuPolicy(Qt.ActionsContextMenu)
+        copy_path = QAction(t("viewer.context_menus.copy_full_path"), self._path_label)
+        copy_path.triggered.connect(
+            lambda: self._path and copy_path_to_clipboard(self._path, self)
         )
+        self._path_label.addAction(copy_path)
         outer.addWidget(self._path_label)
 
         # File / scan info grid.
@@ -306,7 +314,7 @@ class DetailWindow(QDialog):
         self._lbl_kind = QLabel("—")
         self._lbl_size = QLabel("—")
         self._lbl_dims = QLabel("—")
-        # ユーザーキュレーション 3 行 (UIレビュー 07-25 #94) — 値のある行だけ
+        # ユーザーキュレーション 3 行 — 値のある行だけ
         # 出す（情報パネルの詳細カードと同じ流儀）。
         self._lbl_star = QLabel("—")
         self._lbl_later = QLabel("—")
@@ -335,8 +343,7 @@ class DetailWindow(QDialog):
         )
         self._info_form.addRow(t("viewer.detail_window.rating"), self._lbl_rating)
         self._info_form.addRow(t("viewer.detail_window.model"), self._lbl_model)
-        # 「フロア」→「記録しきい値」+ 意味を補うツールチップ
-        # (UIレビュー 07-25 #44)。ラベル側にも同じツールチップを付ける。
+        # 「記録しきい値」+ 意味を補うツールチップ。ラベル側にも同じツールチップを付ける。
         floor_label = QLabel(t("viewer.detail_window.floor"))
         floor_label.setToolTip(t("viewer.detail_window.floor_tooltip"))
         self._lbl_floor.setToolTip(t("viewer.detail_window.floor_tooltip"))
@@ -356,8 +363,8 @@ class DetailWindow(QDialog):
         self._meta_box = QGroupBox(t("viewer.detail_window.metadata_group"))
         meta_outer = QVBoxLayout(self._meta_box)
         meta_outer.setContentsMargins(0, 0, 0, 0)
-        # チャンク数ぶん縦に積む節なので、中身はスクロール領域へ入れる
-        # (レビュー 2026-08-27 #33)。`_read_png_text` は img.info の文字列値を
+        # チャンク数ぶん縦に積む節なので、中身はスクロール領域へ入れる。
+        # `_read_png_text` は img.info の文字列値を
         # 全部拾う契約なので、NovelAI 産 PNG では 6 チャンク・ComfyUI では 2
         # と可変で、素の QVBoxLayout に積むと窓の minimumSizeHint が
         # チャンク数に比例して伸びる（QDialog はレイアウト由来の最小サイズを
@@ -371,14 +378,14 @@ class DetailWindow(QDialog):
         self._meta_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._meta_scroll.setFrameShape(QFrame.NoFrame)
         self._meta_scroll.setMaximumHeight(_META_BOX_MAX_H)
-        # 上限だけあって下限が無い＝対の欠落だった（N-17）。スクロール領域の
+        # 上限だけあって下限が無い＝対の欠落だった。スクロール領域の
         # sizeAdjustPolicy は既定の AdjustIgnored なので、最小高を与えても
         # 中身のチャンク数で窓の minimumSizeHint が動くことはない。
         self._meta_scroll.setMinimumHeight(_META_BOX_MIN_H)
         meta_inner = QWidget()
         self._meta_box_layout = QVBoxLayout(meta_inner)
         self._meta_box_layout.setContentsMargins(8, 8, 8, 8)
-        # 現在積んでいるテキストチャンクの箱と末尾ストレッチ（N-33）。
+        # 現在積んでいるテキストチャンクの箱と末尾ストレッチ。
         # `_clear_metadata` と必ず同じ場所で捨てる（破棄済みウィジェットへ
         # `setMaximumHeight` すると RuntimeError）。
         self._meta_chunks: list[QPlainTextEdit] = []
@@ -413,7 +420,7 @@ class DetailWindow(QDialog):
             t("viewer.detail_window.score"),
             t("common.label.type"),
         ])
-        # 「見出しの揃え = 内容の揃え」 (UIレビュー 07-25 #97 / 追修): スコア列は
+        # 「見出しの揃え = 内容の揃え」: スコア列は
         # 右寄せ（``_ScoreItem``）、種別列は中央寄せのセルなのに、見出しだけ
         # QTableWidget 既定の中央のままで管理系 6 表と食い違っていた。
         align_header(self._tag_table, right=(1,), center=(2,))
@@ -422,7 +429,7 @@ class DetailWindow(QDialog):
         self._tag_table.setSelectionBehavior(QTableWidget.SelectRows)
         self._tag_table.setSelectionMode(QTableWidget.ExtendedSelection)
         self._tag_table.setSortingEnabled(True)
-        # 「選択したタグをコピー」の活性は選択に追随する (N-43) — フィルタ
+        # 「選択したタグをコピー」の活性は選択に追随する — フィルタ
         # 再構築と同じ funnel（``_sync_copy_buttons``）へ流す。
         self._tag_table.itemSelectionChanged.connect(self._sync_copy_buttons)
         # Right-click → "このタグで検索" on the selected tag rows (C-10).  Only
@@ -438,7 +445,7 @@ class DetailWindow(QDialog):
         hdr.setSectionResizeMode(0, QHeaderView.Stretch)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        # タグが無いとき空のテーブルを大きく残さない (UIレビュー #32):
+        # タグが無いとき空のテーブルを大きく残さない:
         # スタックで「表 / 中央寄せの案内」を切り替える（案内文は従来の
         # 下端注記と同じ文言を昇格させる — _sync_tag_stack）。
         self._tag_stack = QStackedWidget()
@@ -462,8 +469,8 @@ class DetailWindow(QDialog):
         if not self._ai_ui:
             # 素の配布（AI パック無効）: タグ表（唯一の縦ストレッチ持ち,
             # ``addWidget(self._tag_stack, 1)``）が非表示のため、その
-            # ストレッチが失われて可視要素間に余白が分散し間延びする
-            # （UIレビュー #6）。ここで明示的なストレッチを入れて上詰めにする。
+            # ストレッチが失われて可視要素間に余白が分散し間延びする。
+            # ここで明示的なストレッチを入れて上詰めにする。
             outer.addStretch(1)
 
         buttons = QDialogButtonBox()
@@ -477,7 +484,7 @@ class DetailWindow(QDialog):
         buttons.addButton(self._similar_btn, QDialogButtonBox.ActionRole)
         # setVisible は必ず addButton の後に呼ぶ: QDialogButtonBox はレイアウト
         # 時に追加ボタンを show() するため、先に隠しても復活してしまう
-        # (UIレビュー #5 — 素配布/ベクトル索引なしで AI ボタンが露出していた)。
+        # （素配布 / ベクトル索引なしで AI ボタンが露出してしまう）。
         self._similar_btn.setVisible(self._similar_available and self._ai_ui)
         self._copy_selected_btn = QPushButton(t("viewer.detail_window.copy_selected_tags"))
         self._copy_selected_btn.clicked.connect(self._copy_selected_tags)
@@ -491,7 +498,7 @@ class DetailWindow(QDialog):
         close_btn = buttons.addButton(QDialogButtonBox.Close)
         close_btn.clicked.connect(self.close)
         localize_buttons(buttons)
-        # UIレビュー #4: 閲覧専用ウィンドウ — 肯定アクション（Accept/Yes）が
+        # 閲覧専用ウィンドウ — 肯定アクション（Accept/Yes）が
         # 無いので、どのボタンも「閉じる」の代わりにアクセント化された既定
         # ボタンとして目立たないようにする。
         demote_close_default(buttons)
@@ -502,7 +509,7 @@ class DetailWindow(QDialog):
     def show_path(self, path: Path | None) -> None:
         """Populate the window for *path* (``None`` clears it)."""
         self._path = path
-        # 項目#31: 前の選択のために飛んでいる 3 本の読みを全部降ろす（キュー
+        # 前の選択のために飛んでいる 3 本の読みを全部降ろす（キュー
         # 待ちは破棄、実行中は着地が ``bind`` の選別で捨てられる）。この後
         # 実際に投げ直すのは選択の種類で決まる一部だけなので、投入側の
         # 追い越しだけに頼らず**ここで揃えて**降ろす。
@@ -515,8 +522,9 @@ class DetailWindow(QDialog):
         # The similar-image button only makes sense for an image file.
         self._update_similar_button(path)
         self._name_label.setText(path.name)
-        self._set_path_text(str(path))
-        # ★ / あとで見る / ユーザータグ (UIレビュー 07-25 #94)。
+        self._name_label.setToolTip(path.name)
+        self._path_label.setText(str(path))
+        # ★ / あとで見る / ユーザータグ。
         self._update_curation(path)
         # Embedded metadata (PNG/EXIF — M05): hide the section until the async
         # read lands, and only bother probing an image file (EXIF/PNG chunks
@@ -533,7 +541,7 @@ class DetailWindow(QDialog):
                 lambda p=path: extract_image_metadata(p)
             )
 
-        # tags.db の行はワーカーで引く（項目#73）: ``image_detail`` は完全一致で
+        # tags.db の行はワーカーで引く: ``image_detail`` は完全一致で
         # 外すと ``LOWER(path)`` の全表スキャンへ落ちるため、未スキャンの選択を
         # ↓キーで流すだけで GUI が刻まれていた。着地までは「…」で待ち、行の
         # 有無で ``_on_tag_detail`` / ``_on_tag_detail_missing`` へ分岐する。
@@ -548,7 +556,7 @@ class DetailWindow(QDialog):
         )
 
     def refresh_curation(self, path: Path | None = None) -> None:
-        """★ / あとで見る / ユーザータグ の 3 行だけを読み直す (UIレビュー07-25 追修 #94).
+        """★ / あとで見る / ユーザータグ の 3 行だけを読み直す.
 
         この 3 行は ``show_path``（= 選択変更）でしか更新されないため、
         選択を動かさずに★を付け替える経路（0-5 キー / 右クリック /
@@ -565,34 +573,8 @@ class DetailWindow(QDialog):
 
     # --------------------------------------------------------------- helpers
 
-    def _set_path_text(self, text: str) -> None:
-        """Show *text* elided in the middle, full value in the tooltip (#45)."""
-        self._path_text = text
-        self._path_label.setToolTip(text)
-        self._elide_path()
-
-    def _elide_path(self) -> None:
-        label = getattr(self, "_path_label", None)
-        if label is None:
-            return
-        if not self._path_text:
-            label.setText("")
-            return
-        metrics = QFontMetrics(label.font())
-        # 幅が確定する前（show 前）は極端に狭いので下限を置く — resizeEvent が
-        # 実際の幅で必ず引き直す。
-        width = max(label.width() - 2, 120)
-        label.setText(
-            metrics.elidedText(self._path_text, Qt.ElideMiddle, width)
-        )
-
-    def resizeEvent(self, event) -> None:  # noqa: D401 (Qt API)
-        # 幅が変わるたびに省略位置を取り直す (UIレビュー 07-25 #45)。
-        super().resizeEvent(event)
-        self._elide_path()
-
     def _update_curation(self, path: Path | None) -> None:
-        """★ / あとで見る / ユーザータグ の 3 行を同期 (UIレビュー 07-25 #94).
+        """★ / あとで見る / ユーザータグ の 3 行を同期.
 
         ``user_meta`` は本体所有なので AI パック無効（素の配布）でも表示できる。
         値の無い行は情報パネルの詳細カードと同じく行ごと隠す。
@@ -621,7 +603,7 @@ class DetailWindow(QDialog):
 
     def _set_ai_rows_visible(self, visible: bool) -> None:
         """tags.db 由来の 5 行（年齢区分 / モデル / 記録しきい値 / スキャン日時
-        / タグ数）の可視を **1 箇所で** 切り替える (UIレビュー 2026-08-28 N-44).
+        / タグ数）の可視を **1 箇所で** 切り替える.
 
         未スキャン画像でも 5 行が「—」で並び続けていた。キュレーション 3 行が
         既に採っている「値が無い行は出さない」流儀へ揃える。**必ずこの funnel
@@ -677,7 +659,8 @@ class DetailWindow(QDialog):
     def _show_placeholder(self) -> None:
         self._update_similar_button(None)
         self._name_label.setText(t("viewer.detail_window.no_selection"))
-        self._set_path_text("")
+        self._name_label.setToolTip("")
+        self._path_label.setText("")
         self._update_curation(None)
         if hasattr(self, "_meta_box"):
             self._meta_box.setVisible(False)
@@ -692,8 +675,8 @@ class DetailWindow(QDialog):
         if not self._ai_ui:
             # 素の配布: tags.db への言及（タガー導線）は出さず中立の案内のみ。
             # 共通キーを使い回すと「ここに詳細とAIタグが表示されます」と、
-            # 存在しない面を予告してしまう（UIレビュー 09-11 N-46 — 対称の
-            # ``_populate_filesystem_only`` は既に中立化済みだった）。
+            # 存在しない面を予告してしまう（対称の ``_populate_filesystem_only``
+            # も中立の案内を出す）。
             self._notice_label.setText(
                 t("viewer.detail_window.select_image_hint_free")
             )
@@ -766,7 +749,7 @@ class DetailWindow(QDialog):
         self._sync_tag_stack()
 
     def _populate_pending(self) -> None:
-        """tags.db 参照の着地待ち表示（項目#73）.
+        """tags.db 参照の着地待ち表示.
 
         値は ``_on_tag_detail`` が行の有無で確定させる。ここで前の選択の値を
         残すと「別のファイルの情報が出ている」ように読めるので伏せる。
@@ -782,7 +765,7 @@ class DetailWindow(QDialog):
         self._sync_tag_stack()
 
     def _on_tag_detail(self, detail: object) -> None:
-        """tags.db の行が着地した（項目#73）— 表示を行の内容で確定させる."""
+        """tags.db の行が着地した — 表示を行の内容で確定させる."""
         path = self._path
         if path is None or not isinstance(detail, dict):
             return
@@ -821,7 +804,7 @@ class DetailWindow(QDialog):
         self._sync_meta_stretch()
 
     def _sync_meta_stretch(self) -> None:
-        """縦の余りを「中身がある側」へ渡す（UIレビュー 2026-08-28 N-17）.
+        """縦の余りを「中身がある側」へ渡す.
 
         既定では ``_tag_stack`` がストレッチ 1 を総取りするが、タグ表が空ページ
         （未スキャン / 0 件 / AI パック無効）の間はメタデータ節が最小高のまま
@@ -831,8 +814,7 @@ class DetailWindow(QDialog):
         ときに節が窓を専有しない」ためのもので、同居していない間は不要）。
 
         **窓の再フィットは行わない**: 節が現れるたびに ``adjustSize`` で高さを
-        合わせ直す案は 07-25 #45 が「選択追従で高さが跳ねる」として明示的に
-        退けている（`__init__` の resize コメント）。最小高 140 は
+        合わせ直す案は「選択追従で高さが跳ねる」ので採らない（`__init__` の resize コメント）。最小高 140 は
         ``QLayout`` が top-level の minimumSize として自動的に効かせるので、
         窓が小さすぎる場合は Qt 側が必要なぶんだけ広げる。
         """
@@ -850,7 +832,7 @@ class DetailWindow(QDialog):
         self._sync_meta_chunk_heights(give_meta)
 
     def _sync_meta_chunk_heights(self, give_meta: bool) -> None:
-        """節が縦を独り占めできるときは 1 件だけのチャンク箱の上限も外す（N-33）.
+        """節が縦を独り占めできるときは 1 件だけのチャンク箱の上限も外す.
 
         節の外枠（``_meta_scroll``）の上限を外しても、内側の箱が
         ``_META_CHUNK_MAX_H`` で止まっていると渡された高さは空白になる。
@@ -973,17 +955,17 @@ class DetailWindow(QDialog):
         self._apply_filter(self._filter_edit.text())
 
     def _sync_tag_stack(self) -> None:
-        """タグ無しでは空テーブルの代わりに案内を中央表示 (UIレビュー #32).
+        """タグ無しでは空テーブルの代わりに案内を中央表示.
 
         呼び出しは案内文（``_notice_label``）確定後 — 下端の小さな注記を
         中央へ昇格させ、二重表示を避けるため下端側は隠す。フィルタで 0 行に
         なっただけ（``_all_tags`` は非空）のときは表のまま。
 
         タグが 0 件（未スキャンを含む）のときは、絞り込む対象が無い
-        ``_filter_edit`` / ``_count_label`` も一緒に隠す (UIレビュー #9) —
+        ``_filter_edit`` / ``_count_label`` も一緒に隠す —
         空案内の上に無意味な入力欄が浮くのを防ぐ。
         """
-        # タグの有無が変わればメタ節へのストレッチ配分も変わる（N-17）。
+        # タグの有無が変わればメタ節へのストレッチ配分も変わる。
         # `_ai_ui` が False のときも通す（タグ表は常に空 = メタ節が受け取る側）。
         self._sync_meta_stretch()
         if not self._ai_ui:
@@ -1031,12 +1013,11 @@ class DetailWindow(QDialog):
             self._count_label.setText("")
 
     def _sync_copy_buttons(self) -> None:
-        """2 つのコピーボタンの活性を **同じ 1 箇所で** 決める (N-43).
+        """2 つのコピーボタンの活性を **同じ 1 箇所で** 決める.
 
-        07-25 #43 は「タグ 0 件でクリップボードを空文字に上書きする」副作用を
-        防ぐため「タグをすべてコピー」だけを無効化したが、隣の「選択したタグを
-        コピー」には ``setEnabled`` を呼ぶ箇所が 1 つも無く、どちらも実行でき
-        る内容が無い状態で活性が食い違って見えていた。表の再構築（フィルタ）と
+        「タグ 0 件でクリップボードを空文字に上書きする」副作用を防ぐ無効化を
+        「タグをすべてコピー」だけに掛けると、どちらも実行できる内容が無い状態で
+        2 つの活性が食い違って見える。表の再構築（フィルタ）と
         選択変更の両方からここへ集約する。
         """
         copy_all = getattr(self, "_copy_all_btn", None)
@@ -1056,7 +1037,7 @@ class DetailWindow(QDialog):
             if self._tag_table.item(r, 0) is not None
         ]
         # タグ 0 件でクリップボードを空文字で上書きしない（別作業のコピー内容が
-        # 無言で消える回復不能な副作用 — UIレビュー 07-25 #43）。ボタン自体も
+        # 無言で消える回復不能な副作用）。ボタン自体も
         # 無効化しているが、ショートカット等の別経路のための最終ガード。
         if not names:
             return

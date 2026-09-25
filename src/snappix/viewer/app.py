@@ -27,8 +27,7 @@ _CRASH_LOG_MAX_BYTES = 1_000_000
 #: code 0x…`` / ``… access violation`` / ``Fatal Python error: …`` の 2 系統が
 #: あり、クラッシュログのトリアージ（目視でも grep でも）はこの行を数える。
 #:
-#: **注記・コメント・ログ文言にこの綴りをそのまま書かないこと**（issue #136
-#: の再発）。1 回でも書くと、クラッシュが 0 件のセッションでも
+#: **注記・コメント・ログ文言にこの綴りをそのまま書かないこと**。1 回でも書くと、クラッシュが 0 件のセッションでも
 #: ``viewer_crash.log`` に必ずこの綴りが載り、``grep`` が常にヒットする＝
 #: このファイルの唯一の価値である**信号の純度**が消える。コードを名指し
 #: したいときは :func:`_benign_fault_note_lines` のように裸のコード
@@ -41,12 +40,12 @@ FAULT_RECORD_PREFIXES = ("Windows fatal exception", "Fatal Python error")
 #: の**唯一の接点**。見出しは :func:`_session_header_line` だけが組み立て、
 #: パーサはこの定数しか知らない — 書式契約を 1 箇所に閉じておかないと、
 #: 見出しの体裁を変えた日に要約が黙って「セッション境界が 1 つも無いログ」
-#: として全文集計へ落ちる（＝ issue #136 の累積ラッチが戻る）。
+#: として全文集計へ落ち、過去の 1 件が以後ずっと警告され続ける。
 CRASH_LOG_SESSION_PREFIX = "=== session start "
 
 #: faulthandler が ``Windows fatal exception: code <hex>`` として記録するが、
 #: 実際には発生元（COM ランタイム）の内側で処理され、ビューアはそのまま走り
-#: 続ける SEH コード（issue #136）。コード → 良性である理由。
+#: 続ける SEH コード。コード → 良性である理由。
 #:
 #: CPython の faulthandler は Windows で vectored exception handler を張り、
 #: 重大度ビット（0x80000000）が立つコードを一律「fatal exception」として
@@ -84,8 +83,7 @@ def _benign_fault_note_lines() -> list[str]:
     注記は良性コードを**裸の数値で**名指しし、
     :data:`FAULT_RECORD_PREFIXES` の綴りは決して含めない — 含めると
     「クラッシュ 0 件のセッションでも grep が必ずヒットする」形になり、
-    直そうとした信号の濁りを自分で作ってしまう（issue #136 のレビュー
-    指摘）。
+    信号の濁りを自分で作ってしまう。
     """
     return [
         "# note: SEH {} is benign, not a crash - {}".format(code, why)
@@ -169,7 +167,7 @@ def summarize_crash_log(text: str) -> CrashLogSummary:
     累計も併せて返す（サポートで「過去に何回あったか」を見たいときのため）
     が、**警告に使ってよいのは直近セッション分だけ**。
 
-    純粋関数（本文 → 件数）にしてあるのは、これが issue #136 の**読み取り
+    純粋関数（本文 → 件数）にしてあるのは、これがクラッシュログの**読み取り
     側**の実体だからで、置き場所（起動時のログ要約か、将来の診断ダイアログ
     か）に依存しない形で検証できるようにするため。
     """
@@ -181,7 +179,7 @@ def summarize_crash_log(text: str) -> CrashLogSummary:
 def _report_previous_crash_records(trace_path: Path) -> None:
     """既存の ``viewer_crash.log`` を要約して**ビューアログ**へ 1 行出す。
 
-    issue #136 の対応案 2（読み取り側）を、UI を増やさずに成立させるための
+    クラッシュログの読み取り側を、UI を増やさずに成立させるための
     経路。注記行だけでは「人間が crash log を開いたときの誤読」しか防げず、
     「クラッシュしたのか？」という問いに機械的に答えられない（良性の SEH は
     faulthandler が実際にレコードを書くので、綴りを grep すれば当たる）。
@@ -227,7 +225,7 @@ def _enable_crash_dumps(trace_path: Path) -> None:
     トレースバックを *trace_path* へ常時ダンプできるようにする。
 
     凍結ビルドは PyInstaller windowed（コンソール無し）で stderr が無く、
-    ネイティブ abort（issue #111 の 0xc0000409 等）はビューアログに一切
+    ネイティブ abort（0xc0000409 等）はビューアログに一切
     痕跡を残さず消える。faulthandler をログフォルダのファイルへ向けて
     おけば、abort() / アクセス違反系の少なくとも一部で「どの Python
     フレームに居たか」が残る（__fastfail 直行など捕まらない種別もある）。
@@ -240,7 +238,7 @@ def _enable_crash_dumps(trace_path: Path) -> None:
 
     このファイルの価値は「何か書かれていたらネイティブ級のクラッシュが
     あった」という信号の純度にあるが、faulthandler は COM が内部で処理する
-    良性の SEH（0x8001010d 等）まで拾ってしまう（issue #136）。faulthandler
+    良性の SEH（0x8001010d 等）まで拾ってしまう。faulthandler
     側でフィルタはできないので、両側から打ち消す:
 
     * **書き手側** — 見出しの直後に :data:`BENIGN_FAULT_CODES` の注記を書く
@@ -351,10 +349,10 @@ def _env_flag(name: str) -> bool:
     and the usual negative spellings mean "off"; anything else means "on"
     (so the documented ``=1`` keeps working, as does bare ``=true``).
 
-    Used for **every** viewer-side ``SNAPPIX_*`` switch, not just the one
-    that had the reported bug: ``SNAPPIX_VIEWER_TRACE=0`` sat on the same
-    trap (it would have enabled the freeze trace), and leaving one caller
-    on the old spelling is how the pair drifts apart again.
+    Used for **every** viewer-side ``SNAPPIX_*`` switch, not just one:
+    ``SNAPPIX_VIEWER_TRACE=0`` sits on the same trap (it would enable the
+    freeze trace), and leaving one caller on a separate spelling is how the
+    pair drifts apart.
     """
     value = os.environ.get(name)
     if value is None:
@@ -376,10 +374,10 @@ def _folder_to_report(target: str) -> str:
     判定はまず**既知のパス集合との照合**で行う: ``get_paths(ensure=False)``
     が返す base / data / logs / library（と base の祖先 — ``mkdir(parents=
     True)`` の失敗点になり得る）はフォルダ、logs の直下はログファイル。
-    拡張子の有無だけで見る従来のヒューリスティックは「ドットを含み、かつ
+    拡張子の有無だけで見るヒューリスティックは「ドットを含み、かつ
     **まだ作られていない**ベースフォルダ」（``D:\\Snappix.v1`` へ初めて展開
     して mkdir 自体が失敗）で ``is_dir()`` が偽になり、親（``D:\\``）を案内
-    していた（issue #130-7）。既知集合に無い未知のパスに限り、従来の
+    してしまう。既知集合に無い未知のパスに限り、
     「拡張子あり かつ 実在フォルダでない → 親」へ落とす。
     """
 
@@ -409,7 +407,7 @@ def _folder_to_report(target: str) -> str:
 
 
 def _fail_unwritable_base(exc: OSError) -> int:
-    """書き込み不可による起動失敗を可視化して終了する（項目#79）.
+    """書き込み不可による起動失敗を可視化して終了する.
 
     ``get_paths()``（既定 ``ensure=True``）は data / logs / library を
     mkdir する。ポータブル配布を C:\\Program Files 配下へ展開して標準
@@ -421,9 +419,8 @@ def _fail_unwritable_base(exc: OSError) -> int:
     QApplication を生成して i18n 済みモーダルを出し、原因パスを明示して
     終了する（stderr のログにも残す — dev 実行 / コンソール付き起動用）。
 
-    **``setup_logging`` の失敗もここへ来る**（レビュー 2026-08-30）: ログ
-    シンクの確立は同じ「書き込めない」失敗クラスで、しかも同じく無言終了
-    になる経路だった。その場合 ``exc.filename`` はフォルダではなく
+    **``setup_logging`` の失敗もここへ来る**: ログシンクの確立は同じ
+    「書き込めない」失敗クラスで、しかも同じく無言終了になる経路。その場合 ``exc.filename`` はフォルダではなく
     ログ**ファイル**（``…/data/logs/viewer_<pid>.log``）なので、案内には
     親フォルダを出す — モーダル文言が「このフォルダ」と言うため。
     """
@@ -468,13 +465,24 @@ def _fail_unwritable_base(exc: OSError) -> int:
     return 1
 
 
-# B05 / L02 の起動プローブ本体は path_probe.probe_path_kind へ共通化された
-# （項目#109 — ブックマークジャンプと共有）。旧名は起動経路の呼び出しと
-# テストの互換のため残す。
+# 起動プローブの本体は path_probe.probe_path_kind（ブックマークジャンプと
+# 共有）。この名前は起動経路の呼び出しとテストの互換のため残す。
 def _probe_path_kind(path_str: str, timeout: float = 2.0) -> str | None:
     from .path_probe import probe_path_kind
 
     return probe_path_kind(path_str, timeout)
+
+
+def _is_resumable_root(last_root: str) -> bool:
+    """前回の ``last_root`` を再開位置に使ってよいか.
+
+    ZIP ドリルインの展開先（閉じると消える ``data/tmp`` 配下）は再開位置に
+    しない — 旧版が書いた値や掃除に失敗して残った展開先で起動すると、
+    ↑ でアプリ自身の ``data/`` が見えてしまう。既定ライブラリで開く。
+    """
+    from .locations import is_zip_temp_path
+
+    return bool(last_root) and not is_zip_temp_path(last_root)
 
 
 def main(initial_root: str | None = None, *, no_plugins: bool = False) -> int:
@@ -501,10 +509,10 @@ def main(initial_root: str | None = None, *, no_plugins: bool = False) -> int:
         # 凍結ビルドは stderr が無い）。
         setup_logging(log_file=paths.logs / "viewer.log")
     except OSError as exc:
-        # 項目#79: 書き込めない場所へ展開された（Program Files / 書込保護
+        # 書き込めない場所へ展開された（Program Files / 書込保護
         # メディア等）。無言終了ではなくモーダルで案内して終了する。
         return _fail_unwritable_base(exc)
-    # ネイティブ級クラッシュの常時ダンプ（issue #111 — windowed 凍結ビルドは
+    # ネイティブ級クラッシュの常時ダンプ（windowed 凍結ビルドは
     # stderr が無く、abort 系がログ痕跡ゼロで消える）。ファイル名は logging の
     # _prune_stale_logs 対象外（viewer_<pid>.log 形式でない）なので消されない。
     _enable_crash_dumps(paths.logs / "viewer_crash.log")
@@ -569,9 +577,10 @@ def main(initial_root: str | None = None, *, no_plugins: bool = False) -> int:
             )
 
     # A file pre-selected on startup when the launch argument was a file path
-    # (Explorer folder-drop of a file / association) — L02.  Resolved below and
+    # (Explorer folder-drop of a file / association).  Resolved below and
     # handed to ViewerWindow, which selects the tile once the parent populates.
     initial_select: Path | None = None
+    missing_root: str | None = None  # 見つからなかった行き先（show 後に知らせる）
     if initial_root:
         target = Path(initial_root)
         kind = _probe_path_kind(str(target))
@@ -580,18 +589,20 @@ def main(initial_root: str | None = None, *, no_plugins: bool = False) -> int:
             initial_select = target
             root = target.parent
         elif kind == "missing":
+            missing_root = str(target)
             root = paths.library
         else:
             # "dir" or a timeout (None): assume a directory and open it; the
             # async scan surfaces any real failure with the 再試行 card.
             root = target
-    elif state.last_root:
+    elif _is_resumable_root(state.last_root):
         # ``is_dir`` on an offline / sleeping NAS share can block for tens of
         # seconds — before the window even shows (B05).  Probe with a hard
         # timeout on a worker thread: a definite "not a directory" falls back
         # to the library; a TIMEOUT (share still waking) keeps the last root
         # and lets the async scan surface the error card + 再試行 instead.
         if _probe_path_kind(state.last_root) in ("file", "missing"):
+            missing_root = state.last_root
             root = paths.library
         else:
             root = Path(state.last_root)
@@ -602,10 +613,10 @@ def main(initial_root: str | None = None, *, no_plugins: bool = False) -> int:
     app.setApplicationName("Snappix Viewer")
     app.setOrganizationName("snappix")
 
-    # Qt's own dialog strings (QMessageBox の はい/いいえ, QFileDialog の
-    # 列見出し・ボタン, QInputDialog の OK/Cancel) come from Qt's resources,
+    # Qt's own dialog strings (QMessageBox の はい/いいえ, standard buttons,
+    # QInputDialog の OK/Cancel) come from Qt's resources,
     # not our catalog — without this they stay English on an otherwise
-    # Japanese product (UIレビュー 2026-08-28 N-01).  Installed after
+    # Japanese product.  Installed after
     # set_locale (above) and before any window / dialog is constructed, since
     # Qt resolves translations at widget construction time.  A missing .qm
     # (mangled install) degrades to English rather than blocking startup.
@@ -628,7 +639,7 @@ def main(initial_root: str | None = None, *, no_plugins: bool = False) -> int:
     apply_theme(state.theme)
     if not require_consent():
         # Say why the app is exiting — a silent vanish before any window has
-        # been shown reads as a crash (UIレビュー #1).
+        # been shown reads as a crash.
         from ..common.terms_dialog import notify_declined
 
         notify_declined()
@@ -642,7 +653,7 @@ def main(initial_root: str | None = None, *, no_plugins: bool = False) -> int:
     # プラグインコードを 1 行も実行しない。
     if plugins_disabled:
         logger.info("plugins disabled (safe mode)")
-        # ログだけでは気づけない (UIレビュー 2026-08-28 N-149) — 常時見える
+        # ログだけでは気づけない — 常時見える
         # タイトルバーにも出す。
         win.set_safe_mode(True)
     else:
@@ -659,10 +670,28 @@ def main(initial_root: str | None = None, *, no_plugins: bool = False) -> int:
     win.show()
     if plugins_disabled:
         # タイトルの「（セーフモード）」の説明は show の**後**に出す
-        # （UIレビュー 09-11 N-154 — 可視化前だとトーストの席がずれる）。
+        # （可視化前だとトーストの席がずれる）。
         win.notify_safe_mode()
+    if missing_root is not None:
+        # 無言で初期フォルダに落ちると「開く」が壊れたように見える。
+        from ..common.i18n import t
+
+        win._show_toast(
+            t("viewer.bookmark_dialog.folder_not_found", path=missing_root),
+            "warning",
+            duration_ms=0,
+            action_text=t("viewer.main_window.folder_not_found_open_other"),
+            on_action=win._pick_root,
+        )
     logger.info("snappix-viewer started. Root: {}", root)
-    return app.exec()
+    code = app.exec()
+    # 窓じまいで予算内に空かなかったワーカープール（死んだ共有の I/O で止まって
+    # いる）が残っていれば、その I/O タイムアウトを待たずにここで終わる。
+    # 残っていなければ何もしない（``pool_teardown`` の docstring 参照）。
+    from .pool_teardown import exit_if_pools_stranded
+
+    exit_if_pools_stranded(code)
+    return code
 
 
 if __name__ == "__main__":

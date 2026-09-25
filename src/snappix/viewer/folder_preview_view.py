@@ -3,8 +3,9 @@
 Shown when a single-click / scroll lands on a folder entry in the right
 pane *without* drilling into it.  All disk I/O — directory scan, ``post.md``
 parse, image decode — runs off the GUI thread (the injected
-``ThumbnailLoader`` for child tiles, this view's own
-:class:`~._runnable.GuardedStream` for the rest) so the GUI never freezes
+``ThumbnailLoader`` for child tiles, an embedded :class:`~.image_view.
+ImageView` for the centre image, this view's own
+:class:`~._runnable.GuardedStream` for the scan) so the GUI never freezes
 while a slow NAS folder loads.
 
 The child grid is a :class:`gallery_view.GalleryView` in square-grid mode —
@@ -14,7 +15,7 @@ re-implemented on a raw ``QListWidget`` (whose ``setUniformItemSizes``
 promise this view used to depend on, with undefined behaviour whenever the
 per-item geometry drifted).
 
-Thumbnail data flow (項目#14):
+Thumbnail data flow:
 
 * **Child tiles** go through an injected :class:`~.thumbnail_loader.
   ThumbnailLoader` (``ViewerWindow`` builds a small dedicated instance —
@@ -22,14 +23,16 @@ Thumbnail data flow (項目#14):
   ``ContentView.set_folder_thumbnail_loader``).  That buys the persistent
   disk-cache tier (a session revisit paints from local disk instead of
   re-reading the NAS), a bounded 2-worker pool, queue cancellation on
-  folder switch, and the closeEvent drain — none of which the old
-  view-local ``QThreadPool.globalInstance()`` decode had.
-* **The centre image** stays view-local: its decode target is the label's
-  resolution (up to native 8000px), which doesn't fit the loader's
-  disk-cache tiers.  It shares this view's :class:`~._runnable.GuardedStream`
-  (2 threads) with the directory scan, so a folder switch drops the queued
-  stale decodes and trips the running one in a single ``cancel()``, plus the
-  byte-budgeted LRU for instant revisits.
+  folder switch, and the closeEvent drain — none of which a view-local
+  ``QThreadPool.globalInstance()`` decode would give.
+* **The centre image** is a third :class:`~.image_view.ImageView`
+  instance (the lightbox's reuse shape: control bar off), not a hand-rolled
+  label: a private ``QLabel`` + QImage LRU + hand-written DPR / no-upscale /
+  failure display would duplicate ImageView and drift from it one side at
+  a time.  Embedding ImageView makes superseding decode, the error card, F03, DPR
+  and the settings-wired cache budget (``ContentView`` fans
+  ``image_view.apply_state`` out to this instance too) the same code as
+  the centre preview's.
 """
 
 from __future__ import annotations
@@ -38,88 +41,51 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, assert_never, cast
 
 from loguru import logger
-from PySide6.QtCore import (
-    QEvent,
-    QSize,
-    Qt,
-    Signal,
-)
-from PySide6.QtGui import (
-    QIcon,
-    QImage,
-    QPixmap,
-)
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QFrame,
     QLabel,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from ..common.i18n import t
 from ..common.ui import FONT_BODY_PT, FONT_SUBTITLE_PT, hint_style
-from ..common.ui.timers import DebounceMode, Debouncer
 from ._runnable import GuardedStream, StreamJob, StreamOutcome
 from .children_grid import build_tile
 from .edge_nav import navigate_on_wheel
 from .folder_scan import (
     IMAGE_SUFFIXES,
+    next_representative,
     read_folder_preview_checked,
     scan_children,
 )
 from .gallery_view import GalleryView, Tile
-from .image_cache import BoundedImageCache
+from .image_view import ImageView
 from .justified_layout import LayoutParams
-from . import view_prefs
-from .qimage_decode import (
-    decode_qimage_bytes,
-    image_size_from_bytes,
-    read_file_bytes,
-)
+from .representative_fallback import RepresentativeFallback
 
 if TYPE_CHECKING:  # annotation only — no runtime dependency edge
     from .thumbnail_loader import ThumbnailLoader
 
 
-# In-memory decoded-thumbnail LRU budget for the folder preview.
-#
-# NOTE (tuning point): these are *not* wired to ViewerState / the settings
-# dialog the way ImageView / MarkdownView caches are (their reconfigure_cache
-# is driven from apply_cache_settings).  ``folder_preview_cache_max_mib`` in
-# state.py is a *different* cache — the on-disk folder-resolution/metadata DB
-# (folder_preview_cache.py) — not this in-memory QImage LRU.  Adding a UI knob
-# is blocked here because settings_dialog.py is out of scope; promoting the
-# budget to module level (from the old class constants) at least makes it a
-# single documented place to adjust, and lowers the default from 512 MiB so
-# that, combined with the ImageView / MarkdownView LRUs, resident memory stays
-# bounded even when the folder preview is used heavily.  Wiring a proper
-# ViewerState field + FolderPreviewView.apply_settings(state) (BoundedImageCache
-# .reconfigure) is left as a future task (see review finding #160).
-_FOLDER_PREVIEW_CACHE_MAX_BYTES = 256 * 1024 * 1024
-_FOLDER_PREVIEW_CACHE_MAX_ENTRIES = 96
-_FOLDER_PREVIEW_CACHE_MAX_SINGLE_BYTES = 128 * 1024 * 1024
-
-
-#: フォルダプレビューの off-thread 仕事の結末（走査 2 種 + 中央画像 2 種）。
-#: 1 本のストリームに同居させるので ``kind`` で畳む:
+#: フォルダプレビューの off-thread 仕事の結末（走査 2 種 + 次候補探索）:
 #:
 #: * ``scan`` — ``(thumb_path: Path | None, entries: list[FolderEntry])``
 #: * ``scan_failed`` — エラーメッセージ
-#: * ``thumb`` — ``(QImage, Path, target_px, is_native)``。``Path`` を載せる
-#:   のは、走行中にタイルクリックで中央画像が切り替わった場合に GUI が
-#:   取り違えないため。``target_px`` はキャッシュが同じパスの複数品質を
-#:   比べるため。``is_native`` は「要求サイズ以下の原寸をそのまま使った」
-#:   ことを表し、真なら将来どの要求も再デコードで良くならない = この
-#:   エントリで必ず足りる（原寸を覚えずに同じ判断ができる）。
-#: * ``thumb_failed`` — ``Path``。中央ラベルが古いプレースホルダのまま
-#:   固まらないよう、失敗も必ず着地させる。
+#: * ``fallback`` — ``found: Path | None``。代表画像のデコード失敗
+#:   （``ImageView.load_failed``）を受けて ``next_representative`` で探した次候補。
 #:
 #: 子タイルのデコードはここを通らない — 注入された
 #: :class:`~.thumbnail_loader.ThumbnailLoader` の ``loaded`` / ``failed``
-#: をビューが直接受ける（項目#14）。
-_PreviewKind = Literal["scan", "scan_failed", "thumb", "thumb_failed"]
+#: をビューが直接受ける。中央画像のデコードは埋め込んだ
+#: :class:`~.image_view.ImageView` の自前ストリームが持つ。
+_PreviewKind = Literal["scan", "scan_failed", "fallback"]
 
 
 def _scan_folder_preview(job: StreamJob, folder: Path) -> StreamOutcome | None:
@@ -130,7 +96,7 @@ def _scan_folder_preview(job: StreamJob, folder: Path) -> StreamOutcome | None:
     cache.  Any error is reported as ``scan_failed`` so the GUI can
     fall back gracefully on permission / network failures.
 
-    協調キャンセル（項目#136）: フォルダ切替と窓の close でストリームが
+    協調キャンセル:フォルダ切替と窓の close でストリームが
     ``cancel`` され、走行中の scandir / post.md 読みが**次のチェックポイント
     で**止まる。これが無いと ``QThreadPool`` のデストラクタが走行中の
     runnable を無期限に待ち、到達不能な NAS を選んだ直後に閉じるとプロセス
@@ -157,44 +123,12 @@ def _scan_folder_preview(job: StreamJob, folder: Path) -> StreamOutcome | None:
     return StreamOutcome("scan", (thumb_path, entries))
 
 
-def _load_main_thumb(
-    job: StreamJob, path: Path, target_px: int,
+def _find_next_representative(
+    job: StreamJob, folder: Path, skip: frozenset[Path],
 ) -> StreamOutcome | None:
-    """Decode + pre-scale the CENTRE image off the GUI thread (純関数).
-
-    ``QImage`` is the cross-thread payload — converting to ``QPixmap`` is
-    reserved for the GUI thread per the viewer-tree invariant documented in
-    CLAUDE.md.  Every failure path returns ``thumb_failed`` so the centre
-    label settles instead of showing a stale placeholder forever.
-
-    未着手のまま窓が閉じた分はここで降りる（項目#136）— デコードそのものは
-    分割できないので、止められるのは開始前だけ。
-    """
-    if job.cancel.is_cancelled():
-        return None
-    failed = StreamOutcome("thumb_failed", path)
-    try:
-        # Bytes-first read + Pillow-first decode (see qimage_decode):
-        # fixes SMB/CJK paths and keeps the GIL released during the
-        # decode.  One read serves both the size probe and the decode.
-        data = read_file_bytes(path)
-        if data is None:
-            return failed
-        wh = image_size_from_bytes(data, path)
-        will_downscale = wh is not None and (
-            wh[0] > target_px or wh[1] > target_px
-        )
-        target = QSize(target_px, target_px) if will_downscale else None
-        image = decode_qimage_bytes(data, path, target_size=target)
-    except Exception as exc:  # noqa: BLE001 — worker boundary
-        logger.warning("Folder preview thumb failed for {}: {}", path, exc)
-        return failed
-    if image is None or image.isNull():
-        return failed
-    # ``is_native`` is True when no downscaling happened — the source
-    # is at or below the requested target, so this entry already
-    # contains every pixel the file can ever give us.
-    return StreamOutcome("thumb", (image, path, target_px, not will_downscale))
+    """デコードできなかった代表画像を除いた次の候補を探す (純関数)."""
+    found = next_representative(folder, skip, job.cancel.is_cancelled)
+    return None if job.cancel.is_cancelled() else StreamOutcome("fallback", found)
 
 
 class FolderPreviewView(QWidget):
@@ -204,32 +138,29 @@ class FolderPreviewView(QWidget):
     entry, *without* drilling into it.  Double-click is the only path that
     still triggers root navigation (see ``main_window.py``).
 
-    All disk I/O — directory scan, ``post.md`` parse, image decode — runs
-    off the GUI thread so the GUI never freezes while a slow NAS folder
-    loads: child-tile thumbnails via the injected ``ThumbnailLoader``
-    (:meth:`set_thumbnail_loader`, 項目#14 — cancellable pending queue +
-    persistent disk cache), the directory scan and the centre decode on a
-    dedicated :class:`~._runnable.GuardedStream` owned by this view.  Both
-    are submitted *additively* (``submit_batch``) because they share one
-    stream: a superseding submit would silently drop the sibling work
-    already queued on it (see :meth:`_submit_main_thumb`).  Folding is the
-    job of :meth:`set_folder` / :meth:`clear` / :meth:`shutdown`, whose
-    ``cancel`` drops the queued work, trips the session's ``CancelToken``
-    (the scan passes it on as ``should_cancel``, the centre decode reads
-    ``job.cancel`` directly) and moves the generation on so results of
-    already-*running* workers are discarded.
+    The centre is a stack of two pages — the embedded :class:`ImageView`
+    (every image state: placeholder, decode, fit, error card) and a single
+    notice label (scanning / no thumbnail / non-image / scan failure).
+    Which one is current *is* the centre's display state, so no repaint
+    path can resurrect a stale pixmap over a notice.
+
+    The directory scan and the representative fallback probe share one
+    superseding :class:`~._runnable.GuardedStream` owned by this view;
+    :meth:`set_folder` / :meth:`clear` / :meth:`shutdown` fold it (queued
+    work dropped, the running scan told to bail via ``job.cancel``).
 
     Wheel handling: the internal child grid consumes wheel notches itself
-    (``GalleryView.wheelEvent`` accepts them), so ``navigate_requested``
-    only ever comes from the surrounding chrome — see :meth:`wheelEvent`,
-    which routes that case through ``edge_nav.navigate_on_wheel``.
+    (``GalleryView.wheelEvent`` accepts them) and the centre ImageView
+    turns a fit-mode wheel into ``navigate_requested``, so this
+    view's own :meth:`wheelEvent` only sees the surrounding chrome — routed
+    through ``edge_nav.navigate_on_wheel``.
     """
 
     navigate_requested = Signal(int, bool)  # (delta, immediate)
 
     _MAX_CHILDREN = 60
     _CHILD_ICON_PX = 96  # logical pixels — DPR applied at decode time
-    # Loader-key namespace for child-tile requests (項目#14).  The loader
+    # Loader-key namespace for child-tile requests.  The loader
     # instance is dedicated to this view today, but the prefix keeps its
     # keys collision-free if it is ever shared (same pattern as the
     # lightbox filmstrip's "lightbox:<id>:" prefix).
@@ -242,29 +173,18 @@ class FolderPreviewView(QWidget):
     # Caption strip under each child tile (two elided lines à la the main
     # grid panes; the tooltip carries the full path).
     _CHILD_CAPTION_H = 32
-    # Centre thumbnail decode floor: even when the widget hasn't been
-    # laid out yet, never decode below this (covers the case where the
-    # view is built off-screen and queried before showEvent).  The
-    # actual target is computed dynamically from
-    # ``thumb_label.size() × dpr`` once the widget has geometry, and
-    # the cache logic upgrades to higher resolutions on demand.
-    _MAIN_TARGET_PX_FLOOR = 1024
-    # Byte-budgeted LRU cache.  At 4K resolution a single QImage can be
-    # 50–75 MB so a count-only cap is the wrong abstraction — re-use
-    # the project's :class:`BoundedImageCache` instead.  Budgets live at
-    # module level now (see the ``_FOLDER_PREVIEW_CACHE_*`` docstring for
-    # why they aren't settings-wired yet).
-    _CACHE_MAX_BYTES = _FOLDER_PREVIEW_CACHE_MAX_BYTES
-    _CACHE_MAX_ENTRIES = _FOLDER_PREVIEW_CACHE_MAX_ENTRIES
-    _CACHE_MAX_SINGLE_BYTES = _FOLDER_PREVIEW_CACHE_MAX_SINGLE_BYTES
+    # 走査中に通知ページへ出す種アイコン（右一覧の行アイコン）の上限（論理
+    # px）。``QIcon.pixmap`` は元より大きくしないので、通知ラベルの中で
+    # 拡大表示されることは無い — 描き直しの経路も持たない静止画。
+    _SEED_NOTICE_PX = 192
+    # ImageView の即時プレースホルダ（``set_thumbnail_provider``）へ渡す種の
+    # 取り出しサイズ。ImageView がビューポートへ合わせて描くので大きめに。
+    _SEED_PLACEHOLDER_PX = 1024
     # Splitter starts biased toward the centre thumbnail so the
     # enlarged-by-default behaviour matches "プレビュー時の中央画像を
     # 拡大できるようにしてください"; the user can still drag the handle
     # to give the children grid more space.
     _SPLITTER_INITIAL_RATIO: tuple[int, int] = (2, 1)  # thumb : grid
-    # How long the splitter / window must be still before we issue an
-    # upgrade decode request — matches the ImageView LANCZOS debounce.
-    _REDECODE_DEBOUNCE_MS = 200
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -273,75 +193,26 @@ class FolderPreviewView(QWidget):
         # the same folder is allowed to retry (the idempotency guard would
         # otherwise leave the "読み込み失敗" state stuck forever).
         self._last_scan_failed: bool = False
-        # Representative images whose decode failed in THIS folder session
-        # (09-03 #197).  The thumb cache only remembers successes, so without
-        # this every splitter drag / resize / show re-queued the same doomed
-        # decode through the debounce timer — a NAS round-trip plus a worker
-        # slot each time, on exactly the files that are slowest to fail.
-        # Cleared whenever the folder actually changes (``set_folder`` past
-        # its idempotency guard) or the view is cleared, so re-entering the
-        # folder always re-validates a file that may have been replaced.
-        # Keyed by ``str(path)`` to avoid Path comparison differences.
-        self._failed_thumb_paths: set[str] = set()
-        self._main_thumb_path: Path | None = None
-        self._main_thumb_source: QPixmap | None = None
-        # Injected child-tile loader (項目#14).  ``None`` until the host
+        # この画面が**自分で選んだ**中央画像（走査の代表 / その次候補 =
+        # ``shown``）と、デコードに失敗した候補。中央プレビューと同じ帳簿で、
+        # タイルで選んだ画像は ``shown`` に入れない（黙って差し替えない）。
+        # フォルダ切替 / クリアで忘れる（差し替えられたファイルを再検証する）。
+        self._fallback = RepresentativeFallback()
+        # ``set_folder(placeholder_icon=…)`` の種（右一覧の行アイコン）。
+        # 走査が選んだ代表の即時プレースホルダとして ImageView へ渡す。
+        self._seed: QPixmap | None = None
+        # Injected child-tile loader.  ``None`` until the host
         # threads one in (``ContentView.set_folder_thumbnail_loader``);
         # without it child tiles settle on their static placeholder glyph
         # instead of decoding (a standalone view never blocks on C03 dots).
         self._child_loader: "ThumbnailLoader | None" = None
-        # Dedicated stream for the directory scan + centre decode (項目#14).
-        # Owning it (instead of ``QThreadPool.globalInstance()``) makes
-        # queued stale work cancellable on a folder switch and stops these
-        # tasks from crowding out the lightweight probes that share the
-        # global pool.  2 threads: one scan + one decode can overlap,
-        # mirroring the old effective concurrency.
-        #
-        # 投入は**加算的**（``submit_batch``）— 走査の着地が中央画像の
-        # デコードを積み、タイルクリックとリサイズ後の高解像度化も積み足す。
-        # 世代を畳むのは :meth:`set_folder` / :meth:`clear` /
-        # :meth:`shutdown` の ``cancel`` だけで、それが同時に「キュー待ちを
-        # 捨てる」「走行中の scandir / post.md 読みへ降りるよう伝える」の
-        # 両方を担う（項目#136 — 走行中を止められないと ``~QThreadPool`` が
-        # 無期限に待ち、到達不能な NAS を選んだ直後に閉じるとプロセス終了が
-        # SMB タイムアウトぶん遅れる）。
-        self._stream = GuardedStream(self, max_threads=2)
+        # 走査と次候補探索の専有ストリーム。どちらも
+        # 「今のフォルダの最新の 1 本」だけが要るので追い越し投入
+        # （``submit_job``）。``QThreadPool.globalInstance()`` を使わないのは、
+        # フォルダ切替でキュー待ちを捨て、到達不能 NAS の走行中 scandir へ
+        # 降りるよう伝えられるようにするため（``~QThreadPool`` の無期限待ち）。
+        self._stream = GuardedStream(self)
         self._stream.bind(self._on_preview_landed)
-        # Path → (QImage, target_px, is_native) byte-budgeted LRU cache
-        # for the CENTRE image (child tiles cache inside the injected
-        # loader since 項目#14).  Persists across folder switches so
-        # re-visiting a folder (or scrolling back through the right pane)
-        # restores the centre thumbnail instantly without re-decoding.
-        # Keyed on the *string* form of Path so equality is the same as
-        # ``Path(str(p)) == p`` would give on every platform.
-        #
-        # The ``target_px`` tag tells us at what request size the entry
-        # was decoded — a future request at ≤ that size can re-use it.
-        # The ``is_native`` flag tells us the source was natively at or
-        # below the requested target (no downscale happened), in which
-        # case any future request is already satisfied regardless of
-        # size.
-        self._thumb_cache: BoundedImageCache[tuple[QImage, int, bool]] = (
-            BoundedImageCache(
-                max_bytes=self._CACHE_MAX_BYTES,
-                max_entries=self._CACHE_MAX_ENTRIES,
-                max_single_bytes=self._CACHE_MAX_SINGLE_BYTES,
-                sizeof=lambda v: v[0].sizeInBytes(),
-            )
-        )
-        # Debounce upgrades when the splitter is being dragged or the
-        # window resized — every motion fires resize events, but we
-        # only want to spawn a high-res worker once the user pauses.
-        self._redecode_timer = Debouncer(
-            self,
-            self._REDECODE_DEBOUNCE_MS,
-            self._maybe_upgrade_main_thumb,
-            mode=DebounceMode.TRAILING,
-        )
-        # ``shutdown`` の 2 層目（``ChildrenGrid`` と同じ形）。タイマーを止めた
-        # あとに再武装させる経路（showEvent / DPR 変化 / ラベルのリサイズ）が
-        # 3 本あるので、止めるだけでは掃いたプールへ新しいデコードが戻る。
-        self._shutdown = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -354,19 +225,25 @@ class FolderPreviewView(QWidget):
         self._title.setWordWrap(True)
         layout.addWidget(self._title)
 
-        # ----- Centre thumbnail (top half of the splitter) ----------------
-        self._thumb_label = QLabel()
-        self._thumb_label.setAlignment(Qt.AlignCenter)
-        self._thumb_label.setMinimumHeight(120)
-        self._thumb_label.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding
-        )
-        self._thumb_label.setStyleSheet(hint_style())
-        # The pixmap is rescaled whenever the label's size changes so a
-        # splitter drag (or window resize) keeps the centre thumb filling
-        # the available area.  An event filter is the cleanest hook —
-        # QLabel doesn't expose a resized() signal.
-        self._thumb_label.installEventFilter(self)
+        # ----- Centre (top half of the splitter) ---------------------------
+        # ライトボックスと同じ再利用形の ImageView（ホバーカプセルは出さない
+        # — 前後送りは右一覧の選択が担い、この面は読むだけのプレビュー）。
+        self._image = ImageView()
+        self._image.setFrameShape(QFrame.NoFrame)
+        self._image.set_control_bar_enabled(False)
+        self._image.set_thumbnail_provider(self._placeholder_for)
+        self._image.navigate_requested.connect(self._on_image_navigate)
+        self._image.load_failed.connect(self._on_image_load_failed)
+        self._notice = QLabel()
+        self._notice.setAlignment(Qt.AlignCenter)
+        self._notice.setWordWrap(True)
+        self._notice.setStyleSheet(hint_style())
+        self._centre = QStackedWidget()
+        self._centre.setMinimumHeight(120)
+        self._centre.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._centre.addWidget(self._image)
+        self._centre.addWidget(self._notice)
+        self._centre.setCurrentWidget(self._notice)
 
         # ----- Children grid container (bottom half of the splitter) -----
         grid_container = QWidget()
@@ -407,13 +284,13 @@ class FolderPreviewView(QWidget):
         self._grid.selection_changed.connect(self._on_child_selected)
         grid_layout.addWidget(self._grid, 1)
 
-        # ----- Vertical splitter wraps thumb + grid container -------------
+        # ----- Vertical splitter wraps centre + grid container -------------
         # Lets the user drag to enlarge either side; default is biased
         # toward the centre thumbnail per the user's request.
         self._splitter = QSplitter(Qt.Vertical)
         self._splitter.setHandleWidth(6)
         self._splitter.setChildrenCollapsible(False)
-        self._splitter.addWidget(self._thumb_label)
+        self._splitter.addWidget(self._centre)
         self._splitter.addWidget(grid_container)
         # ``setStretchFactor`` governs how *future* resizes redistribute
         # space; ``setSizes`` pins the *initial* split.  Use both so the
@@ -433,8 +310,17 @@ class FolderPreviewView(QWidget):
 
     # ------------------------------------------------------------------ API
 
+    @property
+    def centre_image(self) -> ImageView:
+        """中央画像の :class:`ImageView`（設定の fan-out と書き戻しの配線口）.
+
+        ``ContentView`` が ``image_view.apply_state`` / ``connect_state_writeback``
+        を中央プレビュー・閲覧モードと同じ入口で通すためだけに公開する。
+        """
+        return self._image
+
     def set_thumbnail_loader(self, loader: "ThumbnailLoader | None") -> None:
-        """Inject the shared child-tile :class:`ThumbnailLoader` (項目#14).
+        """Inject the shared child-tile :class:`ThumbnailLoader` .
 
         The host (``ViewerWindow`` → ``ContentView``) hands in a small
         dedicated loader wired to the persistent disk / folder caches.
@@ -466,9 +352,8 @@ class FolderPreviewView(QWidget):
 
         *placeholder_icon* (optional) — a low-resolution thumbnail the
         caller already has on screen (typically the right-pane row's
-        icon).  Painted into the centre immediately so the user never
-        sees an empty preview, and replaced once the high-res decode
-        finishes on a worker thread.
+        icon).  Shown in the centre while the scan runs, then handed to the
+        ImageView as the representative's instant placeholder.
 
         *force* — re-scan even when *folder* matches the current one (e.g.
         an explicit refresh after new files were downloaded into it).
@@ -488,198 +373,174 @@ class FolderPreviewView(QWidget):
             return
 
         # Cancel work for the folder we are leaving: queued child-tile
-        # requests are dropped from the loader (項目#14 — in-flight decodes
+        # requests are dropped from the loader (in-flight decodes
         # can't be pre-empted, but their results land on keys the rebuilt
         # grid no longer holds, so ``set_thumb`` no-ops them).  ストリームの
-        # ``cancel`` はキュー待ちの走査 / 中央デコードを捨て、走行中の 1 本にも
-        # 降りるよう伝える（項目#136 — 結果はどのみち世代で落ちるので、
-        # 続けさせても NAS I/O を無駄に握るだけ）。着地の選別は ``bind`` が
-        # 担うので、スロット側に世代ガードは無い。
+        # ``cancel`` はキュー待ちの走査 / 次候補探索を捨て、走行中の 1 本にも
+        # 降りるよう伝える。中央画像は ``clear_image`` が
+        # ImageView の 3 本のストリームを畳む。
         if self._child_loader is not None:
             self._child_loader.discard_pending_outside(set())
         self._stream.cancel()
+        self._image.clear_image()
 
         self._folder = folder
         self._last_scan_failed = False
-        # New folder (or an explicit refresh): forget which representatives
-        # were unreadable so a replaced / repaired file gets another chance.
-        self._failed_thumb_paths.clear()
-        self._main_thumb_path = None
-        self._main_thumb_source = None
+        self._fallback.restart(folder)
+        self._fallback.shown = None
+        self._seed = None
 
         self._title.setText(folder.name)
         self._title.setToolTip(str(folder))
 
-        # Seed the main thumb with the caller-provided low-res icon (if
-        # any) so the user has something to look at while the high-res
-        # worker runs.  Falls back to the "loading" label otherwise.
+        # 走査中は通知ページに種アイコン（無ければ「読み込み中」）を出す。
+        # 種は ``QIcon.pixmap`` の上限まで — 元より大きくはならず、通知
+        # ラベルはこれを描き直さない（走査の着地がページごと差し替える）。
+        seed_notice = QPixmap()
         if placeholder_icon is not None and not placeholder_icon.isNull():
-            # QIcon.pixmap takes *logical* pixels.  The floor is a sensible
-            # seed — the cached low-res row icon won't be sharper than this
-            # anyway, and the high-res worker upgrades it shortly after.
-            pix = placeholder_icon.pixmap(
-                self._MAIN_TARGET_PX_FLOOR,
-                self._MAIN_TARGET_PX_FLOOR,
+            seed = placeholder_icon.pixmap(
+                self._SEED_PLACEHOLDER_PX, self._SEED_PLACEHOLDER_PX,
             )
-            if not pix.isNull():
-                self._main_thumb_source = pix
-                self._rescale_main_thumb()
-        if self._main_thumb_source is None:
-            self._thumb_label.setPixmap(QPixmap())
-            self._thumb_label.setText(t("common.status.loading"))
+            if not seed.isNull():
+                self._seed = seed
+                seed_notice = placeholder_icon.pixmap(
+                    self._SEED_NOTICE_PX, self._SEED_NOTICE_PX,
+                )
+        if not seed_notice.isNull():
+            self._show_notice_pixmap(seed_notice)
+        else:
+            self._show_notice(t("common.status.loading"))
 
         self._children_label.setText(
             t("viewer.folder_preview_view.children_heading_loading")
         )
         self._grid.clear()
 
-        self._stream.submit_batch(
+        self._stream.submit_job(
             lambda job, f=folder: _scan_folder_preview(job, f)
         )
 
     def clear(self) -> None:
         # ``cancel`` invalidates any in-flight worker result and drops the
-        # queued (not-yet-started) work outright (項目#14 / #136).
+        # queued (not-yet-started) work outright.
         self._stream.cancel()
-        self._redecode_timer.stop()
+        self._image.clear_image()
         if self._child_loader is not None:
             self._child_loader.discard_pending_outside(set())
         self._folder = None
         self._last_scan_failed = False
-        self._failed_thumb_paths.clear()
-        self._main_thumb_path = None
-        self._main_thumb_source = None
+        self._fallback.restart(None)
+        self._fallback.shown = None
+        self._seed = None
         self._title.clear()
         self._title.setToolTip("")
-        self._thumb_label.clear()
-        self._thumb_label.setText("")
+        self._show_notice("")
         self._children_label.setText(t("viewer.folder_preview_view.children_heading"))
         self._grid.clear()
 
-    # ----------------------------------------------------------- LRU cache
+    def suspend_animation(self) -> None:
+        """中央のアニメーション画像を隠れている間だけ止める（:meth:`resume_animation` と対）.
 
-    def _cache_get(
-        self, path: Path,
-    ) -> tuple[QImage, int, bool] | None:
-        """Return ``(image, target_px, is_native)`` for *path*, or ``None``."""
-        return self._thumb_cache.get(str(path))
-
-    def _cache_put(
-        self,
-        path: Path,
-        image: QImage,
-        target_px: int,
-        is_native: bool,
-    ) -> None:
-        """Store *image* under *path*, preferring higher-quality decodes.
-
-        An existing native-resolution entry is never replaced — once we
-        know the source is naturally at-or-below any reasonable request,
-        further decodes can't yield more pixels.  Otherwise the entry
-        with the larger ``target_px`` wins so a later 192-px tile decode
-        doesn't clobber an earlier 2K-pixel centre decode of the same
-        image.
+        このページは離れても ``set_folder`` の同一パス早道で戻る（再表示が
+        ``show_image`` を通らない）ので、``pause_animation`` ではなく
+        退避の対（止めた側が戻す）を使う。
         """
-        key = str(path)
-        existing = self._thumb_cache.get(key)
-        if existing is not None:
-            _, ex_target, ex_native = existing
-            if ex_native:
-                return  # already best-possible
-            if ex_target >= target_px:
-                return  # equal or higher tier already cached
-        self._thumb_cache.put(key, (image, target_px, is_native))
+        self._image.suspend_animation()
 
-    @staticmethod
-    def _cache_satisfies(
-        entry: tuple[QImage, int, bool] | None,
-        required_target_px: int,
-    ) -> bool:
-        """True when *entry* needs no upgrade for a *required_target_px* request."""
-        if entry is None:
-            return False
-        _, target_px, is_native = entry
-        return is_native or target_px >= required_target_px
+    def resume_animation(self) -> None:
+        """:meth:`suspend_animation` が止めた再生だけを再開する."""
+        self._image.resume_animation()
 
-    # --------------------------------------------- target-size resolution
+    def shutdown(self, timeout_ms: int = 2000) -> None:
+        """走行中のプレビュー読みを止めてストリームを有界に空にする.
 
-    def _effective_dpr(self) -> float:
-        """DPR that respects both the widget and its screen.
-
-        ``QWidget.devicePixelRatioF`` returns 1.0 until the widget has
-        actually been mapped to a screen, which would silently make
-        every initial decode soft on HiDPI displays.  Falling back to
-        the screen's own ratio keeps quality correct on the first
-        paint, and harmlessly reports the higher value when both agree.
+        ``ViewerWindow.closeEvent`` が ``_zip_drill`` / ``_cache_ctrl`` /
+        サムネローダーに掛けている close 前ドレインの、このビュー版。
+        ``QThreadPool`` のデストラクタは走行中の ``QRunnable`` が終わるまで
+        呼び出しスレッドを**無期限に**ブロックするので、これが無いと到達
+        不能な NAS フォルダを選んだ直後に閉じたとき、窓が消えた後の破棄
+        シーケンス（``viewer/app.py`` の局所変数解放）が SMB タイムアウト
+        ぶん止まる。「協調キャンセル → キュー破棄 → 有界待ち」は
+        :meth:`~._runnable.GuardedStream.request_shutdown` の 1 本に畳んで
+        あり、待ちは有界 — 諦めてもワーカーはキャッシュへ書かない
+        （``read_folder_preview_checked`` / ``scan_children`` /
+        ``next_representative`` は読み取りだけ）ので、閉じたストアへの書き込み
+        事故にはならない。中央画像のデコードは ``clear_image`` が ImageView の
+        ストリームを畳む（窓の close 前ドレインは子孫の ``GuardedStream`` を
+        全部拾うので、そちらの有界待ちもそこで掛かる）。
         """
-        widget_dpr = self.devicePixelRatioF()
-        screen = self.screen() or QApplication.primaryScreen()
-        screen_dpr = screen.devicePixelRatio() if screen is not None else 1.0
-        return max(widget_dpr, screen_dpr) or 1.0
+        self._image.clear_image()
+        if not self._stream.request_shutdown(max(0, timeout_ms)):
+            logger.warning(
+                "フォルダプレビューのワーカーが {}ms で終わりませんでした",
+                timeout_ms,
+            )
 
-    def _required_main_target_px(self) -> int:
-        """Return the centre thumbnail's required *physical*-pixel target.
+    # ----------------------------------------------------------- centre
 
-        The result is ``max(label_width, label_height) × dpr`` — the
-        longest side a ``setScaledSize`` decode needs to satisfy.  When
-        the widget hasn't been laid out yet, falls back to
-        :attr:`_MAIN_TARGET_PX_FLOOR`; later resizes trigger
-        :meth:`_maybe_upgrade_main_thumb` via the debounce timer once
-        the real geometry is known.
-        """
-        label_size = self._thumb_label.size()
-        longest_logical = max(label_size.width(), label_size.height())
-        dpr = self._effective_dpr()
-        if longest_logical < 64:
-            # Not yet laid out — pick a sane default; will be upgraded
-            # on the first resize event after the widget is shown.
-            return round(self._MAIN_TARGET_PX_FLOOR * dpr)
-        physical = round(longest_logical * dpr)
-        return max(self._MAIN_TARGET_PX_FLOOR, physical)
+    def _show_notice(self, text: str) -> None:
+        """中央を通知ページ（文字だけ）にする."""
+        self._notice.setPixmap(QPixmap())
+        self._notice.setText(text)
+        self._centre.setCurrentWidget(self._notice)
 
-    # ----------------------------------------------- background upgrade
+    def _show_notice_pixmap(self, pixmap: QPixmap) -> None:
+        """中央を通知ページ（走査中の種アイコン）にする."""
+        self._notice.setText("")
+        self._notice.setPixmap(pixmap)
+        self._centre.setCurrentWidget(self._notice)
 
-    def _maybe_upgrade_main_thumb(self) -> None:
-        """Spawn a higher-resolution decode if the current cache is short.
-
-        Called from the debounce timer after splitter / window resize
-        settles.  No-op when the cache already has a native-resolution
-        entry or a target large enough to satisfy the new label size.
-        """
-        if self._shutdown or self._main_thumb_path is None:
+    def _show_centre_image(self, path: Path) -> None:
+        """*path* を中央の ImageView で表示する（画像でなければ通知へ）."""
+        if path.suffix.lower() not in IMAGE_SUFFIXES:
+            # Non-image candidate (e.g. PDF first page) — notice only.
+            self._image.clear_image()
+            self._show_notice(
+                t("viewer.folder_preview_view.thumb_non_image", name=path.name)
+            )
             return
-        if str(self._main_thumb_path) in self._failed_thumb_paths:
-            # Already proven undecodable in this folder session — a bigger
-            # box won't change that (09-03 #197).
-            return
-        if self._main_thumb_path.suffix.lower() not in IMAGE_SUFFIXES:
-            # Non-image representative (e.g. a PDF): ``_on_scan_ready`` showed
-            # the label-only fallback and never decoded it — a resize must not
-            # spawn a pointless full decode (nor overwrite the label with
-            # whatever QImageReader makes of a PDF).
-            return
-        required = self._required_main_target_px()
-        cached = self._cache_get(self._main_thumb_path)
-        if self._cache_satisfies(cached, required):
-            return
-        self._submit_main_thumb(self._main_thumb_path, required)
+        self._centre.setCurrentWidget(self._image)
+        self._image.show_image(path)
 
-    def _submit_main_thumb(self, path: Path, target_px: int) -> None:
-        """中央画像のデコードを**積み足す**（先行を捨てない）。
+    def _placeholder_for(self, path: Path) -> QPixmap | None:
+        """ImageView の即時プレースホルダ（手元に既にある低解像度の絵）.
 
-        走査の着地・タイルクリック・リサイズ後の高解像度化がここへ集まる。
-        追い越しにすると、走査が積んだ 1 本目をタイルクリックが黙って捨てる
-        （= 中央ラベルが読み込み中のまま残る）。集合ごと畳むのはフォルダ
-        切替 / クリア / 窓じまいだけ。
+        走査の代表には右一覧の行アイコン（種）、タイルで選んだ画像には
+        そのタイルのサムネイル。どちらも I/O 無し。
         """
-        self._stream.submit_batch(
-            lambda job, p=path, px=target_px: _load_main_thumb(job, p, px)
+        if self._seed is not None and path == self._fallback.shown and not (
+            self._fallback.skip
+        ):
+            return self._seed
+        idx = self._grid.index_of_key(str(path))
+        tile = self._grid.tile_at(idx) if idx is not None else None
+        if tile is not None and tile.pixmap is not None and not tile.pixmap.isNull():
+            return tile.pixmap
+        return None
+
+    def _on_image_navigate(self, delta: int, immediate: bool) -> None:
+        """中央 ImageView のフィット時ホイール送りを面の送りへ流す."""
+        self.navigate_requested.emit(delta, immediate)
+
+    def _on_image_load_failed(self, path: Path) -> None:
+        """この面が選んだ代表画像が壊れていた — 次の候補を探す.
+
+        規則は中央プレビューと共有の :class:`~.representative_fallback.
+        RepresentativeFallback` が決める。予算を使い切ったら最後の失敗カードに
+        落ち着く。
+        """
+        folder = self._folder
+        skip = self._fallback.on_failed(folder, path)
+        if skip is None or folder is None:
+            return
+        self._stream.submit_job(
+            lambda job, f=folder, s=skip: _find_next_representative(job, f, s)
         )
 
     # ----------------------------------------------------------- slot impls
 
     def _on_preview_landed(self, payload: object) -> None:
-        """走査 / 中央画像の着地（4 つの結末を受ける 1 本口）."""
+        """走査 / 次候補探索の着地（3 つの結末を受ける 1 本口）."""
         if not isinstance(payload, StreamOutcome):
             return
         kind = cast(_PreviewKind, payload.kind)
@@ -689,13 +550,8 @@ class FolderPreviewView(QWidget):
                 self._apply_scan(*scan)
             case "scan_failed":
                 self._apply_scan_failed(cast(str, payload.value))
-            case "thumb":
-                thumb = cast(
-                    "tuple[QImage, Path, int, bool]", payload.value
-                )
-                self._apply_main_thumb(*thumb)
-            case "thumb_failed":
-                self._apply_main_thumb_failed(cast(Path, payload.value))
+            case "fallback":
+                self._apply_fallback(cast("Path | None", payload.value))
             case _:
                 assert_never(kind)
 
@@ -704,43 +560,14 @@ class FolderPreviewView(QWidget):
         thumb_path: Path | None,
         entries: list,
     ) -> None:
-        self._main_thumb_path = thumb_path
-
-        # Kick off the main thumbnail decode (or label-only fallback) as
-        # soon as we know the path.  It races the child-tile decodes.
+        # Kick off the centre image (or a notice) as soon as we know the
+        # path.  It races the child-tile decodes.
         if thumb_path is None:
-            if self._main_thumb_source is None:
-                # No placeholder either — show "no thumbnail" label.
-                self._thumb_label.setPixmap(QPixmap())
-                self._thumb_label.setText(
-                    t("viewer.folder_preview_view.thumb_none")
-                )
-        elif thumb_path.suffix.lower() not in IMAGE_SUFFIXES:
-            # Non-image candidate (e.g. PDF first page) — label-only.
-            # Drop the seeded placeholder as well: ``_rescale_main_thumb``
-            # (resize / splitter drag / showEvent) repaints
-            # ``_main_thumb_source`` unconditionally and would blow the
-            # right pane's low-res row icon up over this label the moment
-            # the widget is resized.  Same release ``_on_main_thumb_failed``
-            # performs.
-            self._main_thumb_source = None
-            self._thumb_label.setPixmap(QPixmap())
-            self._thumb_label.setText(
-                t("viewer.folder_preview_view.thumb_non_image", name=thumb_path.name)
-            )
+            self._image.clear_image()
+            self._show_notice(t("viewer.folder_preview_view.thumb_none"))
         else:
-            required = self._required_main_target_px()
-            cached = self._cache_get(thumb_path)
-            if self._cache_satisfies(cached, required):
-                # Cache satisfies the current size — paint and skip the worker.
-                self._main_thumb_source = QPixmap.fromImage(cached[0])
-                self._rescale_main_thumb()
-            else:
-                if cached is not None:
-                    # Use the lower-quality cache as a placeholder.
-                    self._main_thumb_source = QPixmap.fromImage(cached[0])
-                    self._rescale_main_thumb()
-                self._submit_main_thumb(thumb_path, required)
+            self._fallback.shown = thumb_path
+            self._show_centre_image(thumb_path)
 
         # Order: directories first (alphabetical), then files
         # (alphabetical).  ``scan_children`` returns mixed entries with
@@ -759,9 +586,9 @@ class FolderPreviewView(QWidget):
         shown_entries = ordered[: self._MAX_CHILDREN]
         skipped_count = len(ordered) - len(shown_entries)
 
-        # Image children to request from the injected loader (項目#14 —
+        # Image children to request from the injected loader —
         # requested only after set_tiles so every tile is in place before
-        # a synchronous cache-hit emit can post back).
+        # a synchronous cache-hit emit can post back.
         thumb_targets: list[tuple[str, Path]] = []
         # Tiles no decode will ever settle: sub-folders (their
         # representative image resolution is a panes-side concern), files
@@ -812,7 +639,7 @@ class FolderPreviewView(QWidget):
                 t("viewer.folder_preview_view.children_heading")
             )
 
-        # Child-tile thumbnails via the injected loader (項目#14): the
+        # Child-tile thumbnails via the injected loader: the
         # loader owns caching (in-memory LRU + persistent disk masters),
         # DPR scaling and the bounded worker pool.  A cache hit emits
         # ``loaded`` synchronously on this same stack — tiles are already
@@ -827,7 +654,7 @@ class FolderPreviewView(QWidget):
                 tile = self._grid.tile_at(idx) if idx is not None else None
                 if tile is not None and not tile.thumb_loaded:
                     # ソースがボックスより小さいキーの再要求にローダーは
-                    # 沈黙する（thumbnail_loader #10 — 呼び出し側が既に絵を
+                    # 沈黙する（呼び出し側が既に絵を
                     # 持っている前提）。作り直したタイルは持っていないので、
                     # 常駐デコードがあれば ``cached_image`` から再シードする
                     # （他ホストと同じ流儀）。
@@ -846,41 +673,21 @@ class FolderPreviewView(QWidget):
                 message=message,
             )
         )
-        self._thumb_label.setText(t("viewer.folder_preview_view.thumb_load_failed"))
+        # 通知ページへ切り替えるだけで失敗表示が確定する — 種アイコンを
+        # 描き直す経路はもう無い（表示状態はページ 1 つ）。
+        self._image.clear_image()
+        self._show_notice(t("viewer.folder_preview_view.thumb_load_failed"))
 
-    def _apply_main_thumb(
-        self,
-        image: QImage,
-        path: Path,
-        target_px: int,
-        is_native: bool,
-    ) -> None:
-        if image is None or image.isNull():
+    def _apply_fallback(self, found: Path | None) -> None:
+        """次候補探索の着地（フォルダ切替・タイル選択はストリームの cancel で
+        古い着地を捨てる）。``None`` = 候補が尽きた — 最後の失敗カードを残す."""
+        if found is None:
             return
-        # Always cache — even if the user has since clicked a different
-        # tile, this decode is still valuable for the next visit.
-        self._cache_put(path, image, target_px, is_native)
-        # But only paint when the path still matches the centre — a
-        # tile-click may have superseded the original main-thumb load
-        # while it was still on the worker thread.
-        if path != self._main_thumb_path:
-            return
-        self._main_thumb_source = QPixmap.fromImage(image)
-        self._rescale_main_thumb()
-
-    def _apply_main_thumb_failed(self, path: Path) -> None:
-        if path != self._main_thumb_path:
-            return
-        # Recorded AFTER the stream's own guard and the path check, so a
-        # straggler from a folder the user already left never bans a path
-        # in this one.
-        self._failed_thumb_paths.add(str(path))
-        self._main_thumb_source = None
-        self._thumb_label.setPixmap(QPixmap())
-        self._thumb_label.setText(t("viewer.folder_preview_view.thumb_unreadable"))
+        self._fallback.shown = found
+        self._show_centre_image(found)
 
     def _on_child_loader_loaded(self, key: str, image: QImage) -> None:
-        """A child-tile decode from the injected loader landed (項目#14).
+        """A child-tile decode from the injected loader landed.
 
         Staleness needs no generation counter here: keys embed the child's
         absolute path, and ``GalleryView.set_thumb`` no-ops on a key the
@@ -906,12 +713,11 @@ class FolderPreviewView(QWidget):
         self._grid.mark_thumb_failed(key[len(self._CHILD_KEY_PREFIX):])
 
     def _on_child_selected(self, index: int) -> None:
-        """User clicked a child tile — promote it to the centre thumbnail.
+        """User clicked a child tile — promote it to the centre image.
 
         Folder tiles and non-image files are no-ops.  For images, the
-        tile's already-decoded grid thumbnail is used as an immediate
-        low-res placeholder while the centre-resolution worker decodes
-        the full version.
+        tile's already-decoded grid thumbnail is the ImageView's instant
+        placeholder (:meth:`_placeholder_for`) while the full decode runs.
         """
         tile = self._grid.tile_at(index)
         if tile is None or tile.is_dir:
@@ -919,123 +725,31 @@ class FolderPreviewView(QWidget):
         path = tile.path
         if path.suffix.lower() not in IMAGE_SUFFIXES:
             return
-        if path == self._main_thumb_path:
-            # Already the centre thumbnail.
-            return
-
-        self._main_thumb_path = path
-        required = self._required_main_target_px()
-        cached = self._cache_get(path)
-        if self._cache_satisfies(cached, required):
-            # Cache is good enough for the current centre size — paint
-            # and skip the worker.
-            self._main_thumb_source = QPixmap.fromImage(cached[0])
-            self._rescale_main_thumb()
-            return
-
-        # Cache miss or undersized: show the best placeholder we have
-        # (cached lower-res decode, or the grid tile's thumbnail)
-        # immediately and queue a centre-resolution decode in the
-        # background.
-        placeholder_pix: QPixmap | None = None
-        if cached is not None:
-            placeholder_pix = QPixmap.fromImage(cached[0])
-        elif tile.pixmap is not None and not tile.pixmap.isNull():
-            placeholder_pix = tile.pixmap
-        if placeholder_pix is not None:
-            self._main_thumb_source = placeholder_pix
-            self._rescale_main_thumb()
-
-        self._submit_main_thumb(path, required)
-
-    def shutdown(self, timeout_ms: int = 2000) -> None:
-        """走行中のプレビュー読みを止めてストリームを有界に空にする（項目#136）.
-
-        ``ViewerWindow.closeEvent`` が ``_zip_drill`` / ``_cache_ctrl`` /
-        サムネローダーに掛けている close 前ドレインの、このビュー版。
-        ``QThreadPool`` のデストラクタは走行中の ``QRunnable`` が終わるまで
-        呼び出しスレッドを**無期限に**ブロックするので、これが無いと到達
-        不能な NAS フォルダを選んだ直後に閉じたとき、窓が消えた後の破棄
-        シーケンス（``viewer/app.py`` の局所変数解放）が SMB タイムアウト
-        ぶん止まる。「協調キャンセル → キュー破棄 → 有界待ち」は
-        :meth:`~._runnable.GuardedStream.request_shutdown` の 1 本に畳んで
-        あり、待ちは有界 — 諦めてもワーカーはキャッシュへ書かない
-        （``read_folder_preview_checked`` / ``scan_children`` は読み取り
-        だけ）ので、閉じたストアへの書き込み事故にはならない。
-        """
-        self._shutdown = True
-        self._redecode_timer.stop()
-        if not self._stream.request_shutdown(max(0, timeout_ms)):
-            logger.warning(
-                "フォルダプレビューのワーカーが {}ms で終わりませんでした",
-                timeout_ms,
-            )
-
-    def refresh_fit(self) -> None:
-        """中央画像のフィットを測り直す（設定コミット後の反映点 — 項目#61）.
-
-        F03「フィット表示: 等倍以上に拡大しない」は ``view_prefs`` の
-        モジュール変数を live に読むので値そのものは即座に効くが、既に
-        表示している 1 枚は次のラベルリサイズまで描き直されない。中央ペインの
-        ``ImageView.refresh_fit`` と同じ役割の反映点を持たせ、
-        ``ContentView.apply_view_settings`` から呼ばせる。
-        """
-        self._rescale_main_thumb()
+        # 同じタイルの再選択は ImageView の LRU の早道で即座に返るので、
+        # 「もう中央にある」の手書きガードは持たない（失敗した画像なら
+        # 再読み込みになる — 失敗カードの [再読み込み] と同じ意味）。
+        # ユーザーが明示的に選んだ画像 — 失敗しても黙って差し替えない。
+        # 飛行中の次候補探索も捨てる（着地が選んだ画像を奪い返さない）。
+        # タイルは走査の着地後にしか無いので、捨てるのは次候補探索だけ。
+        self._fallback.shown = None
+        self._stream.cancel()
+        self._show_centre_image(path)
 
     # ----------------------------------------------------------- internals
 
-    def _rescale_main_thumb(self) -> None:
-        if self._shutdown:
-            return
-        pix = self._main_thumb_source
-        if pix is None or pix.isNull():
-            return
-        # Match :class:`ImageView` 's DPR-aware paint path: scale to the
-        # label's *physical* pixel box so the source is rendered 1:1
-        # against the display's true resolution, then stamp the DPR on
-        # the resulting pixmap so QLabel still lays it out at logical
-        # size.  Skipping ``setDevicePixelRatio`` here is what made the
-        # 4K case look soft — Qt would otherwise treat a physical-
-        # resolution pixmap as logical and downscale it again.
-        dpr = self._effective_dpr()
-        max_w_logical = max(120, self._thumb_label.width() - 8)
-        max_h_logical = max(120, self._thumb_label.height() - 8)
-        max_w_phys = max(1, round(max_w_logical * dpr))
-        max_h_phys = max(1, round(max_h_logical * dpr))
-        if view_prefs.get_image_fit_no_upscale():
-            # F03「フィット表示: 等倍以上に拡大しない」(既定 ON) はこの面にも
-            # 効く（項目#61）。``QPixmap.scaled`` は指定サイズへ**拡大もする**
-            # ので、クランプしないと 2×3px の ``#thumb#`` アイコンのような
-            # 小さい代表画像がラベル箱いっぱいの単色ブロックに引き伸ばされる
-            # — 同じ画像を中央 ImageView で開くと等倍のまま出るのに、
-            # フォルダプレビューだけ設定を無視していた（対実装の片側欠落）。
-            max_w_phys = min(max_w_phys, max(1, pix.width()))
-            max_h_phys = min(max_h_phys, max(1, pix.height()))
-        scaled = pix.scaled(
-            max_w_phys, max_h_phys,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
-        if dpr > 1.0:
-            scaled.setDevicePixelRatio(dpr)
-        self._thumb_label.setPixmap(scaled)
-        self._thumb_label.setText("")
-        # If the cache is now short of what the displayed area needs,
-        # ask for a higher-resolution decode after the splitter / window
-        # finishes resizing.  Debounced so dragging at 60 Hz doesn't
-        # spawn dozens of workers — only the final size matters.
-        if self._main_thumb_path is not None:
-            self._redecode_timer.trigger()
+    def _effective_dpr(self) -> float:
+        """DPR that respects both the widget and its screen.
 
-    # --------------------------------------------------------- event filter
-
-    def eventFilter(self, obj, event):  # noqa: N802 (Qt API)
-        # Re-fit the centre pixmap whenever the splitter (or the outer
-        # window resize) changes the thumb label's geometry.  QLabel
-        # has no built-in ``resized`` signal, hence the filter.
-        if obj is self._thumb_label and event.type() == QEvent.Resize:
-            self._rescale_main_thumb()
-        return super().eventFilter(obj, event)
+        ``QWidget.devicePixelRatioF`` returns 1.0 until the widget has
+        actually been mapped to a screen, which would silently make
+        every initial child-tile decode soft on HiDPI displays.  Falling
+        back to the screen's own ratio keeps quality correct on the first
+        paint, and harmlessly reports the higher value when both agree.
+        """
+        widget_dpr = self.devicePixelRatioF()
+        screen = self.screen() or QApplication.primaryScreen()
+        screen_dpr = screen.devicePixelRatio() if screen is not None else 1.0
+        return max(widget_dpr, screen_dpr) or 1.0
 
     def closeEvent(self, event):  # noqa: N802 (Qt API)
         """ペインを閉じる = 背景の読みを止める（``ChildrenGrid`` と同型）.
@@ -1048,49 +762,19 @@ class FolderPreviewView(QWidget):
         self.shutdown()
         super().closeEvent(event)
 
-    def showEvent(self, event):  # noqa: N802 (Qt API)
-        super().showEvent(event)
-        # close → show の往復で再武装する（``_shutdown`` は「閉じている」状態で
-        # あって一方通行の停止スイッチではない — ``ChildrenGrid`` と同じ扱い）。
-        self._shutdown = False
-        # ``devicePixelRatioF`` only returns the *real* screen ratio once
-        # the widget has been mapped to a window manager.  Until then it
-        # reports 1.0, which would silently make every first decode soft
-        # on a 4K display.  Trigger the upgrade-check timer on the first
-        # show so the (now-correct) DPR is folded into the required
-        # target and any too-low-resolution main thumb is re-decoded.
-        if self._main_thumb_path is not None:
-            self._redecode_timer.trigger()
-
-    def changeEvent(self, event):  # noqa: N802 (Qt API)
-        # Multi-monitor setups: if the user drags the snappix window from
-        # a 1.0-DPR display to a 4K (2.0-DPR) one, the cached decode is
-        # now soft for the new screen.  Re-trigger the upgrade check.
-        # ``DevicePixelRatioChange`` fires on the widget when its
-        # effective DPR changes (Qt 6.0+).
-        if event.type() == QEvent.DevicePixelRatioChange:
-            if not self._shutdown and self._main_thumb_path is not None:
-                self._redecode_timer.trigger()
-        super().changeEvent(event)
-
-    # ------------------------------------------------------------- events
-
-    def resizeEvent(self, event):  # noqa: N802 (Qt API)
-        super().resizeEvent(event)
-        self._rescale_main_thumb()
-
     def wheelEvent(self, event):  # noqa: N802 (Qt API)
         # Wheel events that reach the view itself (cursor over the title,
-        # centre thumbnail or children-label area — anywhere *outside*
-        # the grid) always advance the right-pane selection, mirroring
-        # :class:`FileInfoView`'s "any wheel = navigate" semantics.  The
-        # children :class:`GalleryView` consumes plain wheels internally for
-        # its own scrolling, so this normally only triggers on the
-        # surrounding chrome — matching the user's intent of "scroll outside
-        # the list → move to the next file like a normal image preview".
-        # Ctrl+wheel over the grid also lands here: that seat takes no
-        # ``zoom_handler`` (no size slider to move), so the grid declines the
-        # gesture instead of swallowing it, and the seat's own meaning wins.
+        # the centre notice or children-label area — anywhere *outside*
+        # the grid and the centre ImageView) always advance the right-pane
+        # selection, mirroring :class:`FileInfoView`'s "any wheel = navigate"
+        # semantics.  The children :class:`GalleryView` consumes plain
+        # wheels internally for its own scrolling, so this normally only
+        # triggers on the surrounding chrome — matching the user's intent of
+        # "scroll outside the list → move to the next file like a normal
+        # image preview".  Ctrl+wheel over the grid also lands here: that
+        # seat takes no ``zoom_handler`` (no size slider to move), so the
+        # grid declines the gesture instead of swallowing it, and the seat's
+        # own meaning wins.
         if navigate_on_wheel(event, self.navigate_requested.emit):
             return
         super().wheelEvent(event)

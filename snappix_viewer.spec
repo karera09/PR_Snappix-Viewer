@@ -37,8 +37,8 @@ dist_metadata = os.environ.get(DIST_METADATA_ENV)
 # Qt's own Japanese translations for the standard dialogs (QMessageBox の
 # はい/いいえ, QFileDialog の列見出し・ボタン, QInputDialog の OK/Cancel).
 # Without this single ~130 KB catalog the first screen a user meets — the
-# folder picker — is fully English on a Japanese product (UIレビュー
-# 2026-08-28 N-01).  It is part of Qt itself (LGPL), already covered by the
+# folder picker — is fully English on a Japanese product.  It is part of
+# Qt itself (LGPL), already covered by the
 # PySide6 entry in THIRD_PARTY_LICENSES.txt: no new dependency, no new notice.
 #
 # Destination is the frozen PySide6 tree, NOT a new top-level folder: a fresh
@@ -82,7 +82,7 @@ hiddenimports += collect_submodules("PySide6.QtMultimediaWidgets")
 # PDF preview + PDF thumbnails: both import QtPdf lazily now
 # (content.pdf_view.PdfView.__init__ / thumbnail_loader._decode_pdf), so declare
 # them the same way as QtMultimedia above rather than relying on a
-# module-level import for static analysis to find (レビュー 2026-08-30).
+# module-level import for static analysis to find.
 hiddenimports += collect_submodules("PySide6.QtPdf")
 hiddenimports += collect_submodules("PySide6.QtPdfWidgets")
 # The frozen viewer hosts in-process plugins, whose vendored third-party
@@ -130,7 +130,7 @@ a = Analysis(
         # pygments 336 / dotenv 5 modules) with NO entry in
         # THIRD_PARTY_LICENSES.txt (the notice is the pyproject dependency
         # closure, which does not include these).  That is an MIT/BSD notice-
-        # retention violation in the paid dist (issue #38).  dotenv is not a
+        # retention violation in the paid dist.  dotenv is not a
         # viewer dependency at all (a plugin-layered venv may carry it via
         # pydantic-settings), so it must never ride into the plain viewer.  check_dist_complete's reconciliation is the
         # permanent backstop should a future optional import reintroduce them.
@@ -139,7 +139,7 @@ a = Analysis(
         # _distutils_hack, pkg_resources) is dragged in ONLY by PyInstaller's
         # pyi_rth_setuptools runtime hook — no viewer code imports it.  Left in
         # it freezes ~an entire MIT package tree into the plain dist unlisted in
-        # THIRD_PARTY_LICENSES.txt (issue #41).  Excluding it drops the dead
+        # THIRD_PARTY_LICENSES.txt.  Excluding it drops the dead
         # weight; the runtime hook is a no-op without the package.
         "setuptools", "_distutils_hack", "pkg_resources",
     ],

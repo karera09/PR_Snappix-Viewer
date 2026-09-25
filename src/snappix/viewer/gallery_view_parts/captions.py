@@ -138,9 +138,9 @@ def shape_two_lines(
     rest = _tail(n1)
     if n1 + n2 >= u16_len:
         # Fits in exactly two lines — return them as two rows.  Returning
-        # the un-split original here (the old early return) made the caller
-        # count one line and reserve a one-line rect, so the second line
-        # was clipped away with no ellipsis to show for it (N-19).
+        # the un-split original here would make the caller count one line
+        # and reserve a one-line rect, so the second line would be clipped
+        # away with no ellipsis to show for it.
         return (head, rest)
     # Insert an explicit break at the shaped line-1 boundary so the caller
     # reproduces it, then elide the remainder into a single second line.
@@ -162,9 +162,8 @@ def paint_caption(
 
     選択判定を ``dimmed`` より**前**に置くのが要点。非フォーカスの選択行は
     ``highlightedText`` ではなく通常 ``text`` で描く（薄い塗りの上では
-    白系が読めない — UIレビュー 07-25 #47）が、以前はその分岐が
-    ``selected_active`` だけを見ていたため、post.md 等の淡色行は
-    「選択しているのに Disabled 文字色のまま」になっていた。
+    白系が読めない）。その分岐が ``selected_active`` だけを見ると、
+    post.md 等の淡色行は「選択しているのに Disabled 文字色のまま」になる。
     """
     if rect.width() <= 0 or rect.height() <= 0 or not tile.caption:
         return
@@ -179,8 +178,7 @@ def paint_caption(
         )
     elif tile.dimmed:
         # 内部/メタファイル（post.md）は本編と同格に見せない — 無効文字色
-        # トークン（QPalette の Disabled ロール）で 1 段落とす
-        # (UIレビュー 07-25 #52)。
+        # トークン（QPalette の Disabled ロール）で 1 段落とす。
         color = palette.color(QPalette.Disabled, QPalette.Text)
     else:
         color = palette.text().color()

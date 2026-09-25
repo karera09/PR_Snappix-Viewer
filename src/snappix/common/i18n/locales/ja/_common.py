@@ -22,7 +22,7 @@ MESSAGES: dict[str, str] = {
     "common.action.delete": "削除",
     # 破壊的確認モーダルの動詞ラベル（`common/ui/buttons.py::confirm_action`）。
     # 「はい」では何に同意したのか残らないので、押すボタン自体が行為を名乗る
-    # （UIレビュー 2026-08-28 N-01 / N-40）。
+    # （標準ボタンは qtbase_ja.qm が訳すので手書きしない）。
     "common.action.delete_confirm": "削除する",
     "common.action.delete_permanently": "完全に削除する",
     "common.action.move_down": "下へ",
@@ -40,13 +40,23 @@ MESSAGES: dict[str, str] = {
     "common.action.settings": "設定…",
     # -- common.category.* -----------------------------------------------
     "common.category.navigation": "ナビゲーション",
-    # -- common.file_dialog.* ---------------------------------------------
-    # Qt のファイルダイアログのうち、``qtbase_ja.qm`` が届かない .ui 由来の
-    # ラベル（viewer/dialogs.py が setLabelText で埋める — N-01）。
-    "common.file_dialog.file_name": "ファイル名:",
-    "common.file_dialog.file_type": "ファイルの種別:",
-    "common.file_dialog.folder": "フォルダ:",
-    "common.file_dialog.look_in": "場所:",
+    # -- common.file_picker.* ---------------------------------------------
+    # 自前のファイル / フォルダ選択ダイアログ（common/ui/file_picker.py）。
+    # 既存の共有語（キャンセル・開く・名前…）は file_picker_catalog.py が
+    # common.action.* / common.label.* を指す。
+    "common.file_picker.address": "場所:",
+    "common.file_picker.address_placeholder": "パスを入力して Enter で移動",
+    "common.file_picker.file_name": "ファイル名:",
+    "common.file_picker.file_type": "ファイルの種別:",
+    "common.file_picker.folder": "フォルダ:",
+    "common.file_picker.mkdir_failed": "フォルダを作成できませんでした: {path}",
+    "common.file_picker.new_folder": "新しいフォルダ",
+    "common.file_picker.not_found": "見つかりません: {path}",
+    "common.file_picker.overwrite_accept": "置き換える",
+    "common.file_picker.overwrite_body": "{name} は既に存在します。置き換えますか？",
+    "common.file_picker.overwrite_title": "上書きの確認",
+    "common.file_picker.save": "保存",
+    "common.file_picker.up": "1 つ上のフォルダへ (Alt+Up)",
     # -- common.filter.* -------------------------------------------------
     "common.filter.all": "すべて",
     # -- common.label.* --------------------------------------------------
@@ -54,6 +64,7 @@ MESSAGES: dict[str, str] = {
     "common.label.display": "表示",
     "common.label.file": "ファイル",
     "common.label.folder": "フォルダ",
+    "common.label.modified": "更新日時",
     "common.label.name": "名前",
     "common.label.path": "パス",
     "common.label.posted_colon": "投稿日:",
@@ -61,7 +72,7 @@ MESSAGES: dict[str, str] = {
     "common.label.size": "サイズ",
     "common.label.tag": "タグ",
     "common.label.thumb": "サムネイルサイズ",
-    # ファイル種別の呼称は「種別」1 本（「種類」は廃止 — UIレビュー 07-25 #103）。
+    # ファイル種別の呼称は「種別」1 本（「種類」は使わない）。
     # 右ファイル一覧の並び順と詳細情報 / 情報パネルの行ラベルが同じ語を共有する。
     "common.label.type": "種別",
     "common.label.type_colon": "種別:",
@@ -82,7 +93,7 @@ MESSAGES: dict[str, str] = {
     "common.menu.help": "ヘルプ(&H)",
     # -- common.punct.* --------------------------------------------------
     # 「…」= 押すとさらに入力 / 別の窓が要る、のメニュー規約記号。付け方を
-    # 1 箇所に閉じる（viewer/_menu_text.py::menu_label — UIレビュー N-105）。
+    # 1 箇所に閉じる（viewer/_menu_text.py::menu_label）。
     "common.punct.ellipsis": "…",
     # -- common.sep.* ----------------------------------------------------
     "common.sep.comma": "、",
@@ -92,8 +103,8 @@ MESSAGES: dict[str, str] = {
     "common.status.loading_name": "読み込み中… ({name})",
     "common.status.waiting": "待機中",
     # -- common.terms_dialog.* --------------------------------------------
-    # UIレビュー 07-25 #123: terms_dialog.py の直書き文言を i18n カタログへ
-    # 移設。#42: 規約改定による再同意時は intro_revised + version_label へ
+    # terms_dialog.py の文言は直書きせず i18n カタログに置く
+    # （規約改定による再同意時は intro_revised + version_label へ
     # 切り替える（terms_text.py の本文・TERMS_VERSION は不変）。
     "common.terms_dialog.agree_btn": "同意する",
     "common.terms_dialog.decline_btn": "同意しない",

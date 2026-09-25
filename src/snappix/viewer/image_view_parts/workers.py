@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from loguru import logger
 from PIL import Image
@@ -34,7 +34,7 @@ def _is_animated_bytes(data: bytes) -> bool:
     """True when *data* decodes to more than one frame (animated image).
 
     Reads the frame count from an in-memory ``QBuffer`` rather than
-    ``QImageReader(str(path))`` so the SMB/CJK-path bug that motivates
+    ``QImageReader(str(path))`` so the SMB/CJK-path failure that motivates
     :mod:`.qimage_decode` can't make an animated WebP look static.
     """
     buffer = QBuffer()
@@ -223,9 +223,25 @@ def _pil_sizeof(img: Image.Image) -> int:
     return max(0, w * h * max(1, len(img.getbands())))
 
 
+class PrefetchMiss(NamedTuple):
+    """先読みが画像を持ち帰らなかった着地（パスを載せて返す）。
+
+    素の ``None`` を返すと着地側はどのパスの話か分からず、デコード窓
+    （右ペインのスピナー述語）から外せない。壊れた / 消えた近傍が窓に
+    残ったままスピナーと 80ms 再描画が止まらなくなるので、パスを必ず載せる。
+
+    ``declined`` は「要らなくなって降りた」（キャンセル / 台帳の ``wanted`` が
+    偽）で、``False`` は「読めなかった」（デコード失敗）。前者はデコードが
+    まだ終わっていないので窓から外さない。
+    """
+
+    path: Path
+    declined: bool
+
+
 def _prefetch_decode(
     job: StreamJob, path: Path, wanted: Callable[[Path], bool],
-) -> tuple[Path, Image.Image] | None:
+) -> tuple[Path, Image.Image] | PrefetchMiss:
     """Decode a neighbor image off the GUI thread for the ImageView cache.
 
     結末は 1 つ（``(path, PIL.Image.Image)``）なので ``StreamOutcome`` には
@@ -233,24 +249,24 @@ def _prefetch_decode(
     hasn't asked for this file yet, so a silent skip is correct — if they
     navigate to it we'll retry via :meth:`ImageView.show_image`).
 
-    降りる条件は 2 つある。``job.cancel`` はフォルダ切替 / クリアと近傍
-    バッチの入れ替え（:meth:`ImageView._schedule_prefetch`）で降り、*wanted*
-    は「この先読みがまだ要るか」を GUI 側の台帳へ聞く（``str`` の集合
-    メンバシップ = GIL アトミックな読み）。後者があるので、表示要求で追い
-    越されたままキューに残っていた先読みは走り出しても即座に降り、現在の
-    デコードと CPU を奪い合わない。
+    降りる条件は 2 つある。``job.cancel`` はフォルダ切替 / クリアで降り、
+    *wanted* は「この先読みがまだ要るか」を GUI 側の台帳へ聞く（``str`` の
+    集合メンバシップ = GIL アトミックな読み）。後者があるので、表示要求や
+    近傍集合の入れ替え（:meth:`ImageView._schedule_prefetch` はストリームを
+    畳まない）で追い越されたままキューに残っていた先読みは走り出しても即座に
+    降り、現在のデコードと CPU を奪い合わない。
     """
     if job.cancel.is_cancelled() or not wanted(path):
-        return None
+        return PrefetchMiss(path, declined=True)
     try:
         pil = decode_pil(path)
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:  # noqa: BLE001 — 近傍の失敗は黙って飛ばす
         logger.debug("Prefetch decode failed for {}: {}", path, exc)
-        return None
+        return PrefetchMiss(path, declined=False)
     if pil is None:
-        return None
+        return PrefetchMiss(path, declined=False)
     if job.cancel.is_cancelled() or not wanted(path):
-        return None
+        return PrefetchMiss(path, declined=True)
     return path, pil
 
 
@@ -263,5 +279,6 @@ __all__ = [
     "_patch_resample",
     "_pil_sizeof",
     "_prefetch_decode",
+    "PrefetchMiss",
     "_report_preview",
 ]

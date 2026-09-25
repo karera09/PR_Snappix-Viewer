@@ -11,6 +11,13 @@ name: build-release
 # 手動起動（workflow_dispatch）は既存タグの再ビルド用（タグを打った後に
 # ランナー側の事情で落ちたときのやり直し）。同じタグの Release が既にあれば
 # 添付だけ --clobber で置き換える。
+#
+# このファイルは開発側のリポジトリにも同じものが置かれている（公開木へ送る
+# 許可リストはファイルを送るだけで、送り元から除くわけではない）。開発側で
+# 版数タグを打つたびに起動すると、plugins/ があるので build_portable.py が
+# プラグインのビルドフックを読み込み、tagger extra 不在で必ず失敗して Windows
+# ランナーの枠だけを消費する。ジョブは公開リポジトリでだけ走らせる
+# （リポジトリ名は tools/public_export.py::PUBLIC_REPO と同値 — テストで照合）。
 
 on:
   push:
@@ -29,6 +36,7 @@ permissions:
 
 jobs:
   build:
+    if: github.repository == 'karera09/PR_Snappix-Viewer'
     # ランナーイメージは明示して固定する（"latest" は予告なく入れ替わる）。
     runs-on: windows-2025
     timeout-minutes: 60

@@ -98,7 +98,7 @@ def _read_acceptance_record(data_dir: Path | None = None) -> dict | None:
     (``viewer/app.py`` calls :func:`require_consent` ahead of MainWindow and
     outside its ``except OSError`` startup guard), so an escaping exception
     ends the process with no window and — in a windowed frozen build — no
-    stderr to say why (レビュー 2026-09-03 項目 #116).
+    stderr to say why.
     """
     try:
         raw = _acceptance_path(data_dir).read_text(encoding="utf-8")
@@ -108,7 +108,7 @@ def _read_acceptance_record(data_dir: Path | None = None) -> dict | None:
         # with the wrong encoding, partially damaged on a NAS) would escape
         # a bare ``except OSError`` — the same defect class already fixed in
         # ``viewer/plugin_host/manifest.py``.  Undecodable == nothing
-        # recorded: the gate re-prompts rather than crashing (項目 #116).
+        # recorded: the gate re-prompts rather than crashing.
         return None
     try:
         data = json.loads(raw)
@@ -129,7 +129,7 @@ def has_accepted(data_dir: Path | None = None, *, version: str = TERMS_VERSION) 
 
 
 def previously_accepted_version(data_dir: Path | None = None) -> str | None:
-    """Return a prior run's recorded ``accepted_version``, if any (#42).
+    """Return a prior run's recorded ``accepted_version``, if any.
 
     Unlike :func:`has_accepted` (which only answers yes/no for *one*
     version), this surfaces whatever version was last recorded — used by
@@ -194,11 +194,11 @@ def require_consent(*, data_dir: Path | None = None, parent=None) -> bool:
         return True
     from .terms_dialog import prompt_consent
 
-    # #42 (UIレビュー 07-25): a version mismatch here can mean two very
+    # A version mismatch here can mean two very
     # different things — a genuine first run (nothing recorded yet) or a
     # returning user whose prior acceptance was invalidated by a terms
     # revision. The dialog shows a different introduction for the latter so
-    # "I already agreed to this" doesn't read as a bug.
+    # "I already agreed to this" doesn't read as a malfunction.
     previous_version = previously_accepted_version(data_dir)
     if prompt_consent(parent, previous_version=previous_version):
         try:
@@ -207,7 +207,7 @@ def require_consent(*, data_dir: Path | None = None, parent=None) -> bool:
             # The user DID agree — a failure to persist that (full disk, an AV
             # holding the file, read-only media) must not abort startup: the
             # frozen build is windowed, so an escaping OSError would look like
-            # the app vanishing right after "同意する" (レビュー 2026-07-31 #27).
+            # the app vanishing right after "同意する".
             # The session proceeds; the gate simply re-prompts next launch.
             logger.warning("could not record terms acceptance: {}", exc)
         return True

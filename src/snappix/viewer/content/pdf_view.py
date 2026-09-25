@@ -4,8 +4,8 @@
 ``PdfView.__init__`` と :meth:`PdfView._on_pdf_bytes` /
 :meth:`PdfView._on_zoom_changed` の関数内 import が遅延 import の段で、
 ``ContentView`` 側の遅延構築（``_ensure_pdf``）と両方揃って初めて「DLL 欠落
-時に起動不能ではなくこのプレビューだけが失敗する」が成立する
-（docs/claude/viewer/content.md「遅延 import の二段構え」）。
+時に起動不能ではなくこのプレビューだけが失敗する」が成立する（片方だけ
+だと DLL 欠落で起動不能のまま）。
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ def _read_pdf_bytes(
     ``QPdfDocument.load(str)`` reads the file synchronously via QFile — a
     cold NAS open + read of a multi-MB PDF blocked the GUI thread, the one
     preview left doing so.  Reading the bytes here (Python ``open``, which
-    also sidesteps the SMB/CJK-path issue) and handing them to
+    also sidesteps QFile's trouble with SMB / CJK paths) and handing them to
     ``load(QIODevice)`` on the GUI thread keeps the round-trip off the main
     thread; the in-memory parse that remains is fast.  Runs on a
     :class:`~snappix.viewer._runnable.GuardedStream` worker。

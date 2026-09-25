@@ -34,7 +34,14 @@ from pathlib import Path
 
 from loguru import logger
 
-from .tokens import FONT_CAPTION_PT, RADIUS, RADIUS_SM, ThemeTokens, rgba
+from .tokens import (
+    FONT_CAPTION_PT,
+    RADIUS,
+    RADIUS_SM,
+    ThemeTokens,
+    focus_band_ink,
+    rgba,
+)
 
 _assets_dir: Path | None = None
 
@@ -81,7 +88,7 @@ def _glyph_url(name: str, color: str, *, stroke_width: float = 2.5) -> str | Non
     The file name keys only the glyph name and the colour, **not** the glyph
     source itself, so a plain ``exists()`` check would pin a user's ``data/``
     to the shape/stroke shipped by whatever version created it — a new
-    release's redrawn chevron would never appear (review #116).  Compare the
+    release's redrawn chevron would never appear.  Compare the
     rendered source with what is on disk instead and rewrite only when it
     differs (unchanged runs stay write-free).
     """
@@ -197,8 +204,8 @@ def _indicator_rules(t: ThemeTokens) -> str:
     ``text_muted`` (= ``palette(mid)``, the same role ``build_palette`` already
     pins for exactly this class of Fusion derivation) lifts it to 5.3–6.6.
 
-    Styling the indicator makes Qt stop painting the native mark (design.md
-    「QSS を書くと画像必須になる」), so the marks come from the shared glyph
+    Styling the indicator makes Qt stop painting the native mark (once QSS
+    styles an indicator, an image becomes mandatory), so the marks come from the shared glyph
     table via :func:`_glyph_url` — and the ``:checked`` fill **must** be
     generated alongside the frame: with only the frame rule, checked and
     unchecked render identically.  If a glyph write fails that mark rule is
@@ -269,18 +276,13 @@ def _indicator_rules(t: ThemeTokens) -> str:
     return rules
 
 
-# QSS は文字列定数として配布物に載るので、CSS コメントに経緯（レビュー項目
-# 番号等）を書かない。由来: destructiveButton = UI レビュー #13 /
-# QProgressBar::chunk の淡色 = UI レビュー 07-25 #17 / thumbSizeSlider の
-# 当たり判定 = UI レビュー 2026-08-28 N-126 / toast の面 = UI レビュー #16 /
-# stage の QAbstractScrollArea#id 指定 = UI レビュー 07-25 #1 / 節見出しの
-# 各領域は Phase 1〜3 の段階導入で追加 / toast の kind 配色を QSS 側へ寄せた
-# 経緯は #117 / #117追補 / #184。
+# QSS は文字列定数として配布物に載るので、CSS コメントに開発の経緯を書かない
+# （理由の説明はこの Python 側のコメントへ）。
 def build_qss(t: ThemeTokens) -> str:
     # Translucent accent used for selected-but-unfocused / checked states.
     accent_soft = rgba(t.accent, 0.30)
     # Translucent accent wash for the progress-bar chunk — the bar's own text
-    # sits on top of it (UIレビュー 07-25 #17).
+    # sits on top of it.
     progress_chunk = rgba(t.accent, 0.35)
     # Translucent danger fills for the destructive-button hover/press states.
     danger_hover = rgba(t.danger, 0.12)
@@ -636,6 +638,21 @@ QWidget#panelHeader {{
     border: none;
     border-bottom: 1px solid {t.border};
 }}
+/* フォーカス帯（common/ui/focus_band.py）: フォーカスを内包する節の見出し
+   だけ地色を一段変える。3:1 / 4.5:1 を担うのは見出し側が描く ▸ と題名の
+   インク（tokens.py::focus_band_ink — dark 系は accent、light 系は深い
+   accent_pressed。light の accent は白文字用の中間色で、暗い帯地の上では
+   4.1〜4.4:1 と本文の床を割る）。帯地は輪郭を柔らかく示す補助で、bg_raised
+   だと light 系で周囲との比が 1.05:1 になり帯が消えるので、全テーマで
+   1.12〜1.35:1 の bg_hover（項目の hover 塗り）を使う。題名の色はここ
+   （祖先の動的プロパティ + objectName）で与え、見出し側は帯中だけ inline の
+   色指定を外す（inline は app シートより強いので、残すと勝ってしまう）。 */
+QWidget#panelHeader[focusBand="true"] {{
+    background: {t.bg_hover};
+}}
+QWidget#panelHeader[focusBand="true"] QLabel#panelHeaderTitle {{
+    color: {focus_band_ink(t)};
+}}
 
 /* ----------------------------------------------------------- nav rail */
 /* The left navigation rail (nav_rail.py::NavRail) sits one elevation BELOW
@@ -862,8 +879,7 @@ def _fragment_key(fn: Callable[[ThemeTokens], str]) -> tuple[str, str]:
     プラグインの無効化 → 再有効化はホストの ``_purge_modules`` がモジュールを
     破棄して再 import するため、``import`` 副作用で登録するフラグメントは
     サイクルごとに**別の関数オブジェクト**として現れる。同一性を関数オブジェクト
-    ではなく定義位置で見ることで、再登録を積み増しではなく差し替えにできる
-    （レビュー 2026-07-31 #121）。
+    ではなく定義位置で見ることで、再登録を積み増しではなく差し替えにできる。
     """
     return (
         getattr(fn, "__module__", "") or "",
@@ -881,15 +897,15 @@ def register_qss_fragment(fn: Callable[[ThemeTokens], str]) -> None:
     styles survive theme switches without editing the shared layer.
 
     *fn* receives the active :class:`ThemeTokens` and returns a QSS string
-    (derive every colour from the tokens — no literals; see
-    docs/claude/design.md).  When a theme is already applied the stylesheet
+    (derive every colour from the tokens — no literals, so the fragment
+    follows theme switches).  When a theme is already applied the stylesheet
     is refreshed immediately, so registration order vs ``apply_theme`` does
     not matter.
 
     **同じ定義位置の再登録は差し替え**（:func:`_fragment_key`）。プラグインの
     セッション内 無効化 → 再有効化では ``import`` 副作用の登録が毎サイクル
     走るため、無条件 append だとサイクル数ぶん同一 QSS が連結され、purge 済み
-    モジュールの関数オブジェクトも残留し続ける（レビュー 2026-07-31 #121）。
+    モジュールの関数オブジェクトも残留し続ける。
     差し替えなら登録位置（＝適用順）も保たれる。
     """
     key = _fragment_key(fn)
@@ -940,6 +956,18 @@ def hint_style(*, font_pt: int | None = None) -> str:
     if font_pt is not None:
         style += f" font-size: {font_pt}pt;"
     return style
+
+
+def caption_size_style() -> str:
+    """Inline ``setStyleSheet`` string that pins **only** the caption point size.
+
+    The focus band (``focus_band.py``) lights a pane-header title by handing
+    its colour to the app sheet (``QWidget#panelHeader[focusBand="true"]
+    QLabel#panelHeaderTitle``); an inline ``color`` would outrank that rule,
+    so while the band is on the title keeps just its size from
+    :func:`hint_style` and nothing else.
+    """
+    return f"font-size: {FONT_CAPTION_PT}pt;"
 
 
 def chip_style(*, font_pt: int | None = None, radius: int = RADIUS_SM) -> str:

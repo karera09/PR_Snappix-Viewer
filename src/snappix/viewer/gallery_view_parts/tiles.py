@@ -66,7 +66,7 @@ class Tile:
     is_fallback: bool = False
     # True once the loader reported a decode failure for this tile — the
     # placeholder then settles from the "loading" look (dots) to the static
-    # file-type glyph, so a broken image doesn't look forever-pending (C03).
+    # file-type glyph, so a broken image doesn't look forever-pending.
     thumb_failed: bool = False
     # Physical size of ``pixmap`` (BOTH axes).  A tile whose box later grows
     # (aspect settling, justify row-height growth, slider zoom) so that the
@@ -81,11 +81,11 @@ class Tile:
     # positional Tile(...) construction stays source-compatible.
     tooltip: str = ""
     # 「本編ではない」内部/メタファイル（post.md 等）— キャプションを淡色で
-    # 描き、本編メディアと同格に見えないようにする (UIレビュー 07-25 #52)。
+    # 描き、本編メディアと同格に見えないようにする。
     # 一覧からは消さない（post.md はメタへの導線として温存する）。
     dimmed: bool = False
     # Physical box edge (longest side × dpr) at which the last decode failure
-    # was observed (#114).  The host re-requests a failed tile only once its
+    # was observed.  The host re-requests a failed tile only once its
     # box grows PAST this — so a one-off failure during a resolution upgrade
     # doesn't pin an already-loaded tile to its blurry low-res pixmap forever,
     # while a settled failure is still never hammered at the same size.
@@ -99,7 +99,7 @@ class Tile:
 
 @dataclass
 class IconSeats:
-    """Computed overlay geometry for one icon-mode tile (Phase 3-2 seating).
+    """Computed overlay geometry for one icon-mode tile.
 
     All rects are in the same coordinate space as the ``img_rect`` passed to
     :func:`.painter.icon_overlay_seats`.  Extracted as a pure geometry
@@ -116,8 +116,8 @@ class IconSeats:
     title: QRect           # union of ``title_rows`` (empty when no title)
     title_text: str        # elided caption ("\n"-joined rows), for diagnostics
     #: One (rect, line) per DRAWN caption row, top → bottom.  Only the LAST
-    #: row yields width to the badge seat (UIレビュー 2026-08-28 N-105 — a
-    #: single title rect made every row pay for badges that occupy the bottom
+    #: row yields width to the badge seat (a
+    #: single title rect would make every row pay for badges that occupy the bottom
     #: row alone); the rows above it are lifted clear of ``badge_bounds`` so
     #: the "text and badges never overlap" contract still holds per row.
     title_rows: list       # [(QRect, str)]

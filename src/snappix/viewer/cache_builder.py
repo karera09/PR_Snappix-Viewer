@@ -72,7 +72,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
-import queue
 import threading
 import time
 from collections import deque
@@ -83,6 +82,7 @@ from typing import TYPE_CHECKING, Callable, Literal, assert_never, cast
 from loguru import logger
 from PySide6.QtCore import QObject, QSize, Signal
 
+from ._fanout import CompletionQueue, DaemonExecutor
 from ._runnable import GuardedStream, StreamJob, StreamOutcome
 from .aspect_probe import read_image_aspect
 from .folder_scan import (
@@ -536,7 +536,7 @@ def _walk_tree(job: StreamJob, plan: _WalkPlan) -> StreamOutcome:
     """Parallel, streaming enumeration of cacheable files under a root.
 
     Runs as one :class:`GuardedStream` job but fans the directory listing
-    out to an internal ``ThreadPoolExecutor``: each worker ``os.scandir``-s
+    out to an internal daemon executor (``_fanout.DaemonExecutor``): each worker ``os.scandir``-s
     one directory, queues its subdirectories, and the coordinator reports
     matching files in :data:`_WALK_EMIT_CHUNK` batches as they accumulate.
     The coordinator polls the cancel token between completed directories so
@@ -586,18 +586,16 @@ def _walk_tree(job: StreamJob, plan: _WalkPlan) -> StreamOutcome:
     # ``read_folder_preview_cached`` の「mtime=0 は焼かない」規約と同じ）。
     frontier: deque[tuple[str, float]] = deque(((str(plan.root), 0.0),))
     max_inflight = plan.parallelism * _INFLIGHT_DIRS_PER_THREAD
-    # 完了通知は future ごとの ``add_done_callback`` → このキューで受ける。
-    # ``concurrent.futures.wait(FIRST_COMPLETED)`` は呼び出しのたびに
-    # in-flight 全 future へウェイタを登録し、戻るときに全件から外す純 Python
-    # ループなので、1 ディレクトリ完了あたり O(in-flight) のロック取得バースト
-    # が乗る（しかもこのループには GilPacer が無い）。コールバック + キューなら
-    # 完了 1 件 = キュー操作 1 回で済み、ウォーク全体が in-flight 窓幅に依らない
-    # O(ディレクトリ数) に収まる。
-    done_q: queue.SimpleQueue = queue.SimpleQueue()
+    # 完了は ``CompletionQueue`` で受ける（完了 1 件 = キュー操作 1 回。
+    # ``wait(FIRST_COMPLETED)`` の O(in-flight) バーストはこのループに GilPacer が
+    # 無いぶん効くので戻さない）。
+    done_q = CompletionQueue()
     try:
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=plan.parallelism, thread_name_prefix="viewer-walk",
-        ) as ex:
+        # デーモン版 executor: キャンセルで break したら出口は走行中の
+        # ``os.scandir`` を待たずに返る（止まった scandir が GuardedStream の
+        # スレッドを握り続けない。``ThreadPoolExecutor`` にしない理由は
+        # ``_fanout`` の docstring）。
+        with DaemonExecutor(plan.parallelism, name="viewer-walk") as ex:
             pending: set[concurrent.futures.Future] = set()
             while pending or frontier:
                 if job.cancel.is_cancelled():
@@ -622,23 +620,13 @@ def _walk_tree(job: StreamJob, plan: _WalkPlan) -> StreamOutcome:
                     d, d_mtime = frontier.popleft()
                     fut = ex.submit(_scan_one, plan, d, d_mtime)
                     pending.add(fut)
-                    # 追加後にコールバックを付ける（既に完了済みなら
-                    # この場で呼ばれるが、その時点で pending には居る）。
-                    fut.add_done_callback(done_q.put)
+                    # 追加後に登録する（既に完了済みならこの場で積まれるが、
+                    # その時点で pending には居る）。
+                    done_q.watch(fut)
                 # 1 件の完了を待ち、その時点で溜まっている分はまとめて
                 # 回収する。タイムアウト付きなのは cancel / pause を
-                # 完了を待たずに拾うため（旧 wait() は無期限だった）。
-                try:
-                    first = done_q.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-                done = [first]
-                while True:
-                    try:
-                        done.append(done_q.get_nowait())
-                    except queue.Empty:
-                        break
-                for fut in done:
+                # 完了を待たずに拾うため。
+                for fut in done_q.take(0.1):
                     pending.discard(fut)
                     try:
                         subdirs, files, nodes = fut.result()

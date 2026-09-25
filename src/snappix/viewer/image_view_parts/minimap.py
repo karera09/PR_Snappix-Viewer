@@ -96,6 +96,16 @@ class _MinimapOverlay(QWidget):
         self._view_fy1 = fy1
         self.update()
 
+    def footprint(self) -> QRect | None:
+        """他の浮遊部品が避けるべき占有矩形（表示を許されている間だけ）。
+
+        自動非表示の間も枠を返す — 活動のたびにミニマップが出入りしても、
+        避ける側（カプセル・ズームのピル）の位置が跳ねないように。
+        """
+        if not self._eligible:
+            return None
+        return QRect(self.geometry())
+
     def reposition(self) -> None:
         parent = self.parentWidget()
         if parent is None:

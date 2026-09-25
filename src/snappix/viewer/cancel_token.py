@@ -3,13 +3,13 @@
 Every off-thread scanner in the viewer answers the same question — 「このスキャン
 結果はまだ現役か」— with two values: a *generation* number (so a consumer can
 drop stale payloads that were already emitted) and a cooperative *cancel*
-flag (so the producer stops working early).  Historically the pair lived as
-two separate fields on every scanner and had to be updated in lock-step by
-hand, which drifted: some ``cancel()`` implementations bumped the
-generation, others didn't; some tasks early-returned when queued-cancelled,
-others didn't (項目#35 — the root mechanism behind 確定指摘 #4/#5/#9).
+flag (so the producer stops working early).  Kept as two separate fields
+on every scanner, the pair has to be updated in lock-step by
+hand, which drifts: some ``cancel()`` implementations bump the
+generation, others don't; some tasks early-return when queued-cancelled,
+others don't.
 
-This module now owns the pairing:
+This module owns the pairing:
 
 * :class:`ScanSession` — one request's identity: its generation **and** its
   cancel flag, fused into a single object handed to the worker task.
@@ -76,7 +76,7 @@ class SessionOwner:
         self._current: ScanSession | None = None
 
     def start(self) -> ScanSession:
-        """Cancel the previous session (if any) and issue the next one."""
+        """Cancel the previous session (if any) and start the next one."""
         if self._current is not None:
             self._current.cancel()
         self._generation += 1
@@ -120,7 +120,7 @@ class SessionRunnable(QRunnable):
 
     A queued runnable cannot be pulled back out of a ``QThreadPool``; without
     this guard a navigation burst makes every superseded task still pay its
-    full enumeration before noticing the cancel (確定指摘 #5 の型).  The
+    full enumeration before noticing the cancel.  The
     guard lives in ``run()`` so no subclass can forget it — subclasses
     implement :meth:`_run` instead.
     """

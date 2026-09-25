@@ -124,7 +124,7 @@ def is_meta_or_marker_name(name: str) -> bool:
 
 
 def is_meta_or_marker_file(path: Path) -> bool:
-    """*path* が「表示可能メディアではない」内部ファイルか (UIレビュー 07-25 #52).
+    """*path* が「表示可能メディアではない」内部ファイルか.
 
     対象は ``post.md``（投稿メタ文書 — 中央は Markdown ビュー / 情報パネルの
     メタカードで表現される）と ``#thumb#…``（書き込み側ツールの代表画像マーカー
@@ -234,7 +234,7 @@ def select_preview_candidates(
 ) -> tuple[str | None, str | None]:
     """ファイル名リストから ``(thumb_marker, non_thumb_marker)`` 名を選ぶ純関数.
 
-    フォルダ代表画像の選定規則の**単一定義** (#40): live 読み
+    フォルダ代表画像の選定規則の**単一定義**: live 読み
     （:func:`_scan_dir_images`）と ``cache_builder._scan_one`` のフォルダ行
     温め（親 scandir で得た名前リストからの選定）が共有する。名前だけで
     完結するので追加の filesystem アクセスは無い。
@@ -336,7 +336,7 @@ def _scan_dir_images(
 
     *skip* excludes the given paths from the thumbnail/PDF candidate slots
     (they still count towards *file_names*).  Used by the centre-pane
-    representative-image fallback (#84) to walk past a candidate that the
+    representative-image fallback to walk past a candidate that the
     decoder could not read.
     """
     post_md_path: Path | None = None
@@ -344,7 +344,7 @@ def _scan_dir_images(
     file_names: list[str] = []
     # Files eligible for the candidate slots (non-``post.md``, not *skip*ped);
     # the actual pick is delegated to :func:`select_preview_candidates` so the
-    # rule has one home shared with the cache-build walk (#40).
+    # rule has one home shared with the cache-build walk.
     candidate_names: list[str] = []
     # Per-entry classification failures degrade the result exactly like a
     # failed scandir: the entry is dropped from *file_names* and from the
@@ -416,8 +416,7 @@ def _find_images_bfs(
     walk coverage shared with :func:`_iter_tree` and
     ``cache_builder._walk_tree`` — so a junction / symlink pointing back
     at an ancestor (or sideways at a sibling) is visited once instead of
-    eating the *max_dirs* budget again under a second name (レビュー
-    2026-09-03 項目 #222).  The predicate is applied **immediately before
+    eating the *max_dirs* budget again under a second name.  The predicate is applied **immediately before
     each ``os.scandir``**, not when candidates are queued, so its identity
     ``os.stat`` stays inside the *max_dirs* budget.
 
@@ -426,7 +425,7 @@ def _find_images_bfs(
     content that actually exists (e.g. a NAS share that dropped mid-scan),
     so it must not be persisted as "this folder is empty".
 
-    *skip* is forwarded to :func:`_scan_dir_images` at every depth (#84).
+    *skip* is forwarded to :func:`_scan_dir_images` at every depth.
 
     ``should_cancel`` is polled **before the top-level scan too**, not only
     inside the descent loop: a probe that was superseded while it sat in its
@@ -461,12 +460,12 @@ def _find_images_bfs(
             file_names, ok,
         )
 
-    # 訪問可否は走査カバレッジの単一定義 :func:`should_descend` に通す (#44)。
+    # 訪問可否は走査カバレッジの単一定義 :func:`should_descend` に通す。
     # ここは 3 本目のツリーウォーカーで、以前は ``visited`` が識別子の集合では
     # なく単なる件数カウンタだったため、祖先や兄弟を指すジャンクション /
     # symlink があると同じ物理ディレクトリを別名で何度も scandir し、
     # ``max_dirs`` の予算をループ側が食い潰して本来届くはずの兄弟サブツリーの
-    # 代表画像に到達できなかった（レビュー 2026-09-03 項目 #222）。
+    # 代表画像に到達できなかった。
     # 2 つの状態は役割が別: *visited* は identity の循環ガード、*scanned* は
     # NAS へのラウンドトリップ予算（実際に scandir した回数）。
     # 判定は「降下候補に積む時点」ではなく **scandir の直前** に置く:
@@ -552,7 +551,7 @@ def find_first_image(
 
     *skip* excludes the given paths from candidacy at every depth, so a
     caller that found the returned file undecodable can ask for the next
-    candidate instead (centre-pane representative-image fallback, #84).
+    candidate instead (centre-pane representative-image fallback).
 
     Descent is bounded by :data:`_RECURSE_MAX_DIRS` and
     :data:`_RECURSE_MAX_DEPTH` to keep NAS load predictable — see the
@@ -572,6 +571,26 @@ def find_first_image(
     return marker_path if marker_path is not None else other_path
 
 
+def next_representative(
+    folder: Path,
+    skip: AbstractSet[Path] = frozenset(),
+    should_cancel: Callable[[], bool] | None = None,
+) -> Path | None:
+    """*folder* の代表として出す画像 — *skip*（デコード失敗した候補）を除く.
+
+    非 ``#thumb#`` の画像を優先し、無ければマーカー（中央プレビューとフォルダ
+    プレビューの共通規則。BFS 1 回が両方を返す）。NAS で数十回の scandir に
+    なり得るので GUI スレッドでは呼ばない。キャンセルされた降下は ``None``。
+    """
+    try:
+        marker_path, other_path, _, _, _, _ = _find_images_bfs(
+            folder, skip=skip, should_cancel=should_cancel,
+        )
+    except OSError:  # pragma: no cover (defensive)
+        return None
+    return other_path if other_path is not None else marker_path
+
+
 def _read_post_md_checked(md_path: Path) -> tuple[ParsedPost | None, bool]:
     """Read + parse ``post.md``, distinguishing "absent" from "unreadable".
 
@@ -588,7 +607,7 @@ def _read_post_md_checked(md_path: Path) -> tuple[ParsedPost | None, bool]:
     is unused here and the ``thumbnail:`` hint is deliberately ignored (see
     :func:`apply_preview`).  Reading whole multi-MB bodies across six parallel
     metadata workers would burn NAS bandwidth (and memory) for a few hundred
-    bytes of meta (#88).  The ``body:`` filter has its own full read
+    bytes of meta.  The ``body:`` filter has its own full read
     (``filter_query.parsed_post_cached``).
     """
     with measure("post_md_read", str(md_path)):
@@ -815,12 +834,11 @@ def scan_children_checked(
     scandir buffer (:func:`_entry_is_dir`), so the common case — a junction
     whose target share has dropped — stays in the listing with no extra I/O.
 
-    Before this existed the consumer re-probed the same root with a second
-    ``is_dir()`` + ``scandir`` to *reconstruct* the failure it had just been
-    denied; a transient failure (an SMB share that dropped mid-enumeration
+    The consumer must not re-probe the same root with a second
+    ``is_dir()`` + ``scandir`` to *reconstruct* the failure it has just been
+    denied: a transient failure (an SMB share that dropped mid-enumeration
     and recovered a moment later) does not reproduce, so a folder with
-    contents was announced as 「このフォルダは空です」 — レビュー 2026-09-03
-    項目 #216.
+    contents would be announced as 「このフォルダは空です」.
 
     A *cancelled* scan is not a failure: it returns the partial list with
     ``failure=None``, exactly as before, and the caller drops it by
@@ -1236,7 +1254,7 @@ def dir_identity(entry_or_path) -> object | None:
 def admit_dir_identity(ident: object | None, visited: set[object]) -> bool:
     """Record *ident* in *visited*; return whether its directory may be walked.
 
-    The single admission rule behind :func:`should_descend` (#44), split out
+    The single admission rule behind :func:`should_descend`, split out
     for callers that already computed the identity elsewhere —
     ``cache_builder._scan_one`` computes identities on its ``scandir`` worker
     threads and ``cache_builder._walk_tree`` admits them on the coordinator
@@ -1253,18 +1271,17 @@ def admit_dir_identity(ident: object | None, visited: set[object]) -> bool:
 
 
 def should_descend(entry_or_path, visited: set[object]) -> bool:
-    """訪問可否述語: *entry_or_path* のディレクトリへ降りてよいか (#44)。
+    """訪問可否述語: *entry_or_path* のディレクトリへ降りてよいか。
 
     「あるルート配下の全ディレクトリを、リンクによる無限ループを踏まずに
     1 回ずつ訪れる」という走査カバレッジの定義そのもの。リポジトリには
     独立した 3 つのウォーカー — :func:`_iter_tree`（``walk_for_search`` /
     ``walk_recent_files`` の逐次ジェネレータ）、
     ``cache_builder._walk_tree``（並列・ストリーミング）、
-    :func:`_find_images_bfs`（フォルダ代表画像の浅い BFS。項目 #222 で合流）
-    — があり、カバレッジ
-    一致は scanning.md の明文不変条件だが、実際には symlink 除外 (#85) /
-    ジャンクション除外 (#38) / identity 表現の不一致 (#43) と同型のズレが
-    繰り返し発生した。ウォーカー本体の統合は層分け（Qt 依存 / 同期）上
+    :func:`_find_images_bfs`（フォルダ代表画像の浅い BFS）
+    — があり、カバレッジ一致は走査の不変条件だが、symlink 除外 /
+    ジャンクション除外 / identity 表現の不一致といった同型のズレが
+    ウォーカーごとに入り込みやすい。ウォーカー本体の統合は層分け（Qt 依存 / 同期）上
     妥当でないため、**訪問可否の判定だけ**をこの 1 関数に寄せる:
     symlink / ジャンクションは除外せず（``dir_identity`` がリンク先の
     identity を返すので）*visited* との照合だけで重複降下を防ぐ。
@@ -1305,8 +1322,7 @@ def _iter_tree(
     consumers wire it, because 「読めなかった」 must never be shown as
     「増えていない」 (recent files) nor as 「該当なし」 (the recursive search: a
     missed sub-tree only costs hits *while hits remain*, but a zero-hit walk
-    with a hole in it is a denial the walk never earned — レビュー 2026-09-03
-    項目 #64).  The caller decides what a failure means.
+    with a hole in it is a denial the walk never earned).  The caller decides what a failure means.
 
     ``should_cancel`` is polled at each new ``os.scandir`` and every 256
     entries; a cancelled walk simply stops iterating, so the consumer keeps
@@ -1393,8 +1409,8 @@ def walk_for_search(
     thread**, so the caller receives only matches and never runs the
     O(descendants) substring scan on the GUI thread.  ``or_terms`` is the
     Danbooru-style ``~`` pool (already-casefolded): when non-empty, a
-    descendant must additionally contain at least ONE of its members (#3 —
-    the pool must not be flattened into the AND ``includes``).
+    descendant must additionally contain at least ONE of its members (the
+    pool must not be flattened into the AND ``includes``).
     ``includes=None`` with no ``or_terms`` disables filtering (every
     descendant is returned).  Directories that don't themselves match are
     still descended into — a match may live deeper — they're just not added
@@ -1426,8 +1442,7 @@ def walk_for_search(
     ``os.scandir`` failed — the walk still returns whatever the readable part
     of the tree yielded, but the caller can then say 「一部読み取れませんでした」
     instead of presenting a holed answer (or worse, an empty one) as a
-    confident 「該当なし」.  Same channel :func:`walk_recent_files` uses; the
-    search left it unwired until レビュー 2026-09-03 項目 #64.
+    confident 「該当なし」.  Same channel :func:`walk_recent_files` uses.
 
     Returns an empty list on I/O errors at the root level.
     """
@@ -1442,7 +1457,7 @@ def walk_for_search(
             return False
         if includes and not all(inc in hay for inc in includes):
             return False
-        # ``~`` OR pool: at least one member must match (#3).
+        # ``~`` OR pool: at least one member must match.
         return not or_terms or any(alt in hay for alt in or_terms)
 
     # Root-relative path of an entry, as a forward-slash string, without

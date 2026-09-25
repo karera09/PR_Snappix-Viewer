@@ -6,8 +6,8 @@ Thin subclass of :class:`ChildrenGrid` that adds:
   whose "⋯" overflow button opens a small popover holding 並び順 / 表示形式 /
   サムネイルサイズ — the same three rows, in the same order, built by the same
   ``ChildrenGrid._build_view_settings_rows`` factory as the left pane's
-  「並び・表示」 popover (UIレビュー 2026-08-28 N-75).  No filter UI (the right
-  pane is a leaf view).  See the `PanelHeader` section of docs/claude/design.md.
+  「並び・表示」 popover.  No filter UI (the right pane is a leaf view).
+  ``PanelHeader`` is the shared pane header (title + count + "⋯" overflow).
 * The loading-spinner overlay (painted by :class:`GalleryView`, driven
   here via ``set_spinner_check`` + an 80 ms repaint timer) on image-file
   tiles whose PIL source hasn't reached :class:`ImageView`'s LRU yet.
@@ -18,7 +18,7 @@ Thin subclass of :class:`ChildrenGrid` that adds:
   「ファイルをコピー」 extra.
 * A minimal sort in the 並び順 combo (既定 / 名前 / 更新日時 / 種類).  "既定"
   is the scanner's historical order (dirs first) with ``post.md`` demoted to
-  the end of the files (UIレビュー 07-25 #52 — 本編優先); the other modes
+  the end of the files (本編優先); the other modes
   re-sort the *cached* shallow-scan entries GUI-side
   (no rescan), keeping folders ahead of files.  Persisted as
   ``ViewerState.file_list_sort_mode``.
@@ -63,8 +63,8 @@ _ICON_THUMB_SIZE_MIN = 64
 #: (``ViewerState.file_list_sort_mode``) — keep it stable; the second is an
 #: i18n catalog key resolved via ``t()`` where the action is built.
 #: 方向表記は左ペイン（``post_grid`` の全項目が「(昇順)」/「(新しい順)」を
-#: 持つ）に揃える — 実装は name / type とも昇順固定、mtime は新しい順
-#: （UIレビュー 2026-09-11 N-131）。``default`` はスキャン順なので方向の概念が
+#: 持つ）に揃える — 実装は name / type とも昇順固定、mtime は新しい順。
+#: ``default`` はスキャン順なので方向の概念が
 #: 無く、表記も持たない。**永続キー（第 1 要素）は不変**。
 _FILE_SORT_LABELS: list[tuple[str, str]] = [
     ("default", "viewer.file_list.sort_default"),
@@ -83,30 +83,29 @@ class FileListView(ChildrenGrid):
     #: there.  Only emitted when similar search is available (VectorIndex present).
     similar_search_requested = Signal(Path, object)
 
-    #: A curation edit was asked for on a right-list entry (UIレビュー 07-25 #19).
+    #: A curation edit was asked for on a right-list entry.
     #: ``(path, kind, value)`` where *kind* is ``"star"`` / ``"later"`` /
     #: ``"edit_tags"``.  Deliberately ONE signal that only *reports* the intent:
     #: the store write, the in-memory map patch and the toast all stay owned by
-    #: :meth:`PostGrid._apply_curation`, so both panes can never drift.  The pane
-    #: painted these badges but offered no way to set them — "読めるのに書けない".
+    #: :meth:`PostGrid._apply_curation`, so both panes can never drift.  A pane
+    #: that paints these badges must also offer a way to set them — "読めるのに書けない" otherwise.
     curation_requested = Signal(Path, str, object)
 
-    #: 0–5 pressed with a right-list tile selected (UIレビュー 07-25 #19).  Re-emit
+    #: 0–5 pressed with a right-list tile selected.  Re-emit
     #: of the view's own key signal; the window resolves it to the selected file
     #: and routes it through the same ``_set_current_star`` funnel the grid and
     #: the preview use, so all surfaces produce the same 「★★★ 対象名」 toast.
     star_key_requested = Signal(int)
 
-    #: フォルダ行の右クリック「最近追加されたファイルを表示」
-    #: (UIレビュー 2026-08-28 N-50)。左グリッドの同じ動線だけが持っていた
-    #: 項目で、右ペインのフォルダ右クリックにだけ無かった。この一覧は
+    #: フォルダ行の右クリック「最近追加されたファイルを表示」。
+    #: 左グリッドの同じ動線と揃える。この一覧は
     #: 左ペインのビュー（``PostGrid.enter_recent_files_view``）なので、
     #: 右ペインは意図だけを報告し、窓が左ペインへ転送する
     #: （``curation_requested`` と同じ形 — 右ペインは左ペインを知らない）。
     recent_files_requested = Signal(Path)
 
-    #: ファイル行の右クリック「このファイルの場所を開く」
-    #: (UI08-28 N-64 / 2026-09-11 N-40)。左グリッドの同名シグナルと同じ形で、
+    #: ファイル行の右クリック「このファイルの場所を開く」。
+    #: 左グリッドの同名シグナルと同じ形で、
     #: 窓が親フォルダ + 当の項目の選択へ着地させる。
     reveal_in_app_requested = Signal(Path)
 
@@ -145,7 +144,7 @@ class FileListView(ChildrenGrid):
         # Cached shallow-scan result so a sort change re-sorts without a
         # rescan (the scanner already delivered everything we need).
         # ``_raw_entries`` keeps what the scanner delivered so the
-        # ``#thumb#`` visibility toggle (N-81) can re-filter without one
+        # ``#thumb#`` visibility toggle can re-filter without one
         # either; ``_entries`` is the currently visible subset.
         self._raw_entries: list[FolderEntry] = []
         self._entries: list[FolderEntry] = []
@@ -179,12 +178,12 @@ class FileListView(ChildrenGrid):
         # True only when a VectorIndex is loaded).  Default False so the item
         # hides on installs without semantic vectors.
         self._similar_search_available = False
-        # Curation lookup for the context menu's check states (UIレビュー #19).
+        # Curation lookup for the context menu's check states.
         # ``None`` = no user_meta store → the whole curation section is omitted,
         # the same degradation the left pane's menu already applies.
         self._curation_provider = None
         self._view.star_key_requested.connect(self.star_key_requested)
-        # UIレビュー #10: nothing is selected yet at construction time either
+        # Nothing is selected yet at construction time either
         # (the base ``__init__`` just sets ``_root_or_folder = None`` without
         # routing through ``set_folder`` — this pane would otherwise sit
         # blank until main_window's first ``clear()``/``set_folder(None)``
@@ -196,13 +195,13 @@ class FileListView(ChildrenGrid):
     # ------------------------------------------------------------ hooks
 
     def _build_chrome(self, outer_layout: QVBoxLayout) -> None:
-        # PanelHeader (redesign 2026-07 Phase 1-2): title + item count, with
+        # PanelHeader: title + item count, with
         # the pane's secondary controls (size / view mode / sort) tucked
         # behind the "⋯" overflow button instead of a permanent header row.
         self._header = PanelHeader(t("common.label.file"))
-        # H4 統一 (split-view redesign 2026-07): a right-list image double-click
+        # A right-list image double-click
         # maximises the preview, same as the grid.  The header tooltip spells
-        # out the gesture (UIレビュー #21 — no other on-screen cue).
+        # out the gesture (there is no other on-screen cue).
         self._header.setToolTip(t("viewer.file_list.dblclick_tooltip"))
         overflow_btn = self._header.overflow_button()
         overflow_btn.setToolTip(t("viewer.file_list.options_tooltip"))
@@ -220,15 +219,12 @@ class FileListView(ChildrenGrid):
         as a real widget (not a ``QMenu``) so it can host the slider + combos.
 
         The three rows come from ``ChildrenGrid._build_view_settings_rows``,
-        the same factory the left pane's 「並び・表示」 popover uses (UIレビュー
-        2026-08-28 N-75).  Sort used to be an exclusive checkable ``QAction``
-        group behind a ``QToolButton``, justified in a comment by "the right
-        pane stays a leaf view with **no permanent sort combo** … without extra
-        chrome" — but the redesign already moved BOTH panes' controls into
-        click-away popovers, so nothing here is permanent any more and the
-        premise no longer holds.  What was left was one setting operated two
-        different ways.  State + persistence (``ViewerState.file_list_sort_mode``)
-        are untouched: only the control changed.
+        the same factory the left pane's 「並び・表示」 popover uses, so one
+        setting is never operated two different ways across the panes.  Both
+        panes keep their controls in click-away popovers, so nothing here is
+        permanent chrome.  State + persistence
+        (``ViewerState.file_list_sort_mode``) belong to the sort mode, not the
+        control.
         """
         popup = QFrame(self, Qt.Popup)
         popup.setFrameShape(QFrame.StyledPanel)
@@ -253,6 +249,11 @@ class FileListView(ChildrenGrid):
             popover_position(btn, self._overflow_popup.size())
         )
         self._overflow_popup.show()
+
+    @property
+    def header(self) -> PanelHeader:
+        """この一覧の見出し（フォーカス帯の点灯先）。"""
+        return self._header
 
     # ------------------------------------------------------------- sorting
 
@@ -303,10 +304,10 @@ class FileListView(ChildrenGrid):
 
     @staticmethod
     def _demote_meta(entries: list[FolderEntry]) -> list[FolderEntry]:
-        """``post.md`` を末尾へ格下げする (UIレビュー 07-25 #52).
+        """``post.md`` を末尾へ格下げする.
 
-        スキャナの既定順は ``post.md`` を先頭に置くため、投稿を開くと本編の
-        1 枚目が 2 番目に見えていた。本編メディアの母集合（``tile_paths`` /
+        スキャナの既定順は ``post.md`` を先頭に置くため、そのままでは投稿を
+        開くと本編の 1 枚目が 2 番目に見える。本編メディアの母集合（``tile_paths`` /
         閲覧モード）からは既に外してあるので、一覧でも「メタは末尾」に格下げ
         して並びを本編優先にする（淡色描画は ``Tile.dimmed``）。相対順は
         安定ソートで保つ。
@@ -315,22 +316,20 @@ class FileListView(ChildrenGrid):
 
     @staticmethod
     def _is_thumb_marker(entry: FolderEntry) -> bool:
-        """Whether *entry* is a ``#thumb#…`` creator-icon marker file (#23)."""
+        """Whether *entry* is a ``#thumb#…`` creator-icon marker file."""
         return (
             not entry.is_dir
             and entry.path.name.lower().startswith(THUMB_MARKER_PREFIX)
         )
 
     def set_exclude_thumb_marker(self, exclude: bool) -> None:
-        """Follow the grid's 「クリエイターアイコンを隠す」 toggle (N-81).
+        """Follow the grid's 「クリエイターアイコンを隠す」 toggle.
 
-        #23 originally dropped ``#thumb#`` markers here unconditionally,
-        claiming to match the grid tile's exclusion.  The grid's exclusion
-        later became conditional on ``ViewerState.exclude_thumb_marker``
-        (``post_grid._drop_thumb_markers``) and this side was never updated —
-        so with the toggle OFF the two panes listed different item counts while
-        a stale comment asserted they agreed (UIレビュー 2026-08-28 N-81, 案A).
-        The toggle is now one setting with one meaning on both sides; hiding
+        The grid's exclusion is conditional on
+        ``ViewerState.exclude_thumb_marker`` (``post_grid._drop_thumb_markers``);
+        dropping ``#thumb#`` markers here unconditionally would make the two
+        panes list different item counts with the toggle OFF.  The toggle is
+        one setting with one meaning on both sides; hiding
         them also keeps them out of the stage image track (fed from
         ``tile_paths()``) for free.
 
@@ -384,7 +383,7 @@ class FileListView(ChildrenGrid):
         (``viewer.post_grid.banner_count``) instead of minting a near-dup
         catalog key.
 
-        UIレビュー #19: when the listing is folder-dominant (a creator folder
+        When the listing is folder-dominant (a creator folder
         whose children are post folders, not files) the 「ファイル」 heading
         contradicts the content, so the title switches to the neutral 「内容」
         whenever any subfolder is present.
@@ -427,18 +426,18 @@ class FileListView(ChildrenGrid):
             self._entries = []
             self._entries_by_path = {}
             self._raw_entries = []
-            # 件数だけでなく**見出しも**中立へ戻す（N-99）: 見出しは
+            # 件数だけでなく**見出しも**中立へ戻す: 見出しは
             # ``_update_header_count``（= 着地時）でしか動かないので、
             # 件数だけ消すと直前のフォルダの「内容」が残り、ファイルしか
-            # 無い次のフォルダでも「内容」を名乗り続けていた。空の
+            # 無い次のフォルダでも「内容」を名乗り続ける。空の
             # ``_entries`` に対しては ``has_folder=False`` = 「ファイル」 +
             # 件数空 の中立な初期状態になる。
             self._update_header_count()
         super().set_folder(folder, pending_select=pending_select)
         if folder is None:
-            # UIレビュー #10: the base's set_folder(None) routes through
+            # The base's set_folder(None) routes through
             # GalleryView.clear(), which blanks any settled empty-state
-            # message — historically leaving this pane a silent void with no
+            # message — that would leave this pane a silent void with no
             # explanation while nothing is selected (main_window calls
             # ``clear()`` both at startup and whenever the centre/right panes
             # reset between folders).  Re-set it right away so the pane never
@@ -450,7 +449,7 @@ class FileListView(ChildrenGrid):
             )
 
     def _empty_state_message(self) -> str:
-        """Settled-empty hint for a *selected* folder with no children (#10).
+        """Settled-empty hint for a *selected* folder with no children.
 
         Deliberately worded differently from the "nothing selected"
         message set directly in :meth:`set_folder` — this one is shown while
@@ -459,13 +458,13 @@ class FileListView(ChildrenGrid):
         return t("viewer.file_list.empty_folder")
 
     def _empty_state_icon(self) -> str:
-        """No glyph — this pane is a **従属面** (N-101 / 空状態オーケストレータ).
+        """No glyph — this pane is a **従属面** (空状態オーケストレータ).
 
-        Phase 3-4 gave every placeholder the same icon + message card grammar,
-        but on a settled-empty window that produced **three folder glyphs of
-        the same size in three panes**, with the subordinate two reading as
-        loud as the one card that actually owns the next step.  The window's
-        resolver (:mod:`empty_state`) now assigns this pane ``SECONDARY`` in
+        Giving every placeholder the same icon + message card grammar would put
+        **three folder glyphs of the same size in three panes** on a
+        settled-empty window, with the subordinate two reading as loud as the
+        one card that actually owns the next step.  The window's resolver
+        (:mod:`empty_state`) assigns this pane ``SECONDARY`` in
         every empty state it participates in, and ``SECONDARY`` means
         「アイコン無し・1 行・控えめ」.  The pane's own placeholders follow the
         same grammar so the two writers can never disagree.
@@ -485,7 +484,7 @@ class FileListView(ChildrenGrid):
         ``None`` removes the spinner.
 
         述語は「LRU 残留」ではなく「先読みウィンドウ内でまだ載っていない」で
-        なければならない（項目#60）— 残留で判定すると先読み半径の外の行が
+        なければならない — 残留で判定すると先読み半径の外の行が
         恒久的にスピナー対象になり、80ms の再描画タイマが止まらなくなる。
         """
         self._view.set_spinner_check(cache_check)
@@ -499,7 +498,7 @@ class FileListView(ChildrenGrid):
 
         The base forwards *provider* to the view for the badge overlays; this
         pane additionally needs it to tick the right ★ / 「あとで見る」 entries in
-        its own right-click menu (UIレビュー 07-25 #19).  ``None`` (no user_meta
+        its own right-click menu.  ``None`` (no user_meta
         store) removes both the badges and the menu section.
         """
         super().set_curation_provider(provider)
@@ -601,7 +600,7 @@ class FileListView(ChildrenGrid):
 
         # 共通ブロックは動詞レジストリ 1 表から（左グリッドと同じ並び）。
         # 印の動詞はこのペインが所有せず ``curation_requested`` で左ペインの
-        # 単一書き手へ転送するだけ（UIレビュー #19）— 店が無ければ節ごと出ない。
+        # 単一書き手へ転送するだけ — 店が無ければ節ごと出ない。
         hooks = None
         if self._curation_provider is not None:
             hooks = CurationHooks(

@@ -20,7 +20,7 @@
 **キー計算をここへ動かしてはならない**: ``tests/test_viewer_user_meta_path_keys.py``
 はキー経路の呼び出し閉包が ``user_meta.py`` の中で閉じることを AST で要求する
 （呼び先が別モジュールにあると閉包走査が本体を一度も検査しないまま素通りし、
-#133 の差し戻し理由がそのまま戻る）。``clamp_star`` / ``split_user_tags`` /
+キー経路の検査が空振りする）。``clamp_star`` / ``split_user_tags`` /
 ``join_user_tags`` もその閉包の中（``load_all`` → ``_row_to_meta``）にある。
 """
 

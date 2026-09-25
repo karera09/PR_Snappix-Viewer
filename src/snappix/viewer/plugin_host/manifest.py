@@ -47,7 +47,7 @@ _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 #: 表示用の文字数上限。``id`` 以外のマニフェスト文字列は**未検証の外部入力**
 #: （まだ信頼していないプラグインのフォルダから読む）なので、そのまま
 #: 信頼モーダル・管理ダイアログの詳細ラベルへ流すと、数千字の ``description``
-#: が本文の危険説明と質問文を画面外へ押し出せる（レビュー 2026-09-11 N-28）。
+#: が本文の危険説明と質問文を画面外へ押し出せる。
 #: 切り詰めるのは**表示用の値だけ**で、``id`` の検証・``store`` の記録キー・
 #: ``api`` の突合には一切影響しない。
 _MAX_SHORT_CHARS = 80
@@ -71,7 +71,7 @@ def _clip(value: str, limit: int) -> str:
 
     改行・制御文字は 1 個の空白へ畳む — 文字数だけを縛ると、改行を詰めた
     300 文字の description が 300 行として描かれ、モーダルが画面の高さを
-    超えて危険説明とボタンを押し出せる（文字数上限が狙った N-28 の穴）。
+    超えて危険説明とボタンを押し出せる（文字数上限だけでは塞がらない穴）。
     """
     value = _CONTROL_RUN_RE.sub(" ", value).strip()
     if len(value) <= limit:
@@ -155,7 +155,7 @@ def load_manifest(plugin_dir: Path) -> PluginManifest:
         # 非 UTF-8（例: 日本語 Windows のメモ帳が ANSI=Shift-JIS で保存）。
         # UnicodeDecodeError は ValueError であって OSError ではないため、
         # ここで捕まえないと discover_plugins の ManifestError ハンドラを
-        # すり抜けて起動全体のプラグイン配線を落とす（レビュー #29）。
+        # すり抜けて起動全体のプラグイン配線を落とす。
         raise ManifestError(
             f"{MANIFEST_NAME} が UTF-8 で読めません: {exc}"
         ) from exc
@@ -229,7 +229,7 @@ def discover_plugins(
       :class:`BrokenPlugin`。勝者の選び方:
 
       - *preferred_folders* にその id の basename が指定され、候補にそのフォルダが
-        あれば**それが勝者**（記録済みフォルダ優先 — なりすまし対策 issue #37）。
+        あれば**それが勝者**（記録済みフォルダ優先 — なりすまし対策）。
       - 指定が無い / 一致しなければ従来どおり**フォルダ名の辞書順で先勝ち**。
 
     *preferred_folders* は ``{id: フォルダ basename}``。store が記録した「有効化を

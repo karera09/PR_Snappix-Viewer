@@ -19,7 +19,7 @@ from PySide6.QtGui import QFont, QFontMetrics, QPalette
 
 from ...common.ui import FONT_TITLE_PT, icon
 
-# Empty-state card regularisation (redesign 2026-07 Phase 3-4): glyph size +
+# Empty-state card regularisation: glyph size +
 # gap above the settled-empty message.  Kept modest (rather than the spec's
 # full 32-48px range's top end) so the icon reads as a quiet accent, not a
 # dominant graphic, in an otherwise small/typical pane.
@@ -27,7 +27,7 @@ EMPTY_ICON_SIZE = 32
 EMPTY_ICON_GAP = 10
 #: 空状態の見出し行と本文ブロックの間隔（px）。
 EMPTY_HEADING_GAP = 4
-#: 主 / 副ボタンの間隔（px — UIレビュー 07-25 #26 の 2 ボタン化）。
+#: 主 / 副ボタンの間隔（px）。
 EMPTY_BUTTON_GAP = 8
 
 
@@ -121,7 +121,7 @@ def paint(
     body_font: QFont,
     icon_name: str,
 ) -> None:
-    """Paint the settled empty-state icon + heading + body (#5 / redesign #3-4).
+    """Paint the settled empty-state icon + heading + body.
 
     1 行目は見出し（``FONT_TITLE_PT`` + 太字 + ``palette(text)``）、残りは本文
     （既定サイズ + ``palette(mid)`` = ``text_muted`` トークン）。改行の無い
@@ -156,7 +156,7 @@ def plan_button_row(
 ) -> list[QPoint] | None:
     """Centre the action button(s) just below the painted message block.
 
-    2 つまでは 1 行に並べて中央寄せする（主が左 — UIレビュー 07-25 #26）。
+    2 つまでは 1 行に並べて中央寄せする（主が左）。
     3 つ以上は縦積み（AI 検索の 0 件カードは効いている軸ごとに 1 ボタンで、
     横並びではビューポート幅に収まらない）。
 

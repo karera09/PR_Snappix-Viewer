@@ -105,6 +105,33 @@ def iter_chunks(items: list, size: int = QUERY_CHUNK):
         yield items[i:i + size]
 
 
+# Lone UTF-16 surrogates (U+D800..U+DFFF).  Windows file names are UTF-16 and
+# may contain an unpaired half (e.g. a name truncated mid-emoji); Python maps
+# it to a lone surrogate in ``str``, which ``sqlite3`` cannot bind: it encodes
+# text parameters as strict UTF-8, so ONE such value fails the whole
+# ``execute`` / ``executemany``.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def sqlite_text_ok(value: str) -> bool:
+    """True iff *value* can be bound as a ``sqlite3`` text parameter.
+
+    Batch APIs filter with this so an unencodable path costs only its own
+    row (a permanent miss / skipped write) instead of failing the whole batch
+    — a folder with one such file name would otherwise never get a cache hit
+    for any of its siblings.
+    """
+    return _LONE_SURROGATE.search(value) is None
+
+
+def encodable_rows(rows) -> list[tuple]:
+    """Keep only the parameter tuples whose ``str`` items :func:`sqlite_text_ok`."""
+    return [
+        r for r in rows
+        if all(not isinstance(v, str) or sqlite_text_ok(v) for v in r)
+    ]
+
+
 class SqliteStoreBase:
     """Minimal connection plumbing shared by every sqlite-backed store.
 
@@ -211,7 +238,7 @@ class SqliteStoreBase:
         しない）。``SCHEMA_TABLES`` が空の store では no-op。呼び出し側はロックを
         保持していること。
 
-        **``SELECT *`` であることが本質**（項目#148 の隣、項目#52）: ``SELECT 1``
+        **``SELECT *`` であることが本質**: ``SELECT 1``
         は列値を一切参照しないため、sqlite は ``used_at`` などの索引だけで
         被覆スキャンして答えられてしまい（実測・当時の ``post`` 表: ``SCAN post
         USING COVERING INDEX idx_post_used_at``）、**表本体の b-tree ページに一度も触れない**。
@@ -246,8 +273,7 @@ class SqliteStoreBase:
         belongs to its host, and closing it here would take the file's other
         tables down with it.  Closing the host closes the file once.
 
-        **稼働していたストアを GUI スレッドから直接閉じないこと（issue
-        #132）**: WAL の最後の接続を閉じるとチェックポイント（``-wal`` の本体
+        **稼働していたストアを GUI スレッドから直接閉じないこと**: WAL の最後の接続を閉じるとチェックポイント（``-wal`` の本体
         への反映 + ``-wal`` / ``-shm`` の削除）が走るため、DB が到達不能な SMB
         共有上にあるとここは OS の I/O タイムアウトぶん — 実測で数十〜数百秒
         — ブロックする。``busy_timeout`` は sqlite のロック待ちにしか効かず、
@@ -444,7 +470,7 @@ class SqliteCacheBase(SqliteStoreBase):
 
         Doubles as the startup corruption probe (``open_with_recovery`` takes
         ``prune`` as its ``verify``), so :meth:`_probe_schema_tables_locked`
-        runs **first** — before the budget short-circuit below (項目#52).  The
+        runs **first** — before the budget short-circuit below.  The
         sweep's own ``_estimated_bytes_locked`` can be answered from a covering
         index (``ThumbMetaCache``: ``SELECT COUNT(*), SUM(LENGTH(path)) FROM
         aspect`` → ``SCAN aspect USING COVERING INDEX``), so without the probe
@@ -513,7 +539,7 @@ class SqliteCacheBase(SqliteStoreBase):
         attached stores too, whose ``close`` flushes without touching the
         host's handle.
 
-        呼び出しスレッドの制約は :meth:`SqliteStoreBase.close` と同じ（#132）
+        呼び出しスレッドの制約は :meth:`SqliteStoreBase.close` と同じ
         — 到達不能な共有ではフラッシュも close も長時間ブロックしうるので、
         GUI スレッドから直接呼ばないこと。
         """
@@ -561,12 +587,12 @@ def _is_corrupt_db_error(
       分類する。``could not decode`` は bit 化けで TEXT 列が不正 UTF-8 になった
       破損で、実 sqlite が ``OperationalError: Could not decode to UTF-8 column
       ...`` として投げる（型だけでは一過性と誤分類され毎起動 ``None`` 劣化が恒久化
-      する — 項目1 の取りこぼし）。
+      する）。
     * ``no such table: <name>`` で ``<name>`` が *schema_tables*（= ストア自身が
       所有するテーブル。:attr:`SqliteCacheBase.SCHEMA_TABLES`）に含まれる → 破損
       （``True``）。「``user_version`` はマイグレーション済みを示すのに対象テーブル
       が無い」異種 sqlite ファイルは、実 sqlite では ``OperationalError: no such
-      table: <name>`` として表面化するため（項目1 の中核ケース）、型だけでは一過性
+      table: <name>`` として表面化するため、型だけでは一過性
       と誤分類され毎起動 ``None`` 劣化が恒久化してしまう。ストア自身のテーブル名に
       限定するのは、将来 ``verify`` が別 DB / オプショナルなテーブルへ触れても
       巻き込み退避しないため。
@@ -652,7 +678,7 @@ def open_with_recovery(
     page2 以降だけが破損した DB や「user_version>=1 だが対象テーブルが無い」異種
     sqlite ファイルは ``factory`` を素通りし、``verify`` の全表走査で初めて
     ``sqlite3.DatabaseError`` として表面化する。この検証まで退避の管轄に入れる
-    ことで、破損が prune 側で発覚するケース（issue #40 の残穴）でも退避+再作成が
+    ことで、破損が prune 側で発覚するケースでも退避+再作成が
     走る。
 
     **破損系の** ``sqlite3.DatabaseError`` （``factory`` 内の接続直後の PRAGMA /
@@ -729,5 +755,7 @@ __all__ = [
     "TOUCH_FLUSH_THRESHOLD",
     "iter_chunks",
     "mtime_matches",
+    "encodable_rows",
     "open_with_recovery",
+    "sqlite_text_ok",
 ]

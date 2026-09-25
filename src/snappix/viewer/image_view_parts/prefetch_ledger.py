@@ -42,11 +42,18 @@ class PrefetchLedger:
     pending スピナーの唯一の判断材料で、「LRU に載っているか」とは別物: LRU は
     選択中 ± 先読み半径しか保持しないので、それより外の画像は何も起きていない
     のに恒久的に「未キャッシュ」になる。
+
+    :attr:`inflight` — 投入済みで未着地の先読み。近傍集合の入れ替えは
+    ストリームを畳まずにこれを見て「まだ投げていないもの」だけを積む: 走行中の
+    デコードが新しい集合でも要るなら捨てずにそのまま着地させ（巨大 CG では
+    1 枚 0.5〜1 秒の損失になる）、要らなくなった前の集合の残りは
+    :meth:`wanted` 越しに走り出した直後に降りる。GUI スレッドだけが読み書きする。
     """
 
     protect: dict[str, tuple[str, ...]] = field(default_factory=dict)
     adopt_key: str | None = None
     decode_window: set[str] = field(default_factory=set)
+    inflight: set[str] = field(default_factory=set)
 
     # ------------------------------------------------------------ 問い合わせ
 
@@ -79,6 +86,13 @@ class PrefetchLedger:
         """*key* のデコードが進行中と言える窓の中にあるか。"""
         return key in self.decode_window
 
+    def needs_submit(self, key: str) -> bool:
+        """*key* の先読みを投げるべきか（まだ投げておらず、近傍集合の一員）。
+
+        キャッシュ済みかどうかは呼び出し側（LRU の持ち主）が見る。
+        """
+        return key in self.protect and key not in self.inflight
+
     # ---------------------------------------------------------------- 更新
 
     def begin_show(self, path: Path) -> None:
@@ -108,6 +122,14 @@ class PrefetchLedger:
         self.protect = protect_map
         self.decode_window = {str(current), *(str(p) for p in targets)}
 
+    def mark_inflight(self, key: str) -> None:
+        """*key* の先読みを投げた（着地まで二重に投げない）。"""
+        self.inflight.add(key)
+
+    def landed(self, key: str) -> None:
+        """*key* の先読みが着地した（成功・失敗・降車のどれでも呼ぶ）。"""
+        self.inflight.discard(key)
+
     def cacheable_target_count(self, max_entries: int) -> int:
         """挿入ガードの下で構造上キャッシュに載り得るターゲット数。
 
@@ -136,9 +158,14 @@ class PrefetchLedger:
         キャッシュと一緒に落とす。デコード窓は**触らない** — 進行中デコードの
         決着は :meth:`settle` が受け持ち、ここで先に消すと決着前のスピナーが
         窓の外に出て、着地の取りこぼしが見えなくなる。
+
+        :attr:`inflight` は空にする — 呼び出し元はストリームの ``cancel`` と
+        対で呼ぶので、畳まれた世代の着地はもう届かない（残すと、同じパスを
+        二度と投げなくなる）。
         """
         self.protect = {}
         self.adopt_key = None
+        self.inflight.clear()
 
 
 __all__ = ["PrefetchLedger"]

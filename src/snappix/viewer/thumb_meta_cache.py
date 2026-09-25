@@ -52,8 +52,10 @@ from ._sqlite_cache import (
     QUERY_CHUNK,
     SqliteCacheBase,
     SqliteStoreBase,
+    encodable_rows,
     iter_chunks,
     mtime_matches,
+    sqlite_text_ok,
 )
 
 
@@ -163,8 +165,11 @@ class ThumbMetaCache(SqliteCacheBase):
         """
         if not specs:
             return {}
+        # 符号化できないパス（孤立サロゲート）はバッチ全体を落とすので、
+        # その行だけ miss として外す。
         want: dict[str, tuple[float, int]] = {
-            str(p): (m, s) for p, m, s in specs
+            key: (m, s) for p, m, s in specs
+            if sqlite_text_ok(key := str(p))
         }
         out: dict[str, tuple[int, int]] = {}
         with self._lock:
@@ -214,11 +219,11 @@ class ThumbMetaCache(SqliteCacheBase):
                 "INSERT OR REPLACE INTO aspect"
                 "(path, mtime, size, width, height, probed_at)"
                 " VALUES (?,?,?,?,?,?)",
-                [
+                encodable_rows(
                     (p, float(m), int(s), int(w), int(h), ts)
                     for (p, m, s, w, h) in rows
                     if w > 0 and h > 0
-                ],
+                ),
             )
             self._maybe_commit_locked()
 

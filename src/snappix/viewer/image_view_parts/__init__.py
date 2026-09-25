@@ -19,6 +19,10 @@
   :class:`~snappix.viewer.image_view_parts.canvas_label._ImageCanvasLabel`
 * :mod:`~snappix.viewer.image_view_parts.error_card` — デコード失敗の面
   :class:`~snappix.viewer.image_view_parts.error_card._DecodeErrorCard`
+* :mod:`~snappix.viewer.image_view_parts.movie` — アニメーションの
+  ``QMovie`` の組み立て（:func:`~snappix.viewer.image_view_parts.movie.open_movie`）
+  と再生状態
+  :class:`~snappix.viewer.image_view_parts.movie.MoviePlayback`
 * :mod:`~snappix.viewer.image_view_parts.minimap` — 右下のミニマップ
   :class:`~snappix.viewer.image_view_parts.minimap._MinimapOverlay`
 * :mod:`~snappix.viewer.image_view_parts.control_bar` — ズーム読み値

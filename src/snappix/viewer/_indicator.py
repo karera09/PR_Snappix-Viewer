@@ -9,7 +9,7 @@ The entry-type cues exposed here:
 
 * :func:`paint_file_badge_icon_mode` — its muted counterpart for non-folder
   tiles, so "folder or file?" is answered by a *present* mark on both sides
-  rather than by the absence of one (UIレビュー 07-25 #125).
+  rather than by the absence of one.
 
 * :func:`paint_folder_background_list_mode` — soft gold wash filling the
   whole row in list-mode views.
@@ -20,7 +20,7 @@ sizes on some Qt/Windows themes.
 
 Colour policy — deliberate fixed colours: every badge below is an overlay
 drawn ON TOP OF thumbnail content, which is the registered design-system
-exception (docs/claude/design.md 使用ルール 2).  These badges must stay
+exception (overlays on image content keep fixed colours).  These badges must stay
 legible over arbitrary photos in either theme, so they use fixed dark scrims
 + fixed accent hues instead of ``current_tokens()`` — routing e.g. the
 relevance blue through the theme ``accent`` would tie readability to the UI
@@ -56,9 +56,8 @@ _FOLDER_BORDER = overlay.FOLDER_BORDER
 _LIST_BG_TINT = overlay.FOLDER_LIST_TINT
 
 # File (non-folder) counterpart of the gold folder pictogram — a deliberately
-# QUIET page silhouette (UIレビュー 07-25 #125): at a library root a bare file
-# tile and a post-folder tile were visually identical, because only the folder
-# side carried a type mark.  Muted white on the same dark chip keeps the folder
+# QUIET page silhouette: at a library root a bare file tile and a post-folder
+# tile would look identical if only the folder side carried a type mark.  Muted white on the same dark chip keeps the folder
 # badge the loud one (folders are the navigable thing) while still answering
 # 「これはフォルダ？ファイル？」 at a glance.  Colours come from the overlay
 # palette (design.md 使用ルール 2 — drawn over thumbnail content).
@@ -139,10 +138,10 @@ def paint_folder_pictogram(painter: QPainter, rect: QRect) -> None:
     pictogram in the product — but sized to fill *rect* for surfaces that need
     the mark as the **content** rather than as a corner badge.
 
-    Used by the stage image track (UIレビュー 2026-08-28 N-84): a folder with
-    no representative image used to land on the decode-failure「×」glyph, so
-    the track claimed "読み込み失敗" for something that is merely empty, while
-    the left grid drew the very same object with this gold folder mark.
+    Used by the stage image track: a folder with no representative image must
+    not land on the decode-failure「×」glyph (that would claim "読み込み失敗"
+    for something merely empty), and the left grid draws the very same object
+    with this gold folder mark.
     """
     painter.save()
     painter.setRenderHint(QPainter.Antialiasing, True)
@@ -180,7 +179,7 @@ def _file_path(rect: QRectF) -> QPainterPath:
 
 
 def paint_file_badge_icon_mode(painter: QPainter, item_rect: QRect) -> None:
-    """Draw a muted page pictogram in the top-left corner (UIレビュー 07-25 #125).
+    """Draw a muted page pictogram in the top-left corner.
 
     The non-folder counterpart of :func:`paint_folder_badge_icon_mode`, sharing
     its seat and chip so the two read as one "what kind of thing is this tile"
@@ -240,7 +239,7 @@ def _heart_path(rect: QRectF) -> QPainterPath:
 
 # Star / "watch later" curation badges (user_meta.py).  Drawn ON TOP OF
 # thumbnail content, so the same fixed-colour policy as the folder / favorites
-# / relevance badges above applies (docs/claude/design.md 使用ルール 2): a gold
+# / relevance badges above applies: a gold
 # star + dark chip that must stay legible over any photo in either theme.  The
 # star is a vector path (not a font glyph) for the same reason as the heart:
 # ``★`` is missing / metrically inconsistent across fonts.  Placed top-left,
@@ -252,10 +251,9 @@ _STAR_GAP = 3
 # relevance pill would sit (relevance is search-only, later is a curation flag,
 # so they rarely coincide; if they do, later drops one row).
 #
-# UIレビュー 07-25 #57: this used to be a bookmark ribbon (しおり), which
-# collided head-on with the product's *other* しおり — the ブックマーク feature in
-# the menus / nav rail — so the same metaphor named two unrelated things.  A
-# clock says 「あとで」 (time) instead of 「ここに印」 (place), which is what the flag
+# Not a bookmark ribbon (しおり): that would collide head-on with the
+# product's *other* しおり — the ブックマーク feature in the menus / nav rail —
+# so the same metaphor would name two unrelated things.  A clock says 「あとで」 (time) instead of 「ここに印」 (place), which is what the flag
 # actually means.  The legend row in the shortcuts dialog is updated in step.
 _LATER_FILL = overlay.LATER_BLUE
 _LATER_HAND = overlay.OVERLAY_TEXT
@@ -289,8 +287,7 @@ def _star_path(rect: QRectF) -> QPainterPath:
 
 #: 「未取得コンテンツ数」 の南京錠。タイルのバッジ行には載らない（キャプション
 #: 側の指標）が、凡例と情報パネルのメタカードが**同じ絵**で説明できるよう語彙
-#: レジストリに載せる — i18n 値に 🔒 を直書きしていた面 (UIレビュー 08-28 N-52)
-#: の置き換え先。絵文字はテーマにもフォントにも追従しないので、♡ / ★ と同じく
+#: レジストリに載せる — i18n 値に 🔒 を直書きしないための置き場。絵文字はテーマにもフォントにも追従しないので、♡ / ★ と同じく
 #: ベクタパスで描く。
 _LOCK_FILL = overlay.OVERLAY_TEXT
 
@@ -301,7 +298,7 @@ _LOCK_FILL = overlay.OVERLAY_TEXT
 #: プラン」を 1 本の文字列として省略（elide）処理へ渡す設計で、そこへチップの
 #: ピクスマップを差し込むにはキャプション行の描画そのもの
 #: (``GalleryView._paint_caption`` / ``_title_rows``) を作り替える必要がある
-#: —— PR #87 はその範囲を「行描画の変更が大きすぎる」として見送っている。
+#: —— 行描画の変更が大きすぎるので、その範囲には踏み込まない。
 #: 図像を完全に 1 実装へ寄せるところまでは行けないが、**文字リテラルの置き場**
 #: だけはこのレジストリに 1 つへ寄せておく（``post_grid`` 側に 🔒 を直書き
 #: すると、南京錠の姿がレジストリと post_grid の 2 箇所で別々に決まる）。
@@ -329,26 +326,34 @@ def _lock_path(rect: QRectF) -> QPainterPath:
     return path.united(ring).simplified()
 
 
-def draw_clock_glyph(painter: QPainter, rect: QRectF) -> None:
-    """Draw the 「あとで見る」 clock face inside *rect* (UIレビュー 07-25 #57).
+def draw_clock_glyph(
+    painter: QPainter, rect: QRectF, outline: QColor | None = None
+) -> None:
+    """Draw the 「あとで見る」 clock face inside *rect*.
 
     A filled blue disc with two light hands (12 時 / 3 時), drawn with painter
     primitives so it renders identically regardless of installed fonts — same
     rule as the folder / heart / star silhouettes above.  Shared by the corner
-    badge and the badge-row chip so the two can never drift apart.
+    badge and the badge-row chip so the two can never drift apart.  With
+    *outline* it draws an unfilled ring + hands in that colour instead (the
+    "not set" state, same grammar as the ★ outline / fill).
     """
     if rect.width() <= 0 or rect.height() <= 0:
         return
     painter.save()
     painter.setRenderHint(QPainter.Antialiasing, True)
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(_LATER_FILL)
-    painter.drawEllipse(rect)
-    pen = QPen(_LATER_HAND)
+    pen = QPen(_LATER_HAND if outline is None else outline)
     pen.setWidthF(max(1.0, rect.width() * 0.11))
     pen.setCapStyle(Qt.RoundCap)
+    if outline is None:
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(_LATER_FILL)
+        painter.drawEllipse(rect)
     painter.setPen(pen)
     painter.setBrush(Qt.NoBrush)
+    if outline is not None:
+        half = pen.widthF() / 2.0
+        painter.drawEllipse(rect.adjusted(half, half, -half, -half))
     centre = rect.center()
     radius = rect.width() / 2.0
     painter.drawLine(centre, QPointF(centre.x(), centre.y() - radius * 0.55))
@@ -358,7 +363,7 @@ def draw_clock_glyph(painter: QPainter, rect: QRectF) -> None:
 
 # ------------------------------------------------------------------ badge row
 #
-# Redesign 2026-07 Phase 3-2 — 四隅の座席表 (tile-overlay seating chart).
+# 四隅の座席表 (tile-overlay seating chart).
 # The icon-mode tile overlay layer has a fixed seating chart so overlays never
 # collide with each other or with the on-image title band:
 #
@@ -649,14 +654,13 @@ def draw_badge_row(
 
 # =============================================== バッジ語彙レジストリ (提案1)
 #
-# 図像の単一情報源 (UIレビュー 08-28 リデザイン提案1).
+# 図像の単一情報源.
 #
-# 色には ``common/ui/tokens.py``、語には design.md の用語表という単一情報源が
-# あるのに、**図像だけ**それが無かった。結果として同じ概念が面ごとに別の絵で
-# 説明され続けた —— 凡例が実際には一度も描かれない「◆」を説明し (N-98)、
-# ♡ がタイルではベクタ描画・凡例と文言では生の絵文字という二重表現になり
-# (N-98 / N-52)、★1 だけ数字が描かれずチップ幅の計算と描画が別々に
-# 「>= 2」を判定していた (N-118)。
+# 色には ``common/ui/tokens.py``、語には用語表という単一情報源がある。図像も
+# 1 か所に寄せないと、同じ概念が面ごとに別の絵で説明される —— 凡例が実際には
+# 描かれない記号を説明する、♡ がタイルではベクタ描画・凡例と文言では生の
+# 絵文字という二重表現になる、チップ幅の計算と描画が数字を描く条件を別々に
+# 判定する、といったずれが起きる。
 #
 # ここが唯一の表:
 #
@@ -746,7 +750,7 @@ def _paint_later_chip(
     painter: QPainter, rect: QRectF, text: str, fm,
     style: BadgeStyle = OVERLAY_STYLE,
 ) -> None:
-    # 時計図像（UIレビュー 07-25 #57）— 直径はチップ高に収まる範囲で座席幅
+    # 時計図像 — 直径はチップ高に収まる範囲で座席幅
     # (_LATER_W) と同じにし、正円を保つ。文字盤は青地 + 白針の意味色ペアなので
     # 地が変わっても読める（style は地の有無だけに効く）。
     _chip_background(painter, rect, _ROW_CHIP_BG, style)
@@ -761,8 +765,7 @@ def _paint_relevance_chip(
     style: BadgeStyle = OVERLAY_STYLE,
 ) -> None:
     # 数字だけ（記号は付けない）— タイルに実際に描かれるのは ``NN%`` のチップ
-    # であり、かつて凡例と文言だけが説明していた「◆」は 07 月の座席改修
-    # (post_grid の C-6) で廃止済み (UIレビュー 08-28 N-98)。
+    # なので、凡例と文言もこの形だけを説明する。
     _chip_background(painter, rect, _ROW_CHIP_BG, style)
     painter.setPen(style.text)
     painter.drawText(rect, int(Qt.AlignCenter), text)
@@ -786,7 +789,7 @@ def _paint_similar_chip(
     painter: QPainter, rect: QRectF, text: str, fm,
     style: BadgeStyle = OVERLAY_STYLE,
 ) -> None:
-    """タイルホバーの「類似画像を検索」ボタン (UIレビュー 08-28 N-63).
+    """タイルホバーの「類似画像を検索」ボタン.
 
     記号文字 ◇ の ``drawText`` をやめ ``icons.py`` の登録済みグリフを固定色で
     描く（♡ / ★ と同じ「フォント欠落に依存しない」規律）。
@@ -859,7 +862,7 @@ class BadgeSpec:
     #: Text drawn inside :func:`badge_pixmap`'s specimen chip (``""`` = none).
     sample: str = ""
     #: Badge value → chip text.  The ONLY place a badge decides whether its
-    #: count is drawn, so width and paint can never disagree (N-118).
+    #: count is drawn, so width and paint can never disagree.
     format_value: Callable[[object], str] = lambda value: ""
 
     def painter(
@@ -903,9 +906,8 @@ _BADGE_SPECS: dict[str, BadgeSpec] = {
         i18n_name_key="viewer.post_grid.star_menu",
         tooltip_key="viewer.shortcuts_dialog.desc_badge_star",
         sample="N",
-        # ★1 も数字を描く (UIレビュー 08-28 N-118 / N-12): 数字の無い★は
-        # 「壊れて見える」うえ、情報パネルのメタカードは 07-25 #63 以来
-        # 「★ 1」と数字付きで出しており 2 面で表記が割れていた。
+        # ★1 も数字を描く: 数字の無い★は「壊れて見える」うえ、情報パネルの
+        # メタカードは「★ 1」と数字付きで出すので、2 面で表記が割れる。
         format_value=_count_text,
     ),
     "later": BadgeSpec(
@@ -996,11 +998,10 @@ def badge_pixmap(
 
     For the surfaces that *explain* badges rather than draw them on a tile:
     the ショートカット一覧のバッジ凡例, the 情報パネル meta card and the search
-    cheat-sheet.  They used to spell the badge out as a literal character
-    (``"♡ N"`` / ``"◆ NN%"``), which is how the legend ended up describing a ◆
-    that has not been drawn since the 07 月の座席改修 (UIレビュー 08-28 N-98).
-    Going through the same ``painter_fn`` as the tile makes that drift
-    impossible.
+    cheat-sheet.  Spelling the badge out as a literal character
+    (``"♡ N"`` / ``"◆ NN%"``) lets the legend drift into describing a glyph the
+    tile no longer draws; going through the same ``painter_fn`` as the tile
+    makes that drift impossible.
 
     Width is the badge's natural width at that height (not square).  ``text``
     overrides what the chip carries: the default is the spec's specimen
@@ -1056,7 +1057,7 @@ def paint_similar_button(painter: QPainter, rect: QRect | QRectF) -> None:
     """Draw the tile-hover 「類似画像を検索」 button into *rect*.
 
     Thin wrapper so ``gallery_view`` and the badge legend get the identical
-    artwork from the one registry entry (UIレビュー 08-28 N-63).
+    artwork from the one registry entry.
     """
     painter.save()
     painter.setRenderHint(QPainter.Antialiasing, True)

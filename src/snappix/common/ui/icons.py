@@ -70,10 +70,10 @@ _ICONS: dict[str, str] = {
         '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1'
         ' 2-2h6"/>'
     ),
-    # Lucide folder-output — **OS のファイラを起動する**席の専用図像
-    # (UIレビュー 07-25 #56)。folder-open（= アプリ内でそのフォルダを開く:
-    # ルート選択・ZIP ドリル）と同じ図像が「エクスプローラで開く」= OS 起動
-    # にも流用されており、同じ絵で 4 つの動詞を兼ねていた。フォルダから矢印
+    # Lucide folder-output — **OS のファイラを起動する**席の専用図像。
+    # folder-open（= アプリ内でそのフォルダを開く:
+    # ルート選択・ZIP ドリル）と同じ図像を「エクスプローラで開く」= OS 起動
+    # にも流用すると、同じ絵で複数の動詞を兼ねてしまう。フォルダから矢印
     # が**外へ出る**ので「この箱の中身を外のアプリで見る」と読める。
     "folder-output": (
         '<path d="M2 7.5V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2'
@@ -141,8 +141,8 @@ _ICONS: dict[str, str] = {
         '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>'
     ),
     # Lucide arrow-down-up — the toolbar 「並び・表示」 popover trigger
-    # (UIレビュー 07-25 #100: the three toolbar popovers are icon-only + tooltip;
-    # #24 renamed this one).  A sort glyph, deliberately unlike the funnel
+    # (the three toolbar popovers are icon-only + tooltip).  A sort glyph,
+    # deliberately unlike the funnel
     # (フィルタ), the three dots (⋯) and the three pane-toggle panels.
     "sort-display": (
         '<path d="m3 16 4 4 4-4"/>'
@@ -153,7 +153,7 @@ _ICONS: dict[str, str] = {
     "chevron-down": '<path d="m6 9 6 6 6-6"/>',
     "chevron-up": '<path d="m18 15-6-6-6 6"/>',
     # Lucide check — the QSS-generated tick inside a checked QCheckBox
-    # indicator (UIレビュー 2026-08-28 N-54).  Styling the indicator makes Qt
+    # indicator.  Styling the indicator makes Qt
     # stop drawing the native mark, so the glyph has to come from here (the
     # one home for glyph paths) via ``qss.py::_glyph_url``.
     "check": '<path d="M20 6 9 17l-5-5"/>',
@@ -169,7 +169,7 @@ _ICONS: dict[str, str] = {
     # lighter than the full arrow-left/right glyphs.
     "chevron-left": '<path d="m15 18-6-6 6-6"/>',
     "chevron-right": '<path d="m9 18 6-6-6-6"/>',
-    # Empty-state card regularisation (redesign 2026-07 Phase 3-4):
+    # Empty-state card regularisation:
     # bookmark-manager dialog's empty-list card.
     "bookmark": (
         '<path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>'
@@ -182,7 +182,7 @@ _ICONS: dict[str, str] = {
         '<path d="M12 3v18"/>'
     ),
     # Lucide maximize — the preview header's 「⤢ 最大化 (E)」 entry button
-    # (UIレビュー 07-25 #16: 分割ビューから最大化へ入る可視導線).  Four corner
+    # (分割ビューから最大化へ入る可視導線).  Four corner
     # brackets = "この席を広げる"; deliberately distinct from external-link
     # (アプリ外で開く) and columns (分割へ戻す).
     "maximize": (
@@ -192,9 +192,9 @@ _ICONS: dict[str, str] = {
         '<path d="M16 21h3a2 2 0 0 0 2-2v-3"/>'
     ),
     # Lucide expand — 4 方向へ開く矢印。**アプリ内の全画面**（閲覧モード）
-    # 専用の図像 (UIレビュー 07-25 #104): 以前は external-link を流用しており、
+    # 専用の図像。external-link を流用すると、
     # 同じ図像が「既定アプリで開く（アプリ外へ出る）」と「全画面（アプリ内に
-    # 留まる）」という正反対の意味を兼ねていた。maximize（角括弧 = 席を広げる）
+    # 留まる）」という正反対の意味を兼ねてしまう。maximize（角括弧 = 席を広げる）
     # とも別物として読めるよう、矢印で「画面いっぱいに開く」を表す。
     "expand": (
         '<path d="m21 21-6-6m6 6v-4.8m0 4.8h-4.8"/>'
@@ -202,15 +202,15 @@ _ICONS: dict[str, str] = {
         '<path d="M21 7.8V3m0 0h-4.8M21 3l-6 6"/>'
         '<path d="M3 7.8V3m0 0h4.8M3 3l6 6"/>'
     ),
-    # Pane visibility toggles (折り畳み導線 2026-07) — the unified toolbar's
+    # Pane visibility toggles — the unified toolbar's
     # right-end button group (F7 / F6 / F8).  Same 24×24 rect scaffold as
-    # "columns" so the family reads as one set, and — since the redesign
-    # (UIレビュー 07-25 #77) — **all three paint the seat they toggle**:
+    # "columns" so the family reads as one set, and
+    # **all three paint the seat they toggle**:
     # 左列 = ナビレール / 中央帯 = プレビュー列 / 右列 = 情報パネル。
-    # 以前は左右が「仕切り線の位置が 6px 違うだけ」で判別できず、中央だけが
-    # 塗り規則から外れて**右半分**を塗っていた（「右ペイン」と誤読される
-    # panel-right との衝突）。塗りは矩形の枠に密着させる（内側 2px の
-    # インセットを廃止 — 席そのものに見えるように）。
+    # 左右が「仕切り線の位置が 6px 違うだけ」では判別できず、中央だけが
+    # 塗り規則から外れて**右半分**を塗ると「右ペイン」と誤読される
+    # （panel-right との衝突）。塗りは矩形の枠に密着させる（内側 2px の
+    # インセットを持たない — 席そのものに見えるように）。
     "panel-left": (
         '<rect width="18" height="18" x="3" y="3" rx="2"/>'
         '<path d="M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4z"'
@@ -231,26 +231,26 @@ _ICONS: dict[str, str] = {
         '<path d="M15 3v18"/>'
     ),
     # 「フィット ⇄ 実寸」トグル（画像プレビューの操作カプセル / ライトボックス）。
-    # **ズームの語彙**であって「席を広げる」語彙ではない (UIレビュー 08-28 N-46):
-    # 以前は maximize と**同型の四隅の角括弧**で、分割ビューでカプセルとステージ
-    # ヘッダーの「⤢ 最大化 (E)」が同じ絵で別の意味を持っていた。外枠の中に小さな
+    # **ズームの語彙**であって「席を広げる」語彙ではない:
+    # maximize と**同型の四隅の角括弧**にすると、分割ビューでカプセルとステージ
+    # ヘッダーの「⤢ 最大化 (E)」が同じ絵で別の意味を持つ。外枠の中に小さな
     # 矩形＝「画像を枠に収める」。塗り・全高の仕切り線を持たないので、席そのものを
     # 塗る panel-left/right/preview + columns の一族とも読み違えない。
     "fit-frame": (
         '<rect width="18" height="18" x="3" y="3" rx="2"/>'
         '<rect width="10" height="7" x="7" y="8.5" rx="1"/>'
     ),
-    # タイルホバーの「類似画像を検索」ボタン (UIレビュー 08-28 N-63)。以前は
-    # ``drawText`` の記号文字 ◇ (U+25C7) をベタ書きしており、♡ と同じ
-    # フォント欠落リスク（_indicator.py の注記参照）を負っていた。ずらして
+    # タイルホバーの「類似画像を検索」ボタン。
+    # ``drawText`` の記号文字 ◇ (U+25C7) をベタ書きすると、♡ と同じ
+    # フォント欠落リスク（_indicator.py の注記参照）を負う。ずらして
     # 重ねた 2 つの菱形 = 「これに似たもの」— 既存の ◇ の比喩を保ったまま
     # 図像化する。
     "similar": (
         '<path d="m9 3 5 5-5 5-5-5Z"/>'
         '<path d="m15 11 5 5-5 5-5-5Z"/>'
     ),
-    # Lucide settings — 「管理ダイアログを開く」単一アクションの席
-    # (UIレビュー 08-28 N-24)。ナビレールのセクション見出しはメニューでは
+    # Lucide settings — 「管理ダイアログを開く」単一アクションの席。
+    # ナビレールのセクション見出しはメニューでは
     # なく管理ダイアログを開くだけなので、⋯（＝そのペインの表示オプション）
     # を流用してはいけない。
     "settings": (
@@ -265,9 +265,9 @@ _ICONS: dict[str, str] = {
         ' 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>'
         '<circle cx="12" cy="12" r="3"/>'
     ),
-    # Lucide puzzle — プラグイン管理ダイアログの空状態カード
-    # (UIレビュー 07-25 #126)。以前は sliders を流用しており、ツールバーの
-    # 検索オプション（sliders = つまみを調整する）と図像が二重使用だった。
+    # Lucide puzzle — プラグイン管理ダイアログの空状態カード。
+    # sliders を流用すると、ツールバーの
+    # 検索オプション（sliders = つまみを調整する）と図像が二重使用になる。
     "puzzle": (
         '<path d="M15.39 4.39a1 1 0 0 0 1.68-.474 2.5 2.5 0 1 1 3.014'
         ' 3.015 1 1 0 0 0-.474 1.68l1.683 1.682a2.414 2.414 0 0 1 0'
@@ -292,7 +292,7 @@ def register_icons(mapping: dict[str, str]) -> None:
     built-ins.
 
     **Re-registering an identical body is a no-op** (``qss.py``'s
-    ``register_qss_fragment`` #121 と同型 — #185): プラグインのセッション内
+    ``register_qss_fragment`` と同型): プラグインのセッション内
     無効化 → 再有効化はホストの ``_purge_modules`` がモジュールを破棄して
     再 import + activate 再実行になるため、無条件拒否だと 2 サイクル目に
     「自分が 1 サイクル目に登録した名前」と衝突して activate が恒久失敗する。
@@ -300,8 +300,8 @@ def register_icons(mapping: dict[str, str]) -> None:
     図形で塗り替えることは依然として拒否される。
 
     The call is **atomic**: every name is checked before anything is
-    inserted, so a rejected mapping leaves the registry untouched (review
-    #115).  Otherwise a plugin whose ``activate()`` failed on a colliding
+    inserted, so a rejected mapping leaves the registry untouched.
+    Otherwise a plugin whose ``activate()`` failed on a colliding
     name would leave its earlier glyphs behind and collide with *itself* on
     the next attempt.
     """
@@ -387,7 +387,7 @@ def _render(name: str, color: str, size: int, dpr: float) -> QPixmap:
 
     Goes through :func:`svg_source` so the scaffold really does live in one
     place — a second inline ``_TEMPLATE.format`` here would let the QSS chevron
-    and the QIcon path drift apart the moment either gains a tweak (#187).
+    and the QIcon path drift apart the moment either gains a tweak.
     :func:`fixed_pixmap` delegates here too, so the rasterisation (dpr rounding
     included) has exactly one implementation.
     """
@@ -426,7 +426,7 @@ def fixed_pixmap(name: str, color: str, *, size: int = 18, dpr: float = 1.0) -> 
 
     For chrome that sits ON TOP OF image content — the preview control capsule,
     the lightbox bar, the tile hover overlays — which keeps a fixed dark scrim
-    and light glyphs regardless of theme (docs/claude/design.md 使用ルール 2).
+    and light glyphs regardless of theme (image-anchored chrome is exempt).
     Those surfaces must not go through :func:`icon`, whose colour comes from the
     theme tokens (a light theme would paint them dark on a dark scrim).
 
@@ -453,10 +453,10 @@ def fixed_icon(name: str, color: str, *, size: int = 18) -> QIcon:
 
     The QIcon counterpart of :func:`fixed_pixmap` — one implementation shared by
     every image-overlay surface (``image_view`` の操作カプセル / ``lightbox`` の
-    上部バー).  Both used to carry their own copy of this loop **plus their own
-    glyph table**, which is how the capsule's 「フィット」 glyph drifted into being
-    the same four corner brackets as ``maximize`` (UIレビュー 08-28 N-46) —
-    the glyph set now lives in ``_ICONS`` only.  **GUI thread only**.
+    上部バー).  Separate copies of this loop **plus their own
+    glyph table** per surface let a glyph drift into duplicating another
+    (「フィット」 turning into ``maximize``'s four corner brackets) —
+    the glyph set lives in ``_ICONS`` only.  **GUI thread only**.
 
     A ``QIcon.Mode.Disabled`` pixmap is registered alongside the normal one —
     overlay chrome cannot express 「無効」 through the theme's ``text_disabled``
@@ -533,8 +533,8 @@ def set_icon_pixmap(
 
     The QIcon path (:func:`set_icon`) needs a ``setIcon`` target, so widgets
     that show a glyph as plain artwork — ``QLabel``, e.g. ``EmptyStateCard``'s
-    icon — used to bake the creation-time colour into a pixmap and stayed that
-    colour after a theme switch (review #118).  This registers them alongside
+    icon — would otherwise bake the creation-time colour into a pixmap and keep that
+    colour after a theme switch.  This registers them alongside
     the icon targets so ``retint_all`` re-renders them too.
     """
     label.setPixmap(icon(name, role=role, size=size).pixmap(size, size))

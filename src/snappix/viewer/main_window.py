@@ -5,7 +5,7 @@ Wires together :class:`PostGrid` (left), :class:`ContentView` (centre) and
 ← back through history / ↑ to filesystem parent / ←→ for prev/next
 sub-folder) and persistent state.
 
-Extracted collaborators (#96) — the window remains the composition point:
+Extracted collaborators — the window remains the composition point:
 
 - ``nav_history.py`` — :class:`NavEntry` + the long-press ←/→ history
   dropdowns (the back/forward stack semantics stay here, on the window);
@@ -24,6 +24,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from loguru import logger
 from PySide6.QtCore import (
@@ -62,6 +63,7 @@ from PySide6.QtWidgets import (
 
 from ._runnable import GuardedStream, StreamJob
 from .cache_build_controller import CacheBuildController
+from .curation_list import CurationList
 from .detail_window import DetailWindow
 from .empty_state import (
     EmptyStateInput,
@@ -98,6 +100,7 @@ from .post_md import ParsedPost, read_post_meta_checked
 from ._sqlite_cache import open_with_recovery
 from .dialogs import pick_existing_directory, prompt_text
 from .lightbox import LightboxWindow, MediaResume
+from .locations import base_label, is_zip_temp_path, location_bases, location_label
 from .nav_history import (
     HistoryMenus,
     NavEntry,
@@ -114,20 +117,21 @@ from .folder_scan import (
     THUMB_MARKER_PREFIX,
     VIDEO_SUFFIXES,
     ZIP_DRILL_SUFFIXES,
-    find_first_image,
     is_meta_or_marker_name,
+    next_representative,
 )
+from .representative_fallback import RepresentativeFallback
 
 # Media the fullscreen lightbox (閲覧モード) can play back — images + videos.
 _LIGHTBOX_MEDIA_SUFFIXES = IMAGE_SUFFIXES | VIDEO_SUFFIXES
-# issue #94: backoff (ms) before the single retry of a failed 情報パネル
+# Backoff (ms) before the single retry of a failed 情報パネル
 # post.md meta read.  Long enough for a writer to finish / a share hiccup to
 # pass, short enough that the card still appears "immediately" to the user.
 _INFO_META_RETRY_DELAY_MS = 250
 # Fallback width (px) for the right 情報パネル when it is re-shown from a hidden
-# state and the splitter has no remembered size for it (redesign Phase 2-2).
+# state and the splitter has no remembered size for it.
 _INFO_PANEL_DEFAULT_WIDTH = 280
-# Default / re-show width (px) for the left ナビレール (redesign Phase 2-3).  A
+# Default / re-show width (px) for the left ナビレール.  A
 # thin, fixed-ish column carved out of the centre pane when the rail is shown.
 _NAV_RAIL_DEFAULT_WIDTH = 200
 # Default [grid, preview] sizes for the centre [グリッド | プレビュー] split
@@ -144,12 +148,12 @@ _DEFAULT_WINDOW_SIZE = (1280, 800)
 # ``splitterMoved`` はドラッグ**中**の全サンプルで飛ぶため、席を 0 まで畳む
 # ジェスチャは必ず [866, 8] のような極小サンプルを通過する。それを記憶して
 # しまうとトグル再表示（F6 / F7 / F8）が数 px の帯を復元して no-op に見え、
-# しかも ``_collect_state`` がその比率を永続化するので再起動しても直らない
-# （項目#9）。この幅を下回る席は「畳んだ」と同一視して記憶しない。
+# しかも ``_collect_state`` がその比率を永続化するので再起動しても直らない。
+# この幅を下回る席は「畳んだ」と同一視して記憶しない。
 _SPLIT_REMEMBER_MIN_PX = 80
-# ドラッグ追従の記憶更新に課す下限は、極小サンプルの排除（項目#9 の
+# ドラッグ追従の記憶更新に課す下限は、極小サンプルの排除（上の
 # _SPLIT_REMEMBER_MIN_PX）からさらに一段強く「両席が再表示既定幅以上」まで
-# 引き上げる（項目#8(a)）: 畳みジェスチャは 0 に着地する前に必ず
+# 引き上げる: 畳みジェスチャは 0 に着地する前に必ず
 # 80〜既定幅の帯を通過するため、80px 下限だけでは記憶が既定幅未満まで
 # 侵食され、トグル再表示が細い列を復元してしまう。外殻の 2 席は
 # _NAV_RAIL_DEFAULT_WIDTH / _INFO_PANEL_DEFAULT_WIDTH をそのまま px 下限に
@@ -160,7 +164,7 @@ _SPLIT_REMEMBER_MIN_PX = 80
 # 終盤のサンプルは構造的に弾かれる。
 _CENTER_SPLIT_REMEMBER_MIN_SHARE = 0.5
 # ``closeEvent`` の永続化（``viewer_state.json`` の書き込み + 全 sqlite ストアの
-# ``close`` = WAL チェックポイント）に与える**合計**予算 (秒) — issue #132。
+# ``close`` = WAL チェックポイント）に与える**合計**予算 (秒)。
 #
 # なぜ 3.0 か:
 #
@@ -181,15 +185,15 @@ _CENTER_SPLIT_REMEMBER_MIN_SHARE = 0.5
 #   最悪でも「このセッションの UI 状態が直前の autosave 時点に戻る」。
 _CLOSE_PERSIST_BUDGET_S = 3.0
 # 稼働中（オートセーブ / デバウンス保存 / 設定ダイアログ）の state 保存で
-# **GUI スレッドが完了を待つ**上限 (秒) — issue #132 差し戻し F2。
+# **GUI スレッドが完了を待つ**上限 (秒)。
 #
 # 保存そのものは常にワーカーで走る（``_persist_state_snapshot``）。ここで
 # 決めるのは「呼び出し元が結果を知る必要があるか」だけ:
 #
 # * オートセーブ / デバウンス保存は結果を使わないので **0 秒 = 待たない**
 #   （待つと 60 秒ごとに GUI が死んだ共有の I/O タイムアウトぶん固まる —
-#   issue #132 の 3 つ目の症状「何も操作しなくても 52 秒以上のフリーズ」）。
-# * 設定ダイアログだけは N-07 の契約（成否で「適用しました」と常駐警告を
+#   実測では何も操作しなくても 52 秒以上のフリーズになった）。
+# * 設定ダイアログだけは契約（成否で「適用しました」と常駐警告を
 #   出し分ける）があるので待つ。健全な保存先ではミリ秒で返るため 5 秒は
 #   偽陰性を生まない一方、超過したときの「保存できていない」は**事実**
 #   （保存先が 5 秒応答していない）なので、そのまま警告に出してよい。
@@ -198,6 +202,7 @@ from .path_probe import probe_path_kind
 from .pending import MARK, OneShot, Pending, always
 from .perf import measure, recorder
 from .perf_dialog import PerfDialog
+from .pool_teardown import drain_or_strand
 from .post_grid import (
     PostGrid,
     SearchSnapshot,
@@ -251,7 +256,7 @@ from ..common.shared_prefs import (
 )
 from ..common.teardown import Deadline, run_tasks_before_deadline
 from ..common.ui import (
-    PaneFocusRings,
+    PaneFocusBands,
     center_on_primary,
     frame_intersects_any_screen,
     show_toast,
@@ -273,7 +278,7 @@ class _MainThreadMonitor(QObject):
     Kept lightweight: just a ``monotonic`` comparison per tick, so
     running it permanently is fine.
 
-    **出力はレート制限する**（issue #132 R4）。1 回のフリーズが 1 行では
+    **出力はレート制限する**。1 回のフリーズが 1 行では
     済まないのが実測: 復帰直後に ``QTimer`` のキャッチアップ tick が連続で
     走るため、1 回の停止が「``~2187ms`` から ``~750ms`` まで 13 行」に化ける。
     死んだ共有では停止が繰り返し起きるので、この監視だけで毎分数十行を
@@ -334,14 +339,9 @@ class _MainThreadMonitor(QObject):
 
 # ステータスバー「選択ファイル名 · サイズ」permanent セグメントの上限幅 (px)。
 # sanitize.py が明示サポートする 250/255 バイト境界のファイル名でラベルが
-# 1000px 超に膨張し、stretch=1 の現在パス表示を圧殺していた (レビュー
-# 2026-07-31 #15) — 超過分は中央省略しフルテキストはツールチップで担保する。
+# 1000px 超に膨張し、stretch=1 の現在パス表示を圧殺する
+# — 超過分は中央省略しフルテキストはツールチップで担保する。
 _FILE_INFO_LABEL_MAX_PX = 360
-
-# 代表画像がデコードできなかったときに次候補を探し直す最大回数 (レビュー
-# 2026-07-31 #84)。1 回のプローブは最大 ~33 回の scandir なので、壊れた
-# ファイルが並ぶフォルダで NAS を掃き続けないよう上限を置く。
-_PREVIEW_FALLBACK_MAX = 3
 
 
 def _stat_file_label(path: Path) -> str:
@@ -367,11 +367,11 @@ def _tags_db_signature(path: Path) -> tuple[float, int] | None:
     """``(mtime, size)`` of ``tags.db``, or ``None`` when it is absent.
 
     Module-level (not a method) because it is the body dispatched off the GUI
-    thread by ``ViewerWindow._probe_tags_db`` (issue #107) — a worker closure
+    thread by ``ViewerWindow._probe_tags_db`` — a worker closure
     over a plain ``Path`` can't reach into the window's state by accident.  On
     a half-dead SMB share holding ``data/`` this ``stat`` blocks for the whole
     protocol timeout, which is exactly why it must not run on the GUI thread
-    (the invariant established by レビュー #62 / #59 / #83).
+    (no blocking disk I/O on the GUI thread).
     """
     try:
         st = path.stat()
@@ -421,43 +421,6 @@ def _read_file_detail(path: Path) -> dict:
     }
 
 
-def _first_image_of(
-    folder: Path,
-    skip: frozenset[Path] = frozenset(),
-    should_cancel: Callable[[], bool] | None = None,
-) -> Path | None:
-    """Resolve a post.md-less folder's centre-preview image (off-thread body).
-
-    ``find_first_image`` BFS-descends with up to ~33 scandir calls — cheap
-    locally but multi-second on NAS, so running it synchronously in the
-    selection handler froze the UI on every click.  Dispatched via
-    ``ViewerWindow._preview_stream`` = the window's **own** probe pool (never the
-    global one: a BFS that never returns on a half-dead share would otherwise
-    hold a thread every short-lived probe in the app shares) with a generation
-    token so the receiver discards a stale result once the user has moved on.
-
-    *should_cancel* is the current probe's session: the BFS polls it, so a
-    superseded probe stops issuing round-trips instead of running the walk to
-    completion on a share nobody is looking at any more.  A cancelled descent
-    answers ``None``, which the generation guard drops anyway.
-
-    *skip* carries the candidates whose decode already failed, so the probe
-    walks past them to the next one (レビュー 2026-07-31 #84).
-    """
-    try:
-        preview = find_first_image(
-            folder, exclude_thumb_marker=True, skip=skip,
-            should_cancel=should_cancel,
-        )
-        if preview is None and not (should_cancel is not None and should_cancel()):
-            preview = find_first_image(
-                folder, skip=skip, should_cancel=should_cancel,
-            )
-    except OSError:  # pragma: no cover (defensive)
-        preview = None
-    return preview
-
-
 def _subtree_overlaps(a: Path, b: Path) -> bool:
     """一方が他方のサブツリー（同一含む）に含まれるかの文字列判定。
 
@@ -483,7 +446,7 @@ class ViewerWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(t("viewer.main_window.window_title"))
         self.resize(*_DEFAULT_WINDOW_SIZE)
-        # Accept folder / file drops onto the window to change the root (L03).
+        # Accept folder / file drops onto the window to change the root.
         self.setAcceptDrops(True)
 
         self._state = state
@@ -499,7 +462,7 @@ class ViewerWindow(QMainWindow):
         # 権威になり、開いている間に別インスタンスが付けた名前を巻き添えで
         # 消す（パス側で塞いだのと同じ事故が名前側で起きる）。
         self._session_cleared_bookmark_names: set[str] = set()
-        # 保存済み検索の同型セット（項目#32）: このインスタンスが管理
+        # 保存済み検索の同型セット: このインスタンスが管理
         # ダイアログで削除・改名した旧 name。マージがディスク側の同名
         # エントリを再採用しないための除外リスト。
         self._session_removed_saved_searches: set[str] = set()
@@ -525,7 +488,7 @@ class ViewerWindow(QMainWindow):
         # filmstrip (created alongside).
         self._lightbox: LightboxWindow | None = None
         self._lightbox_loader: ThumbnailLoader | None = None
-        # ステージモードのフィルムストリップ専用サムネイルローダー（Phase 2-1）。
+        # ステージモードのフィルムストリップ専用サムネイルローダー。
         # ライトボックスの帯と同じく遅延生成・小プール（2 スレッド）・永続
         # キャッシュ共有 — 左ペインの常駐 pixmap で賄えないタイルだけ解決する。
         self._strip_loader: ThumbnailLoader | None = None
@@ -549,14 +512,12 @@ class ViewerWindow(QMainWindow):
         self._preview_stream.bind(self._on_first_image_found)
         self._preview_probe_folder: Path | None = None
         self._preview_probe_hint: Path | None = None
-        # 代表画像フォールバック (レビュー 2026-07-31 #84): 現在中央に出して
-        # いる「ウィンドウが選んだ」代表画像と、デコードに失敗して次候補へ
-        # 譲った候補の集合（``_preview_probe_folder`` に対応）。
-        self._preview_shown_representative: Path | None = None
-        # 代表画像のフォールバック探索が in-flight か（#84 の追補）。
+        # 代表画像フォールバック: 「ウィンドウが選んだ」代表画像と、デコードに
+        # 失敗して次候補へ譲った候補（フォルダプレビューと同じ帳簿）。
+        self._preview_fallback = RepresentativeFallback()
+        # 代表画像のフォールバック探索が in-flight か。
         # True の間だけ解像度ラベルの「画像なし」クリアを据え置く。
         self._preview_fallback_pending = False
-        self._preview_probe_skip: frozenset[Path] = frozenset()
 
         # Persistent caches (portable, under data/).  The aspect cache
         # feeds the justified layout (tiny, high-value); the disk cache
@@ -588,11 +549,11 @@ class ViewerWindow(QMainWindow):
         # own writable store under data/ (unlike tags.db which is read-only);
         # ``None`` when the volume is read-only → curation UI is hidden.
         # ``_user_meta_error`` carries the *reason* so the disappearance isn't
-        # silent (#51) — surfaced once on first show (``showEvent``).
+        # silent — surfaced once on first show (``showEvent``).
         self._user_meta, self._user_meta_error = self._open_user_meta()
         self._user_meta_notice_shown = False
         # 設定 / ブックマーク / 保存した検索の書き込み失敗を告げる常駐警告
-        # トーストの one-shot ガード（N-07 — ``_notify_persist_failed``）。
+        # トーストの one-shot ガード（``_notify_persist_failed``）。
         self._persist_notice_shown = False
 
         self._loader = ThumbnailLoader(
@@ -611,7 +572,7 @@ class ViewerWindow(QMainWindow):
             cache_edge=state.thumb_disk_cache_max_edge,
             folder_cache=self._folder_cache,
         )
-        # フォルダプレビューの子タイル用ローダー（項目#14）: lightbox /
+        # フォルダプレビューの子タイル用ローダー: lightbox /
         # フィルムストリップの専用ローダーと同型（2 ワーカー + 永続ディスク
         # / フォルダキャッシュ共有・キーは "folderpreview:" 名前空間）。
         # FolderPreviewView の自前 globalInstance デコードを置き換え、
@@ -628,7 +589,7 @@ class ViewerWindow(QMainWindow):
         )
 
         self._build_ui()
-        # ZIP drill-in extraction pipeline (#96 → zip_drill.py).  The window
+        # ZIP drill-in extraction pipeline (zip_drill.py).  The window
         # keeps the temp-dir map (titles / history labels / close sweep); the
         # controller registers extractions into it and calls back into
         # ``set_root`` on success.
@@ -640,8 +601,8 @@ class ViewerWindow(QMainWindow):
             status_message=self._notify_extracted,
             parent=self,
         )
-        # Cache-build backend for the settings dialog (#96 →
-        # cache_build_controller.py).  Constructed after _build_ui so it can
+        # Cache-build backend for the settings dialog
+        # (cache_build_controller.py).  Constructed after _build_ui so it can
         # wire the status bar's CacheBuildStatusWidget signals.
         self._cache_ctrl = CacheBuildController(
             state=self._state,
@@ -650,7 +611,7 @@ class ViewerWindow(QMainWindow):
             folder_cache=self._folder_cache,
             search_index=self._search_index,
             tag_index=self._tag_index,
-            # 呼び出し可能な provider を渡す（レビュー 2026-09-03 項目 #45）:
+            # 呼び出し可能な provider を渡す:
             # 固定タプルだと遅延生成の ``_strip_loader`` /
             # ``_lightbox_loader`` と ``_folder_preview_loader`` が
             # 「サムネイルキャッシュを削除」の記憶 LRU フラッシュから漏れる。
@@ -662,15 +623,18 @@ class ViewerWindow(QMainWindow):
             parent=self,
         )
         # In-memory copy of the shared library-root list (M02), seeded once from
-        # shared_prefs.json (a local file — never a NAS stat).  Kept in sync as
+        # shared_prefs.json.  data/ may live on a NAS, so this startup read is
+        # the only synchronous one (app.py already read the same file for the
+        # language / theme before the window existed); later reads go through
+        # the bounded ``_shared_prefs_flush`` worker.  Kept in sync as
         # the user registers / manages roots so ``_rebuild_library_menu`` stays
         # NAS-free (it reads this list, never the filesystem).
         self._library_roots: list[str] = list(self._load_library_roots())
         # Default browse root (paths.library) — shown as the Japanese
         # 「ライブラリ」 label in the breadcrumb / status bar instead of the raw
-        # English folder name (UIレビュー #6).  Resolved once (cached paths).
+        # English folder name.  Resolved once (cached paths).
         self._default_library: Path = get_paths().library
-        # Seed the breadcrumb's library-relative rendering (UIレビュー #5/#6);
+        # Seed the breadcrumb's library-relative rendering;
         # the pane was built above, so this reaches its breadcrumb before the
         # first ``set_root`` scan lands its trail.
         self._refresh_library_bases()
@@ -716,7 +680,7 @@ class ViewerWindow(QMainWindow):
         # 蒔き直さない（全 set_root で歩くと、降下 / ↑ / 戻る・進むのたびに
         # 最大 20,000 フォルダの走査が背景で走る）。
         self._rename_follow_root: Path | None = None
-        # 専用 1 スレッド + 世代 + 協調キャンセル（レビュー 09-03 #218 / #88）:
+        # 専用 1 スレッド + 世代 + 協調キャンセル:
         # ``build_moved_resolver`` は最大 20,000 フォルダのディレクトリ列挙で、
         # グローバル ``QThreadPool`` に乗せると同居する短命タスクの枠を長時間
         # 奪う。世代だけでは着地した結果を捨てるだけでウォークは止まらないので、
@@ -736,7 +700,7 @@ class ViewerWindow(QMainWindow):
         # pane's scroll offset.  One-shot state, gated by the setting.
         self._last_previewed_file: Path | None = None
         self._pending_restore_preview: Pending[Path] = Pending()
-        # issue #146 残課題1: 「内容が変わったかもしれない」明示リロード
+        # 「内容が変わったかもしれない」明示リロード
         # （F5 / ``notify_library_changed``）の one-shot。次に着地する
         # ``folder_selected`` が同一フォルダの pending-select 再発火でも、
         # 純 UI リビルド向けの右ペイン再スキャン抑止を 1 回だけ解除して
@@ -778,14 +742,14 @@ class ViewerWindow(QMainWindow):
                 or state.last_grid_scroll > 0
             )
         )
-        # UIレビュー 07-25 #4-①: 最初のスキャン着地で「選択が無ければ先頭
+        # 最初のスキャン着地で「選択が無ければ先頭
         # タイルを選択 + グリッドへフォーカス」を一度だけ行う one-shot。
         # 初回起動（復元なし）はグリッド無選択のままプレビュー列 + 情報パネルが
         # プレースホルダだけになり、しかもキーボードフォーカスはツールバーの
         # 「↑」に居た（Space 一発でライブラリ外へ）。復元起動では選択が既に
         # 入っているのでフォーカス移動だけ行う。
         self._startup_focus_pending = True
-        # An explicit launch-time file selection (L02: exe was handed a file
+        # An explicit launch-time file selection (the exe was handed a file
         # path, so its parent became the root) takes precedence over the
         # session-restore pick — tiles are direct children of the root, so
         # only a file sitting directly under it can resolve.
@@ -800,7 +764,7 @@ class ViewerWindow(QMainWindow):
         # save after top-level root changes, so a crash / kill / OS shutdown
         # loses at most the last interval instead of the whole session.
         #
-        # 保存はワーカーで走る（#132 F2）ので、前回が返る前に次の tick が来る
+        # 保存はワーカーで走るので、前回が返る前に次の tick が来る
         # 「死んだ共有」でワーカーが積み上がらないようにする在庫フラグ。
         #
         # **「暇なら set」の向き**で持つ（再指摘 M-1）: 待ちたい呼び出し元
@@ -810,7 +774,7 @@ class ViewerWindow(QMainWindow):
         self._state_save_idle = threading.Event()
         self._state_save_idle.set()
         # 即時フラッシュ（ブックマーク / 保存済み検索 / shared_prefs.json）の
-        # 有界待ちワーカー（レビュー 2026-09-03 項目#48 / #52）。フル保存が
+        # 有界待ちワーカー。フル保存が
         # ``_persist_state_snapshot`` で持っている「GUI スレッドで値を確定 →
         # 予算付きワーカーで突き合わせ + 書き込み」の 2 段を、即時フラッシュ
         # 側にも同じ形で当てる。保存先ごとに 1 本（同じファイルへのフラッシュ
@@ -840,7 +804,7 @@ class ViewerWindow(QMainWindow):
         # ロック待ちで溶かす（``_save_merged_state`` の docstring）。
         #
         # ファイル操作そのものの直列化は state.py 側の ``_STATE_FILE_LOCK``
-        # （読み取り + ``os.replace`` の 2 つの短い操作だけ・issue #140 M-2）が
+        # （読み取り + ``os.replace`` の 2 つの短い操作だけ）が
         # 担う。**ロック階層は ``_STATE_FILE_LOCK`` → この ``_state_write_lock``
         # の一方向**（着地直前の世代確認がこの順で入れ子になる）。逆向きに
         # 取る経路を作らないこと。
@@ -914,7 +878,7 @@ class ViewerWindow(QMainWindow):
         )
         search_index = (
             self._open_cache(
-                # 項目#183 の用語統一（検索インデックス→検索索引）に合わせ、
+                # 用語（検索索引）を設定ダイアログと揃えるため、
                 # 種別名の単一ソースである stat_*_name キーを共有する。
                 t("viewer.settings_dialog.stat_search_index_name"),
                 search_db,
@@ -953,13 +917,13 @@ class ViewerWindow(QMainWindow):
         破損 DB（``sqlite3.DatabaseError``）に限り :func:`open_with_recovery`
         が ``db_path`` を ``.corrupt`` へ 1 回だけ退避して再作成を試みる。これに
         より、破損 DB が ``data/`` に残置されても毎起動 ``None`` 劣化して性能劣化
-        が恒久化する事態（issue #40）を避ける。
+        が恒久化する事態を避ける。
 
         起動時 ``prune``（全表走査）は ``verify`` として ``open_with_recovery`` の
         管轄に入れる — page2 以降だけ破損した DB や異種 sqlite ファイルは接続直後
         の PRAGMA / 移行を素通りし ``prune`` で初めて ``DatabaseError`` になるため、
-        prune も退避+再作成の対象にしないと退避が永久に走らない（issue #40 の
-        残穴）。``schema_tables``（各ストアの ``SCHEMA_TABLES``）は「異種 sqlite
+        prune も退避+再作成の対象にしないと退避が永久に走らない。
+        ``schema_tables``（各ストアの ``SCHEMA_TABLES``）は「異種 sqlite
         ファイルでストア自身のテーブルが無い」ケース（実 sqlite では
         ``OperationalError: no such table: <name>``）を破損と分類するために渡す。
         ``verify`` 失敗時は ``open_with_recovery`` がハンドルを閉じてから
@@ -1015,8 +979,8 @@ class ViewerWindow(QMainWindow):
         mid-write).  The directory is watched too so the *appearance* of a
         brand-new tags.db (first-ever scan) is caught, not just edits.
 
-        No disk touch happens on the GUI thread past this constructor (issue
-        #107): the watcher slot only rearms the debounce, and the existence /
+        No disk touch happens on the GUI thread past this constructor:
+        the watcher slot only rearms the debounce, and the existence /
         ``(mtime, size)`` probe runs off-thread through
         :meth:`_probe_tags_db`.  The one ``stat`` here is unavoidable —
         ``QFileSystemWatcher.addPath`` stats internally anyway — and it runs
@@ -1026,7 +990,7 @@ class ViewerWindow(QMainWindow):
         self._tags_db_path = get_paths().data / TAGS_DB_NAME
         # AI パック無効（素の配布）では watcher を張らない — tags.db が現れても
         # ai_pack ゲートで index は None のままで、reload 通知（AIタグDB…）が
-        # AI 文言を漏らすだけになる（敵対レビュー #5）。タイマー等の属性も
+        # AI 文言を漏らすだけになる。タイマー等の属性も
         # 作らない（参照側はこのメソッドが接続したシグナル経由のみ）。
         if not ai_pack.available():
             self._tags_db_sig = None
@@ -1046,7 +1010,7 @@ class ViewerWindow(QMainWindow):
             logger.debug("tags.db watcher setup failed: {}", exc)
         self._tags_watcher.fileChanged.connect(self._on_tags_db_changed)
         self._tags_watcher.directoryChanged.connect(self._on_tags_db_changed)
-        # closeEvent が 1 度だけ外すための目印（項目#223）。2 度目の close で
+        # closeEvent が 1 度だけ外すための目印。2 度目の close で
         # 外しにいくと PySide が SystemError を投げる（``_focus_hook_connected``
         # と同じ理由・同じ作法）。
         self._tags_watch_connected = True
@@ -1055,7 +1019,7 @@ class ViewerWindow(QMainWindow):
         self._tags_reload_timer = Debouncer(
             self, 2500, self._on_tags_reload_debounced, mode=DebounceMode.TRAILING
         )
-        # Off-thread signature probe (issue #107).  窓の他のプローブと同じ
+        # Off-thread signature probe.  窓の他のプローブと同じ
         # :class:`GuardedStream`（専用 1 スレッド + 世代 + 着地の選別）。
         self._tags_probe_reload = False
         self._tags_probe_stream = GuardedStream(self)
@@ -1064,12 +1028,11 @@ class ViewerWindow(QMainWindow):
     def _on_tags_db_changed(self, _path: str = "") -> None:
         """Watcher fired — rearm the quiescence debounce, touch no disk.
 
-        issue #107: this slot used to call ``tags_db.exists()`` (to re-add a
+        The slot must not ``stat`` (e.g. ``tags_db.exists()`` to re-add a
         path :class:`QFileSystemWatcher` drops once the file is atomically
-        replaced) and therefore ``stat``-ed on the GUI thread on *every* fire.
-        With ``data/`` on a half-dead SMB share that is a full protocol
-        timeout per event, and the tagger emits a flurry of them per scan.
-        Both the existence check and the ``(mtime, size)`` comparison now run
+        replaced): with ``data/`` on a half-dead SMB share that is a full
+        protocol timeout per event, and the tagger emits a flurry of them per
+        scan.  Both the existence check and the ``(mtime, size)`` comparison run
         in the worker dispatched once the flurry goes quiet, so a running scan
         costs zero GUI-thread I/O no matter how many events arrive.
         """
@@ -1080,7 +1043,7 @@ class ViewerWindow(QMainWindow):
         self._probe_tags_db(reload_on_change=True)
 
     def _probe_tags_db(self, *, reload_on_change: bool) -> None:
-        """Dispatch the ``tags.db`` existence + ``(mtime, size)`` probe (#107).
+        """Dispatch the ``tags.db`` existence + ``(mtime, size)`` probe.
 
         ``reload_on_change=False`` only refreshes the baseline signature (used
         right after a manual / provider-driven reload has already re-opened the
@@ -1138,7 +1101,7 @@ class ViewerWindow(QMainWindow):
             logger.debug("tags.db watcher re-add failed: {}", exc)
 
     def _on_reload_tag_db_requested(self) -> None:
-        """バナー / エラーカードの［再読み込み］— 結果を必ず告げる（N-10）.
+        """バナー / エラーカードの［再読み込み］— 結果を必ず告げる.
 
         ``reload_tag_db_requested`` は引数なしシグナルなので直結すると
         ``announce`` は既定の False になり、押した本人だけが唯一フィードバック
@@ -1161,7 +1124,7 @@ class ViewerWindow(QMainWindow):
 
         ``refresh_signature`` re-takes the baseline ``(mtime, size)`` so the
         watcher doesn't announce this very reload a second time.  It goes
-        through the off-thread probe (issue #107) and is skipped when the
+        through the off-thread probe and is skipped when the
         caller is the probe itself, which already holds a fresh signature.
         """
         old_tag, old_vec = self._tag_index, self._vector_index
@@ -1191,10 +1154,9 @@ class ViewerWindow(QMainWindow):
             self._detail_window.set_tag_indexes(self._tag_index, self._vector_index)
             self._detail_window.show_path(self._current_preview_path)
         if announce:
-            # 結果はトーストの単一ファネルで告げる（design.md「成功=非モーダル」。
-            # 以前はステータスバーの一時メッセージで、バナーの［再読み込み］から
-            # 来たときは見落としやすく、そもそも announce が渡っていなかった —
-            # UIレビュー 09-11 N-10）。「開けた」と「まだ読めない」を kind で
+            # 結果はトーストの単一ファネルで告げる（成功は非モーダル。ステータス
+            # バーの一時メッセージだとバナーの［再読み込み］から来たとき見落とす）。
+            # 「開けた」と「まだ読めない」を kind で
             # 描き分ける。
             opened = self._tag_index is not None
             self._show_toast(
@@ -1211,7 +1173,7 @@ class ViewerWindow(QMainWindow):
         「あとで見る」.  Unlike the caches, the degradation is NOT silent: the
         store holds the only non-regenerable user data, so an empty curation
         surface is indistinguishable from "every star was lost".  ``open_or_report``
-        hands back the reason (#51) and :meth:`_notify_user_meta_unavailable`
+        hands back the reason and :meth:`_notify_user_meta_unavailable`
         shows it once, non-modally, on first show.  The corrupt file itself is
         never deleted / recreated — see ``user_meta.open_or_report``.
         """
@@ -1222,7 +1184,7 @@ class ViewerWindow(QMainWindow):
             return None, str(exc)
 
     def _notify_user_meta_unavailable(self) -> None:
-        """One-shot, non-modal notice that curation writes are off (#51).
+        """One-shot, non-modal notice that curation writes are off.
 
         A warning toast rather than a dialog: startup must not be gated on an
         OK press, and the status bar's transient line is too easy to miss for a
@@ -1243,10 +1205,10 @@ class ViewerWindow(QMainWindow):
     def _notify_persist_failed(self) -> None:
         """設定 / ブックマーク / 保存した検索の書き込み失敗を 1 度だけ告げる。
 
-        UIレビュー 2026-08-28 N-07: 書き込み不可な NAS / 読み取り専用メディア
-        では ``save_state`` / ``persist_bookmarks`` / ``persist_saved_searches``
-        がログを 1 行残すだけで、利用者には直後の「保存しました」成功トースト
-        しか見えなかった（＝データが消えたことに気づけない）。
+        書き込み不可な NAS / 読み取り専用メディアでは ``save_state`` /
+        ``persist_bookmarks`` / ``persist_saved_searches`` がログを 1 行残す
+        だけなので、告げなければ利用者には直後の「保存しました」成功トースト
+        しか見えない（＝データが消えたことに気づけない）。
 
         様式は :meth:`_notify_user_meta_unavailable` をそのまま踏襲する
         （新しい通知様式を増やさない）: **セッション 1 回・``duration_ms=0`` の
@@ -1286,12 +1248,12 @@ class ViewerWindow(QMainWindow):
             probe_parallelism=self._state.aspect_probe_parallelism,
         )
         # Propagate the persisted scan parallelism so the first folder
-        # load uses the user's setting, not the module default (#99: via the
+        # load uses the user's setting, not the module default (via the
         # grid's public wrapper, not its private ``_scanner``).
         self._post_grid.set_scan_metadata_parallelism(
             self._state.scan_metadata_parallelism
         )
-        # (UIレビュー07-25 追修 #40)「ロックありのみ」はセッション限りの検索軸
+        # 「ロックありのみ」はセッション限りの検索軸
         # （``state.filter_locked_only`` は load で捨てられ save でも書かれない）。
         # ここで読み書きしても常に False を往復するだけの死にコードなので、
         # 起動時の setChecked / 終了時の書き戻しは持たない — 初期値は
@@ -1325,7 +1287,7 @@ class ViewerWindow(QMainWindow):
         self._post_grid.reload_tag_db_requested.connect(
             self._on_reload_tag_db_requested
         )
-        # 条件バーの「この検索を保存…」（N-25）— メニュー項目と同じスロット。
+        # 条件バーの「この検索を保存…」— メニュー項目と同じスロット。
         self._post_grid.save_search_requested.connect(self._on_save_current_search)
         self._install_history_menus()
 
@@ -1333,7 +1295,7 @@ class ViewerWindow(QMainWindow):
         self._content.file_link_clicked.connect(self._on_file_link_clicked)
         self._content.post_link_clicked.connect(self._on_post_link_clicked)
         self._content.navigate_requested.connect(self._on_content_navigate)
-        # UIレビュー 07-25 #22: 最大化プレビューの Home/End（全画面と同じ
+        # 最大化プレビューの Home/End（全画面と同じ
         # 「先頭 / 末尾の画像へ」）。Space は navigate_requested(+1) で届く。
         self._content.jump_edge_requested.connect(self._on_content_jump_edge)
         # In-view preference toggles (context menu / control bar) write back
@@ -1354,7 +1316,7 @@ class ViewerWindow(QMainWindow):
         # like a double-click.
         self._content.zip_open_requested.connect(self._open_zip_as_folder)
         self._content.image_info_changed.connect(self._on_image_info_changed)
-        # レビュー 2026-07-31 #84: 代表画像がデコードできなかったときだけ、
+        # 代表画像がデコードできなかったときだけ、
         # 同じフォルダの次候補へ静かにフォールバックする。
         self._content.image_load_failed.connect(self._on_preview_image_failed)
         # A02: 「フォルダを開く…」 on the empty-library welcome card routes to
@@ -1364,10 +1326,10 @@ class ViewerWindow(QMainWindow):
         self._content.help_requested.connect(
             lambda: self._open_shortcuts_dialog(TASK_START)
         )
-        # UIレビュー #6: 「上の階層へ」 on the empty-folder card — same
+        # 「上の階層へ」 on the empty-folder card — same
         # navigation as ↑ / Alt+Up.
         self._content.go_up_requested.connect(self._on_go_up)
-        # N-85: 最大化中・未選択のカードの [◧ 分割ビューに戻す (G)] は G /
+        # 最大化中・未選択のカードの [◧ 分割ビューに戻す (G)] は G /
         # Esc / ステージヘッダーと**同じ**離脱経路へ（履歴の対称性を共有）。
         self._content.restore_split_requested.connect(self._exit_stage_to_browse)
         # C-10 extension: "この画像に類似を検索" from the central image
@@ -1398,7 +1360,7 @@ class ViewerWindow(QMainWindow):
         # ZIP drill), double-click activates (ZIP drill-in, etc.).  Folder
         # signals stay the same — single-click navigates, double-click
         # drills down.
-        # N-81 案A: 「クリエイターアイコンを隠す」 is ONE setting for both panes.
+        # 「クリエイターアイコンを隠す」 is ONE setting for both panes.
         # The grid owns the toolbar chrome (the window is only its seat), so
         # the window relays the toggle to the right pane the same way it
         # reaches into ``locked_check`` / ``size_slider``.
@@ -1409,16 +1371,15 @@ class ViewerWindow(QMainWindow):
         self._file_list.file_activated.connect(self._on_file_activated)
         self._file_list.folder_activated.connect(self._on_file_list_folder_activated)
         # 右一覧のフォルダ右クリック「最近追加されたファイルを表示」を
-        # 左ペインのビューへ転送する (N-50) — 右ペインは左ペインを知らない。
+        # 左ペインのビューへ転送する — 右ペインは左ペインを知らない。
         self._file_list.recent_files_requested.connect(
             self._post_grid.enter_recent_files_view
         )
         self._file_list.reveal_in_app_requested.connect(self._on_reveal_in_app)
         self._file_list.folder_selected.connect(self._on_file_list_folder_selected)
-        # UIレビュー 2026-08-28 N-26: Backspace（``GalleryView.keyPressEvent``
-        # の ``go_up_requested``）は左ペインだけ接続されており、右一覧に
-        # フォーカスがあると無反応だった（表は「グリッド」としか書いていない
-        # ので、効かない理由も画面から読めない）。↑ボタン / Alt+Up と同じ
+        # Backspace（``GalleryView.keyPressEvent`` の ``go_up_requested``）を
+        # 右一覧からも受ける（左ペインだけ繋ぐと右一覧にフォーカスがあるとき
+        # 無反応で、効かない理由も画面から読めない）。↑ボタン / Alt+Up と同じ
         # スロットへ寄せる — 両ペインで同じキーが同じ意味になる。
         self._file_list.go_up_requested.connect(self._on_go_up)
         # C-10: right-pane "この画像に類似を検索" seeds the left pane's similar
@@ -1438,14 +1399,13 @@ class ViewerWindow(QMainWindow):
             self._file_list.set_curation_provider(
                 self._post_grid._curation_badge_for
             )
-            # バッジの意味をホバーで言葉に展開する (UIレビュー 07-25 #136) —
+            # バッジの意味をホバーで言葉に展開する —
             # 左ペインと同じ行（同じ provider）を右ペインにも配る。
             self._file_list.set_tooltip_extra_provider(
                 self._post_grid.curation_tooltip_lines
             )
-            # UIレビュー 07-25 #19: 右一覧は★バッジを描くのに右クリックにも
-            # 0-5 キーにも付与手段が無い「読めるのに書けない」非対称だった。
-            # どちらの入口も左ペインの単一書き手へ送るだけ（所有は移さない）。
+            # 右一覧も★バッジを描くので、右クリックと 0-5 キーにも付与手段を
+            # 持たせる（「読めるのに書けない」非対称を作らない）。どちらの入口も左ペインの単一書き手へ送るだけ（所有は移さない）。
             self._file_list.curation_requested.connect(
                 self._on_file_list_curation_requested
             )
@@ -1454,10 +1414,10 @@ class ViewerWindow(QMainWindow):
             )
             self._post_grid.curation_changed.connect(self._on_curation_changed)
             # プレビュー列（画像 / PDF / ZIP / テキスト / メディア / post.md）の
-            # 右クリックにも印の節を出す（N-19 — 以前は左右 2 ペインだけ）。
+            # 右クリックにも印の節を出す。
             # 口は左ペインと同じ 2 関数（同期の辞書引き + 単一書き手の funnel）。
             self._content.set_curation_hooks(self._post_grid.curation_hooks())
-        # N-13 / N-58: 全面占有オーバーレイ入場・検索着地でグリッドの母集合が
+        # 全面占有オーバーレイ入場・検索着地でグリッドの母集合が
         # 入れ替わり選択が残らなかったとき、プレビュー列と右パネルを set_root と
         # 同じリセット規約へ落とす。``_file_list`` / ``_content`` が揃った後で
         # 配線する（スロットが両方に触る）。
@@ -1489,7 +1449,7 @@ class ViewerWindow(QMainWindow):
         # the full-resolution decode runs.  Same decoupling rationale as
         # the siblings provider — ImageView only sees a callable.
         self._content.set_image_thumbnail_provider(self._file_list.pixmap_for_path)
-        # フォルダプレビューの子タイルサムネ供給（項目#14）— 専用ローダーを
+        # フォルダプレビューの子タイルサムネ供給 — 専用ローダーを
         # ContentView 経由で FolderPreviewView へ注入する。
         self._content.set_folder_thumbnail_loader(self._folder_preview_loader)
         # File list's spinner overlay reads current cache residency for
@@ -1533,9 +1493,9 @@ class ViewerWindow(QMainWindow):
         self._focus_hook_connected = True
         # 同一ルートの再スキャン（F5 / notify_library_changed）で最大化を維持
         # したまま非同期スキャンを待つときのフラグ。着地（loading→False）時に
-        # 現選択が消えていたら分割へフォールバックする（項目9）。
+        # 現選択が消えていたら分割へフォールバックする。
         self._stage_settle_pending = False
-        # 全画面（ライトボックス）へ入ったときの表示態 (UIレビュー 09-11 N-139)。
+        # 全画面（ライトボックス）へ入ったときの表示態。
         # 投稿横断で現ルート外へ渡ると復路が ``set_root`` の再ルートになり、
         # そちらは必ず分割へ着地する（ナビゲーションは分割、という既定）ため、
         # 「最大化から F11 → 閉じたら分割に戻っていた」と黙って態が変わって
@@ -1558,7 +1518,7 @@ class ViewerWindow(QMainWindow):
             self._on_image_strip_thumb_requested
         )
         self._image_strip.clicked.connect(self._on_image_strip_clicked)
-        # 兄弟セルの★有無マーク (UIレビュー 2026-08-28 N-72) — 左ペインの
+        # 兄弟セルの★有無マーク — 左ペインの
         # インメモリ map からの同期読み取り（sqlite / NAS なし）。
         self._image_strip.set_curation_provider(
             self._post_grid._curation_badge_for
@@ -1567,11 +1527,11 @@ class ViewerWindow(QMainWindow):
         self._file_list.tiles_changed.connect(self._on_file_list_tiles_changed)
         # プレビューヘッダー（常設）: 分割時 = ‹ › の項目送り（アイコンのみ）+
         # タイトル + n/m + [⤢ 最大化 (E)]。最大化時 = [◧ 分割に戻す (G)] が
-        # 加わり、右端が [閲覧モード (F11)] に入れ替わる (UIレビュー 07-25 #16/#96)。
+        # 加わり、右端が [閲覧モード (F11)] に入れ替わる。
         self._stage_header = StageHeader()
         self._stage_header.back_requested.connect(self._exit_stage_to_browse)
         self._stage_header.fullscreen_requested.connect(self._toggle_lightbox)
-        # (UIレビュー 07-25 #16) 分割時のヘッダー右端 [⤢ 最大化 (E)] —
+        # 分割時のヘッダー右端 [⤢ 最大化 (E)] —
         # 出口 [◧ 分割に戻す] と同じ席・同じ文法の入口。
         self._stage_header.maximize_requested.connect(self._enter_stage_mode)
         self._stage_header.prev_post_requested.connect(
@@ -1580,11 +1540,11 @@ class ViewerWindow(QMainWindow):
         self._stage_header.next_post_requested.connect(
             lambda: self._step_post(1)
         )
-        # post.md 本文表示中の「‹ 画像に戻る」（N-87）。
+        # post.md 本文表示中の「‹ 画像に戻る」。
         self._stage_header.back_to_media_requested.connect(
             self._on_stage_back_to_media
         )
-        # 0-5 スターキー（UIレビュー #11: プレビューでもグリッド/ライトボックス
+        # 0-5 スターキー（プレビューでもグリッド/ライトボックス
         # と同様にスターを付けられる）。ハンドラ側で user_meta 不在は no-op。
         self._content.star_key_requested.connect(self._on_stage_star_key)
         # プレビュー列（旧 _stage_page）。子ビューが消費しない面のダブル
@@ -1632,7 +1592,7 @@ class ViewerWindow(QMainWindow):
         # QAction / 表示 popover check / ツールバーボタンの相互 setChecked
         # 再入ガード（_syncing_info_panel と同型）。
         self._syncing_preview = False
-        # UIレビュー 07-25 #105: 最大化に入る直前の「F6 で非表示」状態。最大化は
+        # 最大化に入る直前の「F6 で非表示」状態。最大化は
         # プレビュー席を必ず可視にするため、分割へ戻るときにこのフラグで
         # 元の非表示状態へ戻す（設定が黙って上書きされない）。
         self._preview_hidden_before_stage = False
@@ -1640,7 +1600,7 @@ class ViewerWindow(QMainWindow):
             total = sum(split_sizes)
             self._center_split.setSizes([max(1, total), 0])
 
-        # Left seat = ナビレール (redesign 2026-07 Phase 2-3): always-on library /
+        # Left seat = ナビレール: always-on library /
         # bookmark / saved-search lists.  A dumb view — the window feeds it lists
         # from the same _rebuild_* points that refresh the menus, and acts on its
         # click / manage signals via the existing navigation + dialog routes.
@@ -1648,7 +1608,7 @@ class ViewerWindow(QMainWindow):
         self._nav_rail.navigate_root.connect(self._on_root_change_requested)
         self._nav_rail.navigate_bookmark.connect(self._jump_to_bookmark)
         self._nav_rail.apply_saved_search.connect(self._apply_saved_search)
-        # (UIレビュー 07-25 #57) 横断キュレーション一覧をレールから直接開く
+        # 横断キュレーション一覧をレールから直接開く
         # （メニューの奥と同じ ``enter_curation_view`` へ配線）。
         self._nav_rail.open_curation.connect(self._on_rail_curation_requested)
         self._nav_rail.manage_libraries.connect(self._manage_libraries)
@@ -1657,10 +1617,10 @@ class ViewerWindow(QMainWindow):
         # Re-entrancy guard for the mutual setChecked between the F7 QAction and
         # the 表示 popover check (same pattern as _syncing_info_panel).
         self._syncing_nav_rail = False
-        # キュレーション行の初期投入（以後は counts_changed で追従 — #57）。
+        # キュレーション行の初期投入（以後は counts_changed で追従）。
         self._sync_nav_rail_curation()
 
-        # Right seat = 情報パネル (redesign 2026-07 Phase 2-2): the post meta card
+        # Right seat = 情報パネル: the post meta card
         # stacked above the file list (which is reparented into it).  The panel
         # is a thin view — the window feeds it an already-parsed ParsedPost via
         # ``_refresh_info_meta`` (read off the GUI thread); ``_file_list`` stays
@@ -1685,10 +1645,10 @@ class ViewerWindow(QMainWindow):
         self._info_meta_stream = GuardedStream(self)
         self._info_meta_stream.bind(self._on_info_meta_read)
         # Last-read (folder, ParsedPost|None) so the meta card can be re-shown /
-        # collapsed on a mode change without re-reading post.md (UIレビュー #22 —
-        # ``_apply_meta_card`` collapses it while the stage shows that post.md).
+        # collapsed on a mode change without re-reading post.md
+        # (``_apply_meta_card`` collapses it while the stage shows that post.md).
         self._info_meta_last: "tuple[Path | None, ParsedPost | None] | None" = None
-        # issue #94: post.md read の一過性失敗（共有の瞬断・書き込み中の並走
+        # post.md read の一過性失敗（共有の瞬断・書き込み中の並走
         # 読み等）で ``parsed=None`` が選択変更まで固定されないよう、失敗着地
         # から短い backoff 後に **1 回だけ** 再読込するタイマー。無限リトライは
         # NAS 断で有害なので ``_info_meta_retried`` が回数上限（=1）を担う。
@@ -1711,16 +1671,16 @@ class ViewerWindow(QMainWindow):
         self._splitter.addWidget(self._nav_rail)
         self._splitter.addWidget(self._center_split)
         self._splitter.addWidget(self._info_panel)
-        # UIレビュー 2026-08-28 N-26 案B: フォーカスがどの席にあるかを細枠で
-        # 示す（キーの効き方が 6 通りに分岐する設計には、文言より可視化）。
-        # 07-25 #47 の残課題（ナビレール未適用）もこれで閉じる。Alt+1/2/3
-        # （N-28）の移動先もこの枠でそのまま見える。
-        self._pane_focus_rings = PaneFocusRings(
+        # フォーカスがどの席にあるかを**見出し帯**で示す（キーの効き方が
+        # 6 通りに分岐する設計には、文言より可視化）。灯るのは
+        # フォーカスを内包する最も内側の節の見出しで、Alt+1/2/3 の
+        # 移動先もそのまま見える。グリッドは見出しを持たないので登録しない —
+        # 選択タイルの減光（GalleryView._selection_active）が同じ役を担う。
+        self._pane_focus_bands = PaneFocusBands(
             [
-                self._nav_rail,
-                self._post_grid,
-                self._preview_column,
-                self._info_panel,
+                *self._nav_rail.focus_band_targets(),
+                (self._preview_column, self._stage_header),
+                *self._info_panel.focus_band_targets(),
             ],
             self,
         )
@@ -1744,7 +1704,7 @@ class ViewerWindow(QMainWindow):
         # Base [nav-rail | centre | file list] sizes (old-layout migration in
         # _initial_splitter_sizes), then carve the rail's default column out of
         # the centre when the rail is shown and no width is remembered (old
-        # snapshots persisted 0 for the then-empty seat — Phase 2-3 migration).
+        # snapshots persisted 0 for the then-empty seat).
         sizes = self._initial_splitter_sizes(self._state.splitter_sizes)
         if self._state.nav_rail_visible and len(sizes) == 3 and sizes[0] == 0:
             give = min(_NAV_RAIL_DEFAULT_WIDTH, max(0, sizes[1] - 100))
@@ -1757,7 +1717,7 @@ class ViewerWindow(QMainWindow):
         self._info_panel_saved_width = max(
             self._splitter.sizes()[2], _INFO_PANEL_DEFAULT_WIDTH
         )
-        # Same remembered-width machinery for the ナビレール (Phase 2-3).
+        # Same remembered-width machinery for the ナビレール.
         self._nav_rail_saved_width = max(
             self._splitter.sizes()[0], _NAV_RAIL_DEFAULT_WIDTH
         )
@@ -1770,11 +1730,11 @@ class ViewerWindow(QMainWindow):
         # ドラッグ中に setVisible はしない（同じジェスチャで引き戻せるように）。
         self._splitter.splitterMoved.connect(self._on_outer_split_moved)
 
-        # Unified toolbar (Phase 1-1): the left pane's old chrome rows now
+        # Unified toolbar: the left pane's chrome rows
         # live on ONE window-level 40px bar above the splitter.  The widgets
         # (and their state / persistence) are still owned by PostGrid — the
         # window only mounts the bar, so all signal wiring above is untouched.
-        # Directly under it sits the condition chip bar (Phase 1-3): applied
+        # Directly under it sits the condition chip bar: applied
         # search-condition chips + hit count + すべて解除, full window width,
         # hidden (zero height) while nothing is engaged.  Same ownership
         # pattern — PostGrid owns, the window only mounts.
@@ -1784,9 +1744,9 @@ class ViewerWindow(QMainWindow):
         central_layout.setSpacing(0)
         central_layout.addWidget(self._post_grid.toolbar)
         central_layout.addWidget(self._post_grid.condition_bar)
-        # UIレビュー 07-25 #4-②: ナビ系ツールバーボタンを Tab リングから外す。
-        # 起動直後の初期フォーカスがツールバー先頭の「↑ 上の階層へ」に落ち、
-        # 最初の Space/Enter 一発でライブラリの外へ出てしまっていた（グリッドへは
+        # ナビ系ツールバーボタンを Tab リングから外す。
+        # 載せると起動直後の初期フォーカスがツールバー先頭の「↑ 上の階層へ」に
+        # 落ち、最初の Space/Enter 一発でライブラリの外へ出てしまう（グリッドへは
         # マウスか Tab 十数回でしか到達できない）。ナビは ←/→/Alt+←/Alt+→/
         # Backspace/F5 とメニューでキーボード到達できるので、ボタン自体を
         # フォーカス対象にする必要は無い。
@@ -1808,22 +1768,22 @@ class ViewerWindow(QMainWindow):
         # 「ファイル名 · サイズ」セグメントの非同期 stat（off-thread —
         # ``_stat_file_label``）。専用ストリームの世代が矢印キー連打中の古い
         # 着地を捨てる。
-        # 進行中の stat が「フォルダの代表画像」宛か（N-104）。着地時に
+        # 進行中の stat が「フォルダの代表画像」宛か。着地時に
         # 「代表:」の淡色接頭を付けるかどうかを決める。
         self._file_info_representative = False
         self._file_info_path: Path | None = None
         self._file_info_stream = GuardedStream(self)
         self._file_info_stream.bind(self._on_file_info_statted)
-        # Tab 巡回を画面の並び（左上 → 右下）に揃える (UIレビュー 07-25 #111)。
+        # Tab 巡回を画面の並び（左上 → 右下）に揃える。
         self._apply_tab_order()
 
     def _tab_order_widgets(self) -> list[QWidget]:
-        """Tab 巡回に載せる席を**画面の見た目の並び**で返す (UIレビュー 07-25 #111).
+        """Tab 巡回に載せる席を**画面の見た目の並び**で返す.
 
         ツールバー（パンくず → フォルダを開く → 検索欄 → フィルタ →
         並び・表示）→ 3 ペイン（ナビレール → グリッド →
         プレビュー → 情報パネルの一覧）。ナビ 4 ボタン・モードチップ・
-        ペイントグルは NoFocus（#4 / #100）なのでそもそも巡回に乗らない。
+        ペイントグルは NoFocus なのでそもそも巡回に乗らない。
         ``getattr`` ガードは __init__ を通さないテストハーネス向け。
         """
         grid = self._post_grid
@@ -1846,7 +1806,7 @@ class ViewerWindow(QMainWindow):
 
     @staticmethod
     def _tab_stops(widget: QWidget) -> list[QWidget]:
-        """*widget* が占める席の**実フォーカス受け**を視覚順に返す (#111).
+        """*widget* が占める席の**実フォーカス受け**を視覚順に返す.
 
         パンくずのように「自身は NoFocus で、中の子ボタンが Tab を受ける」
         複合ウィジェットは、子（= 移動のたびに作り直されるセグメント）まで
@@ -1861,7 +1821,7 @@ class ViewerWindow(QMainWindow):
         ]
 
     def _tab_order_key(self) -> tuple[str, int]:
-        """巡回チェーンが変わりうる条件の**安価な**指紋 (UIレビュー07-25 追修 #111).
+        """巡回チェーンが変わりうる条件の**安価な**指紋.
 
         チェーンの構成が変わるのは実質パンくずだけ（他の席は同一の
         ウィジェットが座り続ける）。パンくずは ``set_path`` / 折りたたみで
@@ -1877,7 +1837,7 @@ class ViewerWindow(QMainWindow):
         )
 
     def _apply_tab_order(self, *, only_if_changed: bool = False) -> None:
-        """視覚順の Tab 巡回を（再）適用する (UIレビュー 07-25 #111).
+        """視覚順の Tab 巡回を（再）適用する.
 
         既定の巡回はウィジェットの**生成順**なので、後から生成される
         パンくずのセグメントボタンや、ツールバーより先に作られるペイン群が
@@ -1885,10 +1845,10 @@ class ViewerWindow(QMainWindow):
         後方に紛れる」）。パンくずは移動のたびにセグメントを作り直すため、
         フォルダが変わるたびに再適用する（``_on_counts_changed`` から）。
 
-        *only_if_changed* はその高頻度経路用 (UIレビュー07-25 追修 #111):
+        *only_if_changed* はその高頻度経路用:
         ``_on_counts_changed`` はグリッド再構築のたび = **絞り込み 1 文字ごと**
         に走るのに対し、この再適用は 3 ペイン分の再帰 ``findChildren`` を伴う
-        （旧コメントの「実質ゼロコスト」は setTabOrder の回数だけを見た誤り）。
+        （setTabOrder の回数だけ見れば安いが、走査が重い）。
         :meth:`_tab_order_key` が変わったときだけ歩く。
         """
         if only_if_changed:
@@ -1906,10 +1866,10 @@ class ViewerWindow(QMainWindow):
     def _initial_splitter_sizes(saved: list[int] | None) -> list[int]:
         """Column sizes for the [nav-rail seat | centre | file list] splitter.
 
-        Migration (Phase 2-1): pre-redesign snapshots persisted
-        ``[post_grid, content, file_list]`` for the OLD three-pane seating.
-        In the new seating the first column is the hidden nav-rail seat
-        (always 0 until Phase 2-3 lands a rail there), so an old snapshot —
+        Migration: older snapshots persisted
+        ``[post_grid, content, file_list]`` for the former three-pane seating.
+        In the current seating the first column is the nav-rail seat
+        (persisted as 0 by that format), so an old snapshot —
         recognisable by a non-zero first entry — folds its grid+content
         widths into the new centre column instead of donating ~320px to an
         invisible pane.  New-format snapshots (first entry 0) apply as-is.
@@ -1934,7 +1894,7 @@ class ViewerWindow(QMainWindow):
         ``ViewerState.preview_visible``, not via a 0 in this snapshot.
 
         席が ``_SPLIT_REMEMBER_MIN_PX`` 未満の比率も「復元できない比率」と
-        して既定へ倒す（項目#9）— 修正前のドラッグ追従が書き残した
+        して既定へ倒す — ドラッグ追従が書き残しうる
         ``[866, 8]`` 級の潰れた比率を、次回起動で引きずらないため。
         """
         if (
@@ -1978,7 +1938,7 @@ class ViewerWindow(QMainWindow):
         if not getattr(self, "_center_split_ratio_applied", True):
             self._center_split_ratio_applied = True
             QTimer.singleShot(0, self, self._apply_initial_center_split)
-        # キュレーション保存が無効な理由を初回表示で一度だけ知らせる (#51)。
+        # キュレーション保存が無効な理由を初回表示で一度だけ知らせる。
         # 同じ getattr 既定（``_bare_window`` ハーネスでは何もしない）。
         if getattr(self, "_user_meta_error", None) and not getattr(
             self, "_user_meta_notice_shown", True
@@ -1997,14 +1957,14 @@ class ViewerWindow(QMainWindow):
         self._apply_center_split_sizes(self._center_split_saved)
 
     def _remember_center_split(self, sizes: list[int]) -> None:
-        """ドラッグ中の *sizes* を「再表示で戻る比率」として採用する（項目#9/#8a）。
+        """ドラッグ中の *sizes* を「再表示で戻る比率」として採用する。
 
         畳みジェスチャの通過点を記憶に採らないよう、両席に「再表示既定
         （55:45）の各シェアを現在幅へスケールした値 ×
-        ``_CENTER_SPLIT_REMEMBER_MIN_SHARE``」の下限を課す（項目#8(a) —
-        項目#9 の 80px 下限では 80px〜既定幅の帯を通る畳みサンプルが記憶を
-        侵食し、F6 の再表示や最大化解除が細い列を復元してその比率がそのまま
-        永続化されていた）。下限未満のサンプルでは直前の正常な記憶を温存する。
+        ``_CENTER_SPLIT_REMEMBER_MIN_SHARE``」の下限を課す（
+        ``_SPLIT_REMEMBER_MIN_PX`` の 80px 下限だけでは 80px〜既定幅の帯を通る
+        畳みサンプルが記憶を侵食し、F6 の再表示や最大化解除が細い列を復元して
+        その比率がそのまま永続化される）。下限未満のサンプルでは直前の正常な記憶を温存する。
         """
         if len(sizes) != 2:
             return
@@ -2034,7 +1994,7 @@ class ViewerWindow(QMainWindow):
 
         記憶比率の採用には「両席が再表示既定シェア×
         ``_CENTER_SPLIT_REMEMBER_MIN_SHARE`` 以上」の下限を課す
-        （項目#9→#8(a) — ``_remember_center_split`` 参照）: この関数は
+        （``_remember_center_split`` 参照）: この関数は
         ドラッグ中の全サンプルで呼ばれるので、席を 0 まで畳むジェスチャは
         必ず途中の細いサンプルを通過し、そのまま記憶すると再表示が細い帯に
         なってしまう。
@@ -2085,12 +2045,15 @@ class ViewerWindow(QMainWindow):
             t("viewer.main_window.library_menu")
         )
         self._library_menu.setToolTip(t("viewer.main_window.library_menu_hint"))
+        # 「現在のフォルダを登録」の活性は今のルートで決まる（ZIP 展開先は
+        # 登録できない）— ブックマークと同じく開くたびに評価し直す。
+        self._library_menu.aboutToShow.connect(self._sync_library_register_action)
         self._rebuild_library_menu()
         act_up = QAction(t("viewer.main_window.go_up"), self)
         act_up.setShortcut(QKeySequence("Alt+Up"))
         act_up.triggered.connect(self._on_go_up)
         file_menu.addAction(act_up)
-        # UIレビュー 07-25 #4-③: ライブラリ境界では ↑ を無効化する
+        # ライブラリ境界では ↑ を無効化する
         # （``_update_nav_buttons`` がツールバーの ↑ と一緒に同期する）。
         self._act_go_up = act_up
         act_up.setEnabled(self._can_go_up())
@@ -2112,13 +2075,12 @@ class ViewerWindow(QMainWindow):
 
         # Edit menu — operations on what the user has selected.
         # Everything search-flavoured lives in the dedicated 検索 menu below
-        # (UIレビュー #7 — users looking for search scanned the menu bar for
-        # a 検索 entry and never thought to open 編集).
+        # (users looking for search scan the menu bar for a 検索 entry and
+        # never think to open 編集).
         #
-        # UIレビュー 2026-08-28 N-70 案B / N-157 / N-74: this menu used to hold a
-        # single item while ★ / あとで見る / ユーザータグ の付与 existed ONLY under
-        # the right button (so they were unreachable while the preview was
-        # maximised) and the shared コピー系 lived only there too.  All of it is
+        # This menu carries ★ / あとで見る / ユーザータグ の付与 and the shared
+        # コピー系 so they are not reachable ONLY under the right button (which
+        # is unreachable while the preview is maximised).  All of it is
         # "an operation on the current selection", which is what 編集 is for.
         # The per-selection block is rebuilt on ``aboutToShow`` from the very
         # same builder the right-click menu uses (``PostGrid.populate_entry_menu``)
@@ -2134,8 +2096,8 @@ class ViewerWindow(QMainWindow):
         act_copy_image.triggered.connect(self._on_copy_current_image)
         edit_menu.addAction(act_copy_image)
         edit_menu.addSeparator()
-        # 「あとで見る」 toggle — the third curation verb finally gets a key
-        # (N-74).  ``L`` は未使用（``grep Key_L`` = 0 件）で、E / G と同じ
+        # 「あとで見る」 toggle — the third curation verb gets a key.
+        # ``L`` は未使用（``grep Key_L`` = 0 件）で、E / G と同じ
         # 素の英字ウィンドウショートカット: フォーカス中の QLineEdit が
         # ShortcutOverride を受けるので、検索欄で "l" を打っても発火しない。
         self._act_toggle_later = QAction(t("viewer.post_grid.watch_later"), self)
@@ -2146,14 +2108,13 @@ class ViewerWindow(QMainWindow):
         self._act_toggle_later.triggered.connect(self._on_toggle_later)
         # メニューには載せず、ウィンドウ直下のショートカット担体だけにする —
         # 編集メニューの「あとで見る」は選択対象の共通ブロック（右クリックと
-        # 同じ builder）が出すので、載せると 2 行並ぶ（UIレビュー 2026-09-11
-        # N-01）。ラベル側に「(L)」を併記して予告は残す。
+        # 同じ builder）が出すので、載せると 2 行並ぶ。
+        # ラベル側に「(L)」を併記して予告は残す。
         self.addAction(self._act_toggle_later)
-        # 横断一覧への入口（ブックマークメニューから移設 — N-70）。
+        # 横断一覧への入口。
         self._curation_menu = edit_menu.addMenu(
             t("viewer.nav_rail.section_curation")
         )
-        self._curation_menu.setToolTipsVisible(True)
         self._curation_menu.aboutToShow.connect(self._rebuild_curation_menu)
         self._rebuild_curation_menu()
         # 選択中の項目に対する共通操作（右クリックと同一の builder）。
@@ -2165,7 +2126,7 @@ class ViewerWindow(QMainWindow):
         # searches.  Ctrl+F goes to the filter box because "find something in
         # the current view" is the most common search action.  post.md 本文の
         # 検索は同じ検索欄の ``body:`` 構文（「本文」チップ）に統合されている
-        # — 単独の全文検索ダイアログは廃止した（issue #81）。
+        # — 単独の全文検索ダイアログは持たない。
         search_menu = bar.addMenu(t("viewer.main_window.menu_search"))
         act_filter = QAction(t("viewer.main_window.filter_left_pane"), self)
         act_filter.setShortcut(QKeySequence("Ctrl+F"))
@@ -2191,9 +2152,9 @@ class ViewerWindow(QMainWindow):
 
         # Bookmarks menu
         self._bookmarks_menu = bar.addMenu(t("viewer.main_window.menu_bookmarks"))
-        # UIレビュー 07-25 #53: 追加/解除の活性は「今のルートが登録済みか」で
+        # 追加/解除の活性は「今のルートが登録済みか」で
         # 決まる — 開くたびに評価し直す（メニュー再構築はブックマークの増減
-        # 時だけなので、ルート移動では追随しなかった）。
+        # 時だけなので、それだけではルート移動に追随しない）。
         self._bookmarks_menu.aboutToShow.connect(self._sync_bookmark_actions)
         self._rebuild_bookmarks_menu()
 
@@ -2203,9 +2164,9 @@ class ViewerWindow(QMainWindow):
         # 実バインドはこの QAction が担う — _install_shortcuts 側に素の
         # QShortcut を重複登録しないこと（両方がマッチすると
         # activatedAmbiguously になり双方 dead になる）。
-        # UIレビュー 07-25 #66: 「プレビューを最大化」は実際にはトグル（E は
-        # 分割 ⇄ 最大化を往復する）なのに、メニューは現在の状態を示さず
-        # ラベルと動作が食い違っていた。同メニュー内の F6/F7/F8 と同じ
+        # 「プレビューを最大化」は実際にはトグル（E は
+        # 分割 ⇄ 最大化を往復する）なので、メニューにも現在の状態を示し
+        # ラベルと動作を一致させる。同メニュー内の F6/F7/F8 と同じ
         # **checkable ☑ 文法**へ揃える（checked = いま最大化中）。
         self._act_stage_mode = QAction(
             t("viewer.main_window.preview_maximize_menu"), self, checkable=True
@@ -2217,7 +2178,7 @@ class ViewerWindow(QMainWindow):
         )
         view_menu.addAction(self._act_stage_mode)
         # 「分割ビューに戻す」は最大化中しか意味を持たない片道の項目 — 分割中は
-        # 無効化して「押せるのに何も起きない」を無くす（#66）。
+        # 無効化して「押せるのに何も起きない」を無くす。
         self._act_browse_mode = QAction(
             t("viewer.main_window.preview_split_menu"), self
         )
@@ -2234,7 +2195,7 @@ class ViewerWindow(QMainWindow):
         view_menu.addAction(act_detail)
         # 閲覧モード（全画面ライトボックス）の発見性向上 — G05: F11 と同じ入口を
         # メニューにも出す（プレビュー中の画像、無ければ現在フォルダの先頭から起動）。
-        # UIレビュー 07-25 #78: F11 はラベル内表記ではなく setShortcut で載せる
+        # F11 はラベル内表記ではなく setShortcut で載せる
         # （E/G と同じパターン — ラベル内に書くとメニューのショートカット列だけが
         # 空になり、この項目だけ列が欠けて見える）。文言はメニュー実物と
         # ショートカット一覧で同じキーを共有する。
@@ -2264,9 +2225,9 @@ class ViewerWindow(QMainWindow):
         # 画面上の配置と同じ 左→右）。各ペインとも QAction（ショートカット）
         # + ツールバー右端のペイントグルボタンの 2 導線が同じハンドラへ
         # 集まり、checked 同期はハンドラ側の _set_*_checks が一手に行う。
-        # （「並び・表示」popover にも同じ ☑ が並んでいたが、同一バー上の
-        # 二重提示だったため N-134 で撤去した。）
-        # ナビレール (左) 表示トグル (redesign 2026-07 Phase 2-3): F7。
+        # （「並び・表示」popover には同じ ☑ を置かない — 同一バー上の
+        # 二重提示になる。）
+        # ナビレール (左) 表示トグル: F7。
         self._act_nav_rail = QAction(
             t("viewer.main_window.nav_rail_toggle"), self, checkable=True
         )
@@ -2286,7 +2247,7 @@ class ViewerWindow(QMainWindow):
         view_menu.addAction(self._act_preview)
         self._post_grid.preview_btn.setChecked(self._preview_visible)
         self._post_grid.preview_btn.toggled.connect(self._on_preview_toggled)
-        # 情報パネル (右) 表示トグル (redesign 2026-07 Phase 2-2): F8。
+        # 情報パネル (右) 表示トグル: F8。
         self._act_info_panel = QAction(
             t("viewer.main_window.info_panel_toggle"), self, checkable=True
         )
@@ -2326,7 +2287,7 @@ class ViewerWindow(QMainWindow):
         # ので、チェックマークはメイン 4 択と合わせて常に 1 つだけ点く）。
         # ラベルは設定ダイアログのコンボと同じ ``extra_theme_label``（明暗
         # サフィックス付き）— 素の名前だけでは 6 種の明暗が読めない
-        # (UIレビュー 2026-08-28 N-107: 07-25 #84 がコンボにしか当たっていなかった)。
+        # （設定ダイアログのコンボと同じ表記に揃える）。
         self._theme_extra_menu = theme_menu.addMenu(
             t("viewer.main_window.theme_extra_menu")
         )
@@ -2372,7 +2333,7 @@ class ViewerWindow(QMainWindow):
         act_build_cache.triggered.connect(self._open_cache_prebuild)
         diag_menu.addAction(act_build_cache)
 
-        # L08: user-triggered Explorer shell integration (「Snappix Viewer で
+        # User-triggered Explorer shell integration (「Snappix Viewer で
         # 開く」 right-click verb).  Portable policy forbids automatic registry
         # writes, so this stays an explicit, reversible opt-in behind a dialog.
         diag_menu.addSeparator()
@@ -2382,7 +2343,7 @@ class ViewerWindow(QMainWindow):
 
         # Help menu — shortcut cheat-sheet + legal documents + version info.
         help_menu = bar.addMenu(t("common.menu.help"))
-        # (UIレビュー 08-28 N-120) 「使い方」を探す初見が最初に見る行。中身は
+        # 「使い方」を探す初見が最初に見る行。中身は
         # ショートカット一覧と同じ面（マウス規約・ドリルイン・バッジ凡例まで
         # 載っている事実上の「操作の基本」— shortcuts_dialog の docstring 参照）
         # なので、面を増やさず**別名の入口**を足すだけにする。
@@ -2401,13 +2362,13 @@ class ViewerWindow(QMainWindow):
             lambda _checked=False: self._open_shortcuts_dialog(TASK_START)
         )
         help_menu.addAction(act_getting_started)
-        # (UIレビュー 08-28 N-39) 入口名は着地タイトルと同じキーで描く — 改名が
+        # 入口名は着地タイトルと同じキーで描く — 改名が
         # 窓側だけで止まって「キーボードショートカット一覧」を選んだ人が
         # 「ショートカットと画面の凡例」に着く、という不一致を構造的に断つ
         # （バッジ凡例がここにしか無いことも、名前で分かるようになる）。
         act_shortcuts = QAction(t("viewer.shortcuts_dialog.window_title"), self)
         act_shortcuts.setShortcut(QKeySequence("F1"))
-        # (UIレビュー 09-11 N-145) F1 だけはアプリ全体スコープにする。既定の
+        # F1 だけはアプリ全体スコープにする。既定の
         # ``WindowShortcut`` だと詳細情報 / 健全性 / 統計 / 操作ガイド自身の
         # ようなモードレスの別トップレベル窓、そして全画面ライトボックスに
         # フォーカスがある間は届かず、「困ったら F1」という唯一の出口が死ぬ。
@@ -2429,7 +2390,7 @@ class ViewerWindow(QMainWindow):
             act_tagger_setup.triggered.connect(self._help.open_tagger_setup_doc)
             help_menu.addAction(act_tagger_setup)
         help_menu.addSeparator()
-        # (UIレビュー 08-28 N-114) 同梱の手引き（dist 直下の
+        # 同梱の手引き（dist 直下の
         # 「はじめにお読みください.txt」）へアプリ内から辿れるようにする。
         # 解決は legal_docs（get_paths().base 基準）— 利用規約・ライセンスの
         # 導線と同型で、ビューアは配布レイアウトを自前で知らない。
@@ -2443,7 +2404,7 @@ class ViewerWindow(QMainWindow):
         act_licenses.triggered.connect(self._help.open_third_party_licenses)
         help_menu.addAction(act_licenses)
         help_menu.addSeparator()
-        # I08: a discoverable route to data/logs for bug reports — placed by
+        # A discoverable route to data/logs for problem reports — placed by
         # About so "report a problem" material sits together.
         act_logs = QAction(t("viewer.main_window.open_logs_folder"), self)
         act_logs.triggered.connect(self._help.open_logs_folder)
@@ -2474,8 +2435,8 @@ class ViewerWindow(QMainWindow):
     def set_safe_mode(self, on: bool) -> None:
         """セーフモード（``--no-plugins`` / ``SNAPPIX_NO_PLUGINS=1``）の告知.
 
-        UIレビュー 2026-08-28 N-149: 従来は ``logger.info`` とプラグイン管理
-        ダイアログの注記だけで、**自分で開かないと気づけなかった**。配布の
+        ``logger.info`` とプラグイン管理ダイアログの注記だけでは
+        **自分で開かないと気づけない**。配布の
         ``.bat`` に ``--no-plugins`` を書いたまま忘れる導線があるので、常時
         見えるタイトルバーへ出す。``_plugin_host is None`` を代用しないのは、
         それが「まだ attach されていない」とも区別できないため。
@@ -2486,9 +2447,8 @@ class ViewerWindow(QMainWindow):
     def notify_safe_mode(self) -> None:
         """タイトルの「（セーフモード）」が何を意味するかを 1 度だけ告げる.
 
-        UIレビュー 09-11 N-154: 表記は N-149 の裁定で意図的に入れたものだが、
         説明文（``safe_mode_note``）はプラグイン管理ダイアログの中にしか無く、
-        初見では括弧書きの意味も戻し方も分からなかった。``duration_ms=0`` で
+        初見では括弧書きの意味も戻し方も分からない。``duration_ms=0`` で
         クリックするまで残し、追随ボタンからその管理ダイアログへ導く。
         呼ぶのは ``show()`` の**後**（``app.main``）— 可視化前に出すと席がずれる。
         """
@@ -2527,7 +2487,7 @@ class ViewerWindow(QMainWindow):
             safe_mode=self._plugin_host is None,
         )
         dlg.exec()
-        dlg.deleteLater()  # (#58) 親付き exec ダイアログは隠れるだけで残る
+        dlg.deleteLater()  # 親付き exec ダイアログは隠れるだけで残る
 
     def _install_shortcuts(self) -> None:
         # ←/→ step the left-pane selection.  MediaView also binds ←/→ (with
@@ -2545,37 +2505,37 @@ class ViewerWindow(QMainWindow):
         sc_right.activatedAmbiguously.connect(lambda: self._step_or_navigate(1))
         QShortcut(QKeySequence(Qt.Key_F5), self, activated=self._on_reload)
         # 閲覧モード (fullscreen lightbox): F11 は表示メニューの QAction 側に
-        # setShortcut で載っている（UIレビュー 07-25 #78 — E/G と同じパターン。
+        # setShortcut で載っている（E/G と同じパターン。
         # ラベル内に「(F11)」と書くとメニューのショートカット列が空になる）ので、
         # ここに素の QShortcut を重複登録しないこと（両方マッチで
         # activatedAmbiguously になり双方 dead になる）。ライトボックス窓の中では
         # F11/Esc は自前のキーフィルタが処理する（別トップレベル窓なので
         # この WindowShortcut は届かない）。
-        # 分割 ⇄ プレビュー最大化のキー (Phase 2-1, Lightroom G/E semantics) は
-        # 表示メニューの QAction 側に載っている（現在のラベルは
-        # 「プレビューを最大化 (E)」☑ /「分割に戻す (G)」— UIレビュー 07-25 #66。
-        # 旧「ステージで表示 / グリッド一覧へ」という記述は改名で陳腐化していた
-        # ため更新した: UIレビュー 07-25 #128）ので、ここに素の QShortcut を
+        # 分割 ⇄ プレビュー最大化のキー (Lightroom G/E semantics) は
+        # 表示メニューの QAction 側に載っている（ラベルは
+        # 「プレビューを最大化 (E)」☑ /「分割に戻す (G)」）ので、ここに素の QShortcut を
         # 重複登録しないこと（両方マッチで ``activatedAmbiguously`` になり
         # 双方 dead になる）。  Plain-letter window
         # shortcuts stay safe next to text inputs either way: a focused
         # QLineEdit accepts the ShortcutOverride for character keys, so typing
         # "e"/"g" in the toolbar search field never switches modes.
-        # Esc はウィンドウレベルの**単一ハンドラ**へ集約する（UIレビュー
-        # 07-25 #20）。以前はステージ中だけ有効な QShortcut で、分割ビューでは
-        # GalleryView.keyPressEvent が拾う二本立てだったため、プレビュー列 /
-        # 右一覧にフォーカスがあると Esc が完全に無反応だった（どちらの経路にも
+        # Esc はウィンドウレベルの**単一ハンドラ**へ集約する。ステージ中だけ
+        # 有効な QShortcut と分割ビューで GalleryView.keyPressEvent が拾う
+        # 二本立てにすると、プレビュー列 / 右一覧にフォーカスがあるとき Esc が
+        # 完全に無反応になる（どちらの経路にも
         # 乗らない席がある = 配線漏れが構造的に再発する）。常時有効な 1 本にして
         # ``_on_escape`` 側で「テキスト入力へ委譲 → 最大化解除 → 検索/絞り込みの
         # 一括クリア」を分岐させる（フォーカス位置によらず同じ順序）。
         self._sc_escape = QShortcut(
             QKeySequence(Qt.Key_Escape), self, activated=self._on_escape
         )
+        # 長押しのリピートで最大化解除から条件の一括解除まで進ませない。
+        self._sc_escape.setAutoRepeat(False)
         # Ctrl+←/→ switch the previewed post without stealing the plain ←/→
         # image stepping inside the current post.  Enabled only while the
         # preview is maximised (split mode already has plain ←/→ = grid
-        # stepping and the header's ‹前へ|次へ› buttons — 中立の項目送りへ
-        # 改名済み (UIレビュー 07-25 #15/#128); a live
+        # stepping and the header's ‹前へ|次へ› buttons — 中立の項目送り;
+        # a live
         # Ctrl+←/→ would also fight word-jump in focused text fields).
         self._sc_stage_prev = QShortcut(
             QKeySequence("Ctrl+Left"), self,
@@ -2590,11 +2550,11 @@ class ViewerWindow(QMainWindow):
         # Keyboard counterparts to the ←/→ chrome buttons.
         QShortcut(QKeySequence("Alt+Left"), self, activated=self._on_go_back)
         QShortcut(QKeySequence("Alt+Right"), self, activated=self._on_go_forward)
-        # UIレビュー 2026-08-28 N-28: ペイン間のフォーカス移動に専用キーが無く、
-        # Tab では実測 14 ストップ掛かっていた。F6/F7/F8 は「左 / 中 / 右の席の
+        # ペイン間のフォーカス移動の専用キー（Tab だけでは実測 14 ストップ
+        # 掛かる）。F6/F7/F8 は「左 / 中 / 右の席の
         # **表示**トグル」という内部で一貫した体系なので触らず、**移動**だけを
         # Alt+1/2/3 として足す（既存の Alt 割当は Alt+Up / Alt+← / Alt+→ の
-        # 3 つだけで、数字とは衝突しない）。移動先は N-26 案B のフォーカス枠
+        # 3 つだけで、数字とは衝突しない）。移動先はフォーカス帯（見出し）
         # でそのまま見える。
         QShortcut(
             QKeySequence("Alt+1"), self, activated=self._focus_nav_rail_pane
@@ -2605,21 +2565,20 @@ class ViewerWindow(QMainWindow):
         QShortcut(
             QKeySequence("Alt+3"), self, activated=self._focus_preview_pane
         )
-        # 右情報パネルは 4 席目なのに直行キーだけ欠けていた（N-15）。
+        # 右情報パネル（4 席目）への直行キー。
         QShortcut(
             QKeySequence("Alt+4"), self, activated=self._focus_info_panel_pane
         )
         # Mouse back/forward (XButton1/XButton2) can't be bound as shortcuts,
         # so an application-wide event filter routes them to the same slots.
         # そのフィルタは **プロセスに 1 本** で、``nav_history`` のモジュール
-        # singleton が持つ（レビュー 2026-09-03 項目#62）。かつては窓ごとに
-        # ``app.installEventFilter(self)`` していたため、``notify`` が配送する
-        # 全イベント × 生存窓数の C++→Python 遷移になり（実測 5 窓で
-        # 0.36 → 11.9us/event）、しかも ``removeEventFilter`` の対が無いので
-        # 閉じた窓のぶんまで課金され続けていた。
+        # singleton が持つ。窓ごとに ``app.installEventFilter(self)`` すると
+        # ``notify`` が配送する全イベント × 生存窓数の C++→Python 遷移になり
+        # （実測 5 窓で 0.36 → 11.9us/event）、しかも ``removeEventFilter`` の
+        # 対が無いと閉じた窓のぶんまで課金され続ける。
         install_mouse_nav()
 
-    # ------------------------------------------- ペイン間フォーカス移動 (N-28)
+    # ------------------------------------------- ペイン間フォーカス移動
 
     def _focus_nav_rail_pane(self) -> None:
         """Alt+1 — ナビレールへフォーカス（隠れていれば先に出す）。"""
@@ -2667,7 +2626,7 @@ class ViewerWindow(QMainWindow):
         also fires from ``activatedAmbiguously`` so ←/→ never go dead while a
         MediaView control holds focus (the two shortcuts otherwise collide).
 
-        Stage mode (Phase 2-1): the grid is hidden and the centre shows the
+        Stage mode: the grid is hidden and the centre shows the
         preview, so ←/→ always mean image stepping — the same content-navigate
         path as focus-in-content — regardless of where focus sits.  Filmstrip
         post switching has its own keys (Ctrl+←/→), so the two never collide.
@@ -2688,10 +2647,10 @@ class ViewerWindow(QMainWindow):
         if grid is None:  # __init__ を通さないテストハーネス
             return
         grid.set_nav_state(bool(self._history), bool(self._forward))
-        # UIレビュー 07-25 #4-③: ルートが登録ライブラリそのものなら「↑」を
-        # 無効化する。従来は停止条件が FS ルートだけで、ライブラリ直下から
-        # ↑ を押すと NAS ルートの親のスキャンが始まり、パンくずの
-        # 「ライブラリ外へ迷い出ない」方針とも食い違っていた。
+        # ルートが登録ライブラリそのものなら「↑」を無効化する。停止条件が
+        # FS ルートだけだと、ライブラリ直下から ↑ を押すと NAS ルートの親の
+        # スキャンが始まり、パンくずの「ライブラリ外へ迷い出ない」方針とも
+        # 食い違う。
         can_up = self._can_go_up()
         grid.up_btn.setEnabled(can_up)
         act_up = getattr(self, "_act_go_up", None)
@@ -2699,7 +2658,7 @@ class ViewerWindow(QMainWindow):
             act_up.setEnabled(can_up)
 
     def _can_go_up(self) -> bool:
-        """「上の階層へ」が意味を持つか（UIレビュー 07-25 #4-③）。
+        """「上の階層へ」が意味を持つか。
 
         **パンくずが親クラムを出すかどうか**と同じ答えを返す（= 上の段が
         あるときだけ True）。パス演算のみ = NAS へ stat しない。
@@ -2707,9 +2666,9 @@ class ViewerWindow(QMainWindow):
         判定を「現在ルートが登録ライブラリと一致するか」で書くと、外側の
         ライブラリの中に内側のライブラリを登録した構成で、内側の直下から
         ↑ が黙って死ぬ（パンくずは ``pick_library_base`` の**最外**基準を
-        採るので親クラムは押せる = 対の片側欠落。N-82）。境界の定義を
+        採るので親クラムは押せる = 対の片側欠落）。境界の定義を
         パンくずの分節 :func:`~snappix.viewer.breadcrumb.path_segments` 1 本へ
-        寄せると、① 登録ライブラリ直下では段が 1 つ = False（07-25 #4-③ の
+        寄せると、① 登録ライブラリ直下では段が 1 つ = False（
         「ライブラリ外へ迷い出ない」は不変）② 入れ子ライブラリの内側では
         最外基準からの段が続く = True ③ ライブラリ外のフォルダを直接開いた
         ときは FS の全段が出る = True（従来どおり）の 3 つが 1 つの規則で
@@ -2737,8 +2696,8 @@ class ViewerWindow(QMainWindow):
     # ------------------------------------------------- mouse side buttons
     # ``nav_history._BackForwardRouter``（プロセス singleton のアプリ級
     # フィルタ）が、アクティブな窓がこの 2 つを持っていれば呼ぶ
-    # （``nav_history.MouseNavTarget`` — レビュー 2026-09-03 項目#62）。
-    # ``ViewerWindow.eventFilter`` の override はここで消えている:
+    # （``nav_history.MouseNavTarget``）。
+    # ``ViewerWindow.eventFilter`` は override しない:
     # **窓ごとにアプリ級フィルタを張らないこと**（全イベント × 生存窓数の
     # C++→Python 遷移になり、閉じた窓のぶんも課金され続ける）。
 
@@ -2752,7 +2711,7 @@ class ViewerWindow(QMainWindow):
 
     @staticmethod
     def _is_reachable_dir(path: Path) -> bool:
-        """``path.is_dir()`` のバウンデッド版（issue #132）.
+        """``path.is_dir()`` のバウンデッド版.
 
         ナビゲーションの同期ゲート（``set_root`` / ↑）が使う。素の
         ``is_dir()`` は到達不能な SMB 共有に対して**数十秒**呼び出しスレッド
@@ -2789,22 +2748,21 @@ class ViewerWindow(QMainWindow):
         directory — the window's state, both history stacks, and the panes
         are left untouched, so callers that mutate the stacks around a
         navigation (戻る/進む, ルート変更) must check the result before
-        committing their stack operations (#6).
+        committing their stack operations.
 
         ``assume_exists=True`` skips the synchronous ``is_dir`` gate — used at
         startup (B05), where an offline / waking NAS root must not block the
         GUI thread; the async scan then reports failure via the error card.
         「見つかりません」プロンプトで 再試行 を選んだ場合も同じ扱いで先へ
-        進む（UIレビュー 07-25 #70 — GUI スレッドの再 stat をしない）。
+        進む（GUI スレッドの再 stat をしない）。
 
         ``keep_mode=True`` は「同一ルートの再スキャン」（F5 リロード /
         ``notify_library_changed``）専用で、既定の「新ルートは必ずブラウズへ
-        戻る」を抑止して現在の UI モード（ステージ）を維持する（項目9）。維持は
+        戻る」を抑止して現在の UI モード（ステージ）を維持する。維持は
         モードだけでなく**表示内容**も含む — 中央プレビュー / 右ペイン /
         ``_current_folder`` をブランク化せず、表示中ファイルを pending-restore
         （B01 と同機構）に積んで着地後の選択復元を同じ位置へ復帰させる。
-        **表示内容の維持は UI モードに依らない**（レビュー 2026-09-03 項目
-        #46）— 分割ビューでもプレビュー列は常時可視なので、最大化中と同じく
+        **表示内容の維持は UI モードに依らない** — 分割ビューでもプレビュー列は常時可視なので、最大化中と同じく
         閲覧中の画像を保つ。最大化そのものの維持だけがステージ限定。再
         スキャンは非同期なので、着地時（``_on_loading_changed`` の loading→False）
         に現選択が消えていた場合のみブラウズへフォールバックする（そのとき初めて
@@ -2816,21 +2774,22 @@ class ViewerWindow(QMainWindow):
             # I07: don't just warn — explain the likely cause (offline drive /
             # rename / delete) and offer 再試行 / 別のフォルダを開く.
             #
-            # UIレビュー 07-25 #70: かつてはここが ``while`` ループで、「再試行」
-            # のたびに GUI スレッドで ``is_dir()`` を再実行していた — 切断 NAS
-            # では 1 回あたり数十秒ウィンドウが固まる。再試行は**同期 stat を
+            # 「再試行」のたびに GUI スレッドで ``is_dir()`` を再実行する
+            # ループにしないこと — 切断 NAS では 1 回あたり数十秒ウィンドウが
+            # 固まる。再試行は**同期 stat を
             # 繰り返さず**、起動経路（B05 / ``assume_exists``）と同じく先へ
             # 進めて、存在確認は非同期スキャンの失敗（エラーカード + その中の
             # 再試行ボタン）に委ねる。
-            if not self._handle_missing_folder(root):
-                # 「別のフォルダを開く」を選ぶと ``_handle_missing_folder`` の
-                # 内側で別ルートへ遷移し、トレイルもハードリセット済みになる
-                # — 呼び出し側が「何も変わっていない」と読んで状態を巻き戻す
-                # のを防ぐため、2 つの結末を型で分ける（項目 #107）。
+            outcome = self._handle_missing_folder(root)
+            if outcome != "retry":
+                # 「別のフォルダを開く」で内側が着地した（同じルートを選び
+                # 直した場合も含む — トレイルはハードリセット済み）なら、
+                # 呼び出し側が「何も変わっていない」と読んで状態を巻き戻さない
+                # よう結末を型で分ける。
                 return (
-                    SetRootResult.UNCHANGED
-                    if self._root == previous_root
-                    else SetRootResult.REROUTED
+                    SetRootResult.REROUTED
+                    if outcome == "rerouted"
+                    else SetRootResult.UNCHANGED
                 )
         if push_history and self._root is not None:
             # Remember the *whole* position we're leaving — root, selected
@@ -2848,29 +2807,28 @@ class ViewerWindow(QMainWindow):
                 clear_search = True
         # Resolve the search post-processing once, up front: restore precedes
         # clear, and a no-op transition leaves any persistent search alone
-        # (#81 — the precedence lives in SearchTransition, not inline here).
+        # (the precedence lives in SearchTransition, not inline here).
         transition = SearchTransition(restore=restore_search, clear=clear_search)
         # 走行中のリネーム追従ウォークは前のルートのためのもの — 結果を捨てる
-        # だけでなくウォーク自体を止める（レビュー 2026-09-03 項目#88）。
+        # だけでなくウォーク自体を止める。
         # getattr ガードは __init__ を通さないナビゲーションのテストハーネス向け。
         stream = getattr(self, "_rename_follow_stream", None)
         if stream is not None:
             stream.cancel()
         self._root = root
         self._sync_window_title()
-        # 項目9: ステージ維持（keep_mode=True・同一ルート・ステージ表示中）は
-        # 中央/右ペインのブランク化より**前**に確定させる。従来はモード分岐まで
-        # ``show_empty()`` が走っていたため、「ステージ維持」でも表示中の画像が
+        # ステージ維持（keep_mode=True・同一ルート・ステージ表示中）は
+        # 中央/右ペインのブランク化より**前**に確定させる。モード分岐より先に
+        # ``show_empty()`` が走ると、「ステージ維持」でも表示中の画像が
         # 空白化し、着地後の選択復元が ``_current_folder=None`` により先頭
-        # （post.md / 代表画像）へリセットされていた。getattr ガードは
+        # （post.md / 代表画像）へリセットされる。getattr ガードは
         # __init__ を通さないナビゲーションのテストハーネス向け（下と同じ）。
         # 「表示中ファイルを保つか」（keep_position）と「最大化を保つか」
-        # （keep_stage）は別の問い（レビュー 2026-09-03 項目 #46）。2026-07 の
-        # 分割ビュー再設計でプレビュー列は**常時可視**になったので、閲覧中の
-        # 画像は最大化中かどうかに関わらず同じ価値を持つ。以前は両方を
-        # ``_ui_mode == "stage"`` 込みの 1 条件で判定していたため、分割ビュー
+        # （keep_stage）は別の問い。分割ビューでもプレビュー列は**常時可視**
+        # なので、閲覧中の画像は最大化中かどうかに関わらず同じ価値を持つ。
+        # 両方を ``_ui_mode == "stage"`` 込みの 1 条件で判定すると、分割ビュー
         # での F5 / notify_library_changed だけが表示中ファイルを捨てて代表
-        # 画像（先頭）へ戻る非対称になっていた。
+        # 画像（先頭）へ戻る非対称になる。
         keep_position = keep_mode and previous_root == root
         keep_stage = (
             keep_position
@@ -2879,7 +2837,7 @@ class ViewerWindow(QMainWindow):
         )
         if not keep_position:
             # 「再ルートは選択を捨てる」規約の実体は :meth:`_reset_preview_panes`
-            # に切り出してある（N-13/N-58 — 全面占有オーバーレイ入場・検索着地も
+            # に切り出してある（全面占有オーバーレイ入場・検索着地も
             # 同じものを呼ぶ）。中央/右のブランク化は ``post_grid.set_root`` の
             # 前でよい: 新ルートのスキャンは非同期で、選択は着地後の
             # pending-select が ``folder_selected`` 経由で入れ直す。
@@ -2896,13 +2854,12 @@ class ViewerWindow(QMainWindow):
             # 位置維持でも兄弟リストは再スキャンで入れ替わる — prefetch した
             # PIL ソースは捨てる（非維持側は ``_reset_preview_panes`` が同じ事を
             # 済ませている）。getattr ガードは __init__ を通さないナビゲーション
-            # のテストハーネス向け（このブロックは以前 ``_center_split`` を必須
-            # とする keep_stage で暗黙にガードされていた）。
+            # のテストハーネス向け。
             self._content.invalidate_image_sibling_cache()
         # Navigation always lands in the split view (candidate A): re-rooting
         # means "show me this folder's contents", i.e. the grid must be
         # visible.  getattr guard for the __init__-bypassing navigation test
-        # harness (same as ``_plugin_events`` below).  例外（項目9）: 同一
+        # harness (same as ``_plugin_events`` below).  例外: 同一
         # ルートの再スキャン（keep_mode=True・F5 / notify_library_changed）は
         # プレビュー最大化を維持する。再スキャンは非同期なので、着地時に現
         # 選択が消えていた場合のみ ``_on_loading_changed`` で分割へ戻す。
@@ -2918,7 +2875,7 @@ class ViewerWindow(QMainWindow):
                 self._stage_settle_pending = True
             else:
                 self._stage_settle_pending = False
-                # 離脱位置は再ルート側が既に push している（項目#186）。
+                # 離脱位置は再ルート側が既に push している。
                 self._enter_browse_mode(reconcile_history=False)
         # Apply the resolved search transition (post_grid.set_root has already
         # re-scoped/re-kicked any persistent search against the new root, so
@@ -2926,9 +2883,9 @@ class ViewerWindow(QMainWindow):
         transition.apply(self._post_grid)
         # （情報パネルのメタカード / ファイル詳細のクリアは
         # ``_reset_preview_panes`` が済ませている。ステージ維持中は選択ごと保つ
-        # ので触らない — 項目9。）
-        # Move the ナビレール's ライブラリ highlight onto the new root (Phase 2-3;
-        # same getattr guard for the __init__-bypassing navigation harness).
+        # ので触らない。）
+        # Move the ナビレール's ライブラリ highlight onto the new root (same
+        # getattr guard for the __init__-bypassing navigation harness).
         if getattr(self, "_nav_rail", None) is not None:
             self._nav_rail.set_current_root(root)
         # パンくずの基準列はルートで変わりうる（ZIP ドリルインの展開先は
@@ -2975,8 +2932,8 @@ class ViewerWindow(QMainWindow):
         グリッド全面を占有する母集合の入れ替え（横断キュレーション一覧 / 最近
         追加されたファイル一覧 / AI 検索結果 / 平常の検索着地）も
         :meth:`_on_grid_preview_context_lost` 経由でここへ合流する
-        （UIレビュー 2026-08-28 N-13 / N-58 — 入場しても「現在地」がプレビュー
-        ヘッダー・右パネル・パンくずで 3 つに割れる問題）。
+        （さもないと入場しても「現在地」がプレビューヘッダー・右パネル・
+        パンくずで 3 つに割れる）。
 
         含むもの: 現在フォルダ / ステータスバー（パス + ファイル情報）/ 右ペインの
         タイル列 / 中央プレビュー / prefetch 済み兄弟リスト / 情報パネルの
@@ -2984,17 +2941,17 @@ class ViewerWindow(QMainWindow):
 
         含まないもの:
 
-        * **先頭タイルの自動選択**（N-13 裁定）— 横断項目は別ボリューム上に
+        * **先頭タイルの自動選択** — 横断項目は別ボリューム上に
           ありうるので、入場と同時に代表画像の読み出しを起こすと NAS で待たされる。
         * **UI モードの切替**（``_enter_browse_mode``）— それは set_root 側の
           ナビゲーション規約であって「選択を捨てる」規約ではない。
-        * **ステージヘッダーのタイトルを一覧名に差し替えること**（N-13 裁定）—
+        * **ステージヘッダーのタイトルを一覧名に差し替えること** —
           一覧名はパンくずが担う。ここは :meth:`_update_stage_header` の既存の
           算出規則にそのまま任せる（未選択なので ``n/m`` 位置は消える）。
         """
         # The bottom-left status shows the currently selected / previewed
         # item's path; with nothing selected yet it falls back to the current
-        # browse location (UIレビュー #2 — the breadcrumb can be collapsed at
+        # browse location (the breadcrumb can be collapsed at
         # narrow pane widths, so the status bar must still answer "where am I").
         # Reset ``_current_folder`` first so the fallback resolves to the root,
         # not the folder being left.
@@ -3015,7 +2972,7 @@ class ViewerWindow(QMainWindow):
             self._update_stage_header()
 
     def _on_grid_preview_context_lost(self) -> None:
-        """左グリッドの選択が検索 / 一覧の母集合入れ替えで消えた (N-13 / N-58).
+        """左グリッドの選択が検索 / 一覧の母集合入れ替えで消えた.
 
         :attr:`PostGrid.preview_context_lost` の受け口。プレビュー列と右パネルが
         「もうグリッドに無いもの」を映し続けないよう、:meth:`_reset_preview_panes`
@@ -3024,7 +2981,7 @@ class ViewerWindow(QMainWindow):
 
         判定に ``_current_preview_path`` を使わないこと — あれは選択が無いとき
         現在地（``_current_folder or _root``）へフォールバックする表示用の値
-        （UIレビュー #2）なので、リセット後も ``None`` にはならない。
+        なので、リセット後も ``None`` にはならない。
         """
         if self._current_folder is None and self._last_previewed_file is None:
             return
@@ -3036,13 +2993,13 @@ class ViewerWindow(QMainWindow):
         """Warn that *root* is unreachable and ask what to do next (I07).
 
         Returns ``"retry"`` (proceed anyway — the async scan reports the real
-        failure, see #70), ``"open_other"`` (let the caller route to the folder
+        failure), ``"open_other"`` (let the caller route to the folder
         picker), ``"remove_bookmark"``（ブックマーク経路のみ）, or ``"close"``
         (give up).  Split out as its own method so the callers stay readable and
         the branch is unit-testable by stubbing this one call.
 
         *bookmark* を渡すと「このブックマークを削除」ボタンが増える
-        (UIレビュー 07-25 #69) — 死んだブックマークをその場で片付けられる。
+        — 死んだブックマークをその場で片付けられる。
         """
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
@@ -3066,7 +3023,7 @@ class ViewerWindow(QMainWindow):
         box.setDefaultButton(retry_btn)
         box.exec()
         clicked = box.clickedButton()
-        # (#58) 親付き QMessageBox は exec 後も親が所有し続ける — 死んだ
+        # 親付き QMessageBox は exec 後も親が所有し続ける — 死んだ
         # ブックマーク / パンくずを踏むたびに積み上がるので明示的に解放する
         # （deleteLater はイベントループ復帰時なので clicked の比較は安全）。
         box.deleteLater()
@@ -3080,24 +3037,18 @@ class ViewerWindow(QMainWindow):
 
     def _handle_missing_folder(
         self, path: Path, *, bookmark: str | None = None,
-    ) -> bool:
-        """「フォルダが見つかりません」への共通応答 (UIレビュー 07-25 #69).
+    ) -> Literal["retry", "rerouted", "cancelled"]:
+        """「フォルダが見つかりません」への共通応答.
 
         ルート変更系 / パンくず / ブックマーク / ↑（上の階層へ）の 4 経路が
-        ここへ合流する — かつては良質なダイアログ・生パスの警告 2 種・完全な
-        無言 return の 4 通りに割れていた。
+        ここへ合流する（経路ごとに応答が割れないよう 1 本にする）。
 
-        戻り値は「呼び出し側がそのままナビゲーションを続行してよいか」。
-        ``True`` = 再試行が選ばれた場合で、続行側は ``assume_exists=True`` で
-        進めること — GUI スレッドで ``is_dir()`` を再実行しない
-        （UIレビュー 07-25 #70）。
-
-        **``False`` は「何も起きなかった」を意味しない**（レビュー 2026-09-03
-        項目 #107）: 「別のフォルダを開く」分岐は ``_pick_root()`` を同期で
-        走らせるので、戻ってきた時点で**既に別ルートへ遷移し、トレイルを
-        ハードリセットし終えている**ことがある。False を「変化なし」と読んで
-        状態を巻き戻す呼び出し側（戻る/進むの復帰）は、``self._root`` が動いて
-        いないことを併せて確かめること。
+        - ``"retry"``: 再試行が選ばれた。続行側は ``assume_exists=True`` で
+          進めること — GUI スレッドで ``is_dir()`` を再実行しない。
+        - ``"rerouted"``: 「別のフォルダを開く」で内側の ``_pick_root()`` が
+          着地し、トレイルもハードリセット済み（同じルートを選び直した場合も）。
+        - ``"cancelled"``: 何も変わっていない（閉じた / ブックマーク削除 /
+          ピッカーを取り消した）。
         """
         choice = (
             self._prompt_folder_not_found(path, bookmark=bookmark)
@@ -3105,12 +3056,12 @@ class ViewerWindow(QMainWindow):
             else self._prompt_folder_not_found(path)
         )
         if choice == "retry":
-            return True
+            return "retry"
         if choice == "open_other":
-            self._pick_root()
-        elif choice == "remove_bookmark" and bookmark is not None:
+            return "rerouted" if self._pick_root() else "cancelled"
+        if choice == "remove_bookmark" and bookmark is not None:
             self._remove_bookmark(bookmark)
-        return False
+        return "cancelled"
 
     def _capture_current_position(self) -> NavEntry:
         """Snapshot the whole left-pane position for the nav history.
@@ -3128,7 +3079,7 @@ class ViewerWindow(QMainWindow):
             # 一部として記録する。getattr ガードは __init__ を通さない
             # ナビゲーションのテストハーネス向け（set_root 系と同じ）。
             getattr(self, "_ui_mode", "browse"),
-            # 横断キュレーション一覧も「位置」の一部 (UIレビュー 07-25 #58) —
+            # 横断キュレーション一覧も「位置」の一部 —
             # 記録しないと 1 件ドリルインした時点で一覧が消え、「戻る」でも
             # 戻れない使い捨てになる。
             self._post_grid.current_curation_view(),
@@ -3137,7 +3088,7 @@ class ViewerWindow(QMainWindow):
         )
 
     def _capture_curation_search(self) -> "SearchSnapshot | None":
-        """Snapshot the narrowing applied ON TOP of an overlay listing (#58).
+        """Snapshot the narrowing applied ON TOP of an overlay listing.
 
         ``_capture_current_search`` returns ``None`` when the clear-on-navigate
         setting is off, which is right for folder positions (search persists on
@@ -3186,7 +3137,7 @@ class ViewerWindow(QMainWindow):
             # this folder, select it in the right pane once the scan lands (its
             # file_selected then restores the centre preview).
             restore = self._pending_restore_preview.peek()
-            # 項目9: 復元対象 (restore) がいままさに中央に表示中のファイルなら
+            # 復元対象 (restore) がいままさに中央に表示中のファイルなら
             # one-shot 消費しない — 同一ルート再スキャン（keep_mode）は 2 段
             # リビルド（fast list → metadata enrichment）が folder_selected を
             # リビルド毎に再発火するため、初回で消費すると 2 回目が post.md /
@@ -3195,7 +3146,7 @@ class ViewerWindow(QMainWindow):
             # folder へ進めてしまう）もスキップして表示中ファイルを保つ。右ペイン
             # が実際にそのファイルを選択した時点（``_on_file_selected`` が None
             # へ戻す + 同ファンネルを再駆動）か、別フォルダへ移った時点で解除。
-            # B01 の起動時復元（中央はまだ未表示）は従来どおり one-shot。
+            # B01 の起動時復元（中央はまだ未表示）は one-shot。
             keep_preview = (
                 restore is not None
                 and self._current_preview_path == restore
@@ -3209,12 +3160,12 @@ class ViewerWindow(QMainWindow):
             # resume window (B01/B02): from here on _collect_state may persist
             # the live resume fields again.
             self._startup_restore_pending = False
-            # 項目9 追補: 上の one-shot は「右ペインが対象を選んだ時点」で解除
+            # 上の one-shot は「右ペインが対象を選んだ時点」で解除
             # されるが、同一ルート再スキャンの 2 段リビルド（fast list →
             # metadata enrichment）はそのあとにも folder_selected を再発火する。
             # その再発火は restore を消費済みで keep_preview=False になり、下の
             # 代表画像差し替え（``_show_preview_file``）が閲覧中の画像を先頭へ
-            # 奪い返していた（速い機械では復元が後着で隠れ、遅い CI で実写）。
+            # 奪い返す（速い機械では復元が後着で隠れ、遅い機械で表に出る）。
             # 選択が変わっていない = 再発火なので、中央がこのフォルダ内のファイル
             # を表示しているなら奪わない。右ペインの選択位置もその表示中ファイル
             # で選び直す（``restore`` が None のままだと下の早期 return が
@@ -3229,7 +3180,7 @@ class ViewerWindow(QMainWindow):
                 ):
                     keep_preview = True
                     restore = current
-            # issue #146 残課題1: 同一フォルダ再発火の分類。左グリッドの
+            # 同一フォルダ再発火の分類。左グリッドの
             # リビルド（メタデータ 2 段・#thumb# トグル・検索 teardown 復元
             # 等）は pending-select の適用（``is_resolving_pending_select``）
             # として選択を emit し直すだけで内容は変わっていない — 右ペインの
@@ -3263,7 +3214,7 @@ class ViewerWindow(QMainWindow):
             # 役割再定義 2026-07-20: フォルダ選択はフォルダの「詳細」= 投稿メタ
             # （メタカード）を出す文脈なので、直前のファイル詳細カードは畳む。
             #
-            # ただし**選択が変わらない純 UI 再発火**（issue #153）は畳まない:
+            # ただし**選択が変わらない純 UI 再発火**は畳まない:
             # 右ペインの選択が既に ``restore`` に居るなら、「畳む → 再選択の
             # ``file_selected`` で戻す」往復そのものが不要で、往復に頼ると
             # どちらへ転んでも壊れる — 同じ項目が選択済みだと
@@ -3286,7 +3237,7 @@ class ViewerWindow(QMainWindow):
             )
             if not selection_unchanged:
                 self._refresh_file_detail(None)
-            # #146 残課題1 の対: 純 UI 再発火（左グリッドのリビルド由来）で
+            # 上の再スキャン抑止の対: 純 UI 再発火（左グリッドのリビルド由来）で
             # 同じフォルダのメタが既に解決済みなら、カードを消して post.md を
             # 読み直さない。無条件だと再発火のたびにカードが消え、ステージ
             # ヘッダーのタイトルが「投稿タイトル → フォルダ名 → 投稿タイトル」
@@ -3304,16 +3255,16 @@ class ViewerWindow(QMainWindow):
             else:
                 self._refresh_info_meta(folder)
             # keep_preview の間は代表画像への差し替えを行わない — 最大化維持の
-            # 再スキャンで表示中の画像が先頭へ戻るのを防ぐ（項目9）。右ペインの
+            # 再スキャンで表示中の画像が先頭へ戻るのを防ぐ。右ペインの
             # 再選択（pending_select=restore）の ``file_selected`` が同じ表示を
             # 再確定する。
             if keep_preview:
                 if selection_unchanged:
                     return
                 with measure("folder_selected_list", str(folder)):
-                    # 純 UI リビルド再発火は再スキャンせず選択適用のみ
-                    # （#146 残課題1）。スキャン失敗中などで断られたら従来
-                    # どおり再スキャンへフォールバック。
+                    # 純 UI リビルド再発火は再スキャンせず選択適用のみ。
+                    # スキャン失敗中などで断られたら再スキャンへ
+                    # フォールバック。
                     if not (
                         pure_ui_refire
                         and self._file_list.reselect_same_folder(
@@ -3340,8 +3291,8 @@ class ViewerWindow(QMainWindow):
                 else:
                     # フォルダは選択済み — 「グリッドから選んでください」の
                     # 未選択ヒント（``show_empty``）はここでは自己矛盾する
-                    # 案内になる（レビュー 2026-07-31 #83: 画像が BFS 深さ
-                    # 上限より深いフォルダで実写）。状態即応の静音
+                    # 案内になる（画像が BFS 深さ上限より深いフォルダで
+                    # 起きる）。状態即応の静音
                     # プレースホルダ「プレビューする項目がありません」を出す。
                     self._content.show_empty_quiet()
                 hint_is_final = (
@@ -3357,8 +3308,8 @@ class ViewerWindow(QMainWindow):
                     # 代表画像の自動選択でファイル詳細カードがメタカードを
                     # 置き換えないための one-shot 抑止（メタは「追加表示」）。
                     self._auto_select_no_detail = preview_image
-                # 純 UI リビルド再発火は再スキャンせず選択適用のみ（#146
-                # 残課題1）。断られたら従来どおり再スキャンへフォールバック。
+                # 純 UI リビルド再発火は再スキャンせず選択適用のみ。
+                # 断られたら再スキャンへフォールバック。
                 if not (
                     pure_ui_refire
                     and self._file_list.reselect_same_folder(
@@ -3391,18 +3342,18 @@ class ViewerWindow(QMainWindow):
 
         The representative comes from ``_grid_preview_hint`` / the first-image
         probe, whose domain is images **and** PDFs (``find_first_image`` treats
-        PDFs as thumbnailable).  Sending a PDF to ``show_image`` produced a
-        broken preview because ImageView can't decode it (#78), so route by
+        PDFs as thumbnailable).  Sending a PDF to ``show_image`` produces a
+        broken preview because ImageView can't decode it, so route by
         suffix: PDFs go to ``show_pdf``, everything else (always an image here)
         to ``show_image``.  A dedicated dispatch — rather than the more general
         ``ContentView.show_path`` — keeps this GUI-thread hot path free of the
         ``is_dir()`` stat ``show_path`` does for a known-file preview.
         """
         # 「ウィンドウが選んだ」代表画像 — デコード失敗時に次候補へ譲る対象を
-        # 覚えておく（ユーザーの明示選択と区別する。#84）。
-        self._preview_shown_representative = path
+        # 覚えておく（ユーザーの明示選択と区別する）。
+        self._preview_fallback.shown = path
         # ステータスバーのファイル情報セグメントを「代表: 名前 · サイズ」で
-        # 埋める（N-104）。選択はフォルダのままなので ``_set_path_status`` の
+        # 埋める。選択はフォルダのままなので ``_set_path_status`` の
         # 経路では空になる — 代表画像の表示はこのメソッドが唯一の funnel。
         # hasattr ガードは __init__ を通さないテストハーネス向け（既存規約）。
         if hasattr(self, "_file_info_stream"):
@@ -3421,10 +3372,10 @@ class ViewerWindow(QMainWindow):
     ) -> None:
         self._preview_probe_folder = folder
         self._preview_probe_hint = hint
-        self._preview_probe_skip = skip
         if not skip:
             # skip 無し = フォールバックではない通常のプローブ（フォルダ
-            # 切替など）。前フォルダの探索中フラグを引き継がない。
+            # 切替など）。前フォルダの失敗記録と探索中フラグを引き継がない。
+            self._preview_fallback.restart(folder)
             self._preview_fallback_pending = False
         # 投入は **superseding**（``submit_job``）: キュー済みの先行プローブを
         # 捨て、走行中の 1 本にはセッションの cancel が届く。プールは 1 スレッド
@@ -3434,45 +3385,32 @@ class ViewerWindow(QMainWindow):
         # 無いので、そちらは協調的に降りる（``_find_images_bfs`` が先頭の
         # scandir の前に ``job.cancel`` を見る）。
         self._preview_stream.submit_job(
-            lambda job, f=folder, s=skip: _first_image_of(
+            lambda job, f=folder, s=skip: next_representative(
                 f, s, job.cancel.is_cancelled,
             )
         )
 
     def _on_preview_image_failed(self, path: Path) -> None:
-        """代表画像がデコードできなかった — 同フォルダの次候補へ逃がす (#84).
+        """代表画像がデコードできなかった — 同フォルダの次候補へ逃がす.
 
-        ``find_first_image`` は「名前順で最初の候補」を返すだけでデコード可能性
-        を見ないので、先頭が壊れているだけのフォルダは選んだ瞬間にエラーカード
-        になっていた（起動時の先頭フォルダ自動選択では一発目の画面がそれ）。
-        失敗したのが**ウィンドウ自身が選んだ**代表画像のときだけ、その候補を
-        除外してプローブを掛け直す。ユーザーが明示的に選んだファイルの失敗は
-        従来どおりエラーカードのまま（選んだ物を黙って差し替えない）。
+        探索はデコード可能性を見ないので、何もしなければ先頭が壊れているだけの
+        フォルダは選んだ瞬間にエラーカードになる（起動時の先頭フォルダ自動選択
+        では一発目の画面）。規則（ウィンドウ自身が選んだ代表だけ・上限あり）は
+        :class:`~.representative_fallback.RepresentativeFallback` が決める。
         全候補が壊れていれば ``_on_first_image_found`` が ``None`` で何もせず、
         最後に出たエラーカードがそのまま残る。
         """
-        if path != self._preview_shown_representative:
-            return
         folder = self._current_folder
-        if folder is None:
+        skip = self._preview_fallback.on_failed(folder, path)
+        if skip is None or folder is None:
             return
-        base = (
-            self._preview_probe_skip
-            if self._preview_probe_folder == folder
-            else frozenset()
-        )
-        skip = base | {path}
-        if len(skip) > _PREVIEW_FALLBACK_MAX:
-            # 壊れたファイルだらけのフォルダで BFS を無限に回さない。
-            return
-        self._preview_shown_representative = None
         # 次候補を探している **最中** の「画像なし」は過渡状態でしかない
         # ので、解像度ラベルをそこで消さない（消すと候補を試すたびに
         # W×H が明滅し、全滅時以外は必ず復帰する = 意味のないちらつき）。
         # 着地（`_on_first_image_found`）でフラグを落とし、そこで初めて
         # 「本当に何も出せない」ときのクリアが効く。
         self._preview_fallback_pending = True
-        self._start_first_image_probe(folder, None, skip=frozenset(skip))
+        self._start_first_image_probe(folder, None, skip=skip)
 
     def _on_first_image_found(self, preview: object) -> None:
         if self._preview_probe_folder != self._current_folder:
@@ -3482,7 +3420,7 @@ class ViewerWindow(QMainWindow):
         # 「画像なし」は過渡状態ではないのでラベルのクリアを再び通す。
         # 打ち切り時にラベルを能動的にクリアはしない — 候補を試している間の
         # (0,0) は「次を試す前の一瞬」でしかなく、それを根拠に表示中の
-        # 解像度を消すのは #84 以前には無かった挙動だから（最後に出るのは
+        # 解像度を消すのは余計なちらつきだから（最後に出るのは
         # エラーカードで、解像度欄は次のプレビューで更新される）。
         self._preview_fallback_pending = False
         if path is None or path == self._preview_probe_hint:
@@ -3490,7 +3428,7 @@ class ViewerWindow(QMainWindow):
             # the empty page when the folder truly has no preview image).
             return
         # Route by suffix — the probe can surface a PDF (find_first_image
-        # treats PDFs as thumbnailable), which ImageView cannot decode (#78).
+        # treats PDFs as thumbnailable), which ImageView cannot decode.
         self._show_preview_file(path)
         # 代表画像の自動選択（フォルダ選択の続き）— ファイル詳細カードで
         # メタカードを潰さない（_on_folder_selected と同じ one-shot 抑止）。
@@ -3500,8 +3438,8 @@ class ViewerWindow(QMainWindow):
     def _on_folder_activated(self, folder: Path) -> None:
         # 「開く」の一様化（2026-07 分割ビュー再設計・共通コア）: フォルダの
         # ダブルクリック / Enter は post.md の有無を問わず常に**ドリルダウン**
-        # （Explorer と同じ心理モデル — 旧・「post.md 有 → ステージ」分岐 H1 は
-        # 削除）。「大きく見る」は E / プレビューのダブルクリックが担う。
+        # （Explorer と同じ心理モデル — 「post.md 有 → ステージ」の分岐は
+        # 持たない）。「大きく見る」は E / プレビューのダブルクリックが担う。
         self.set_root(folder, push_history=True)
 
     def reveal_in_app(self, path: Path) -> None:
@@ -3517,13 +3455,12 @@ class ViewerWindow(QMainWindow):
         self._on_reveal_in_app(path)
 
     def _on_reveal_in_app(self, path: Path) -> None:
-        """右クリック「このファイルの場所を開く」の着地 (UI08-28 N-64 / N-40).
+        """右クリック「このファイルの場所を開く」の着地.
 
-        横断一覧・検索ヒットの行は「どこにあるか」を名前でしか示せず、実体の
-        置き場所へ行く手段がエクスプローラ経由しか無かった。親フォルダを
+        横断一覧・検索ヒットの行は「どこにあるか」を名前でしか示せないので、
+        実体の置き場所へアプリ内で行く手段を持たせる。親フォルダを
         ルートにして当の項目を選ぶ — 左グリッドのシングルクリック着地と同じ形。
-        ``push_history=True`` は必須（履歴を消さない着地 = UI08-28 N-14 の
-        既決事項）。``is_dir`` ゲートは置かない: ``set_root`` 自身の単発ゲート
+        ``push_history=True`` は必須（履歴を消さない着地）。``is_dir`` ゲートは置かない: ``set_root`` 自身の単発ゲート
         と「見つかりません」プロンプトに合流させる（``_on_file_list_folder_
         activated`` と同じ裁定）。
         """
@@ -3541,10 +3478,10 @@ class ViewerWindow(QMainWindow):
         # threads then replace it with the full-resolution decode.
         #
         # ユーザー起点のサブフォルダ選択も、実行中の代表画像プローブを失効
-        # させる (レビュー 2026-07-31 #6): このハンドラは ``_current_folder``
+        # させる: このハンドラは ``_current_folder``
         # を変えないため、stale なプローブ着地がこのフォルダプレビューを親
         # フォルダの先頭画像で上書きしてしまう。失効そのものは下の
-        # ``_set_path_status`` が落とす（項目#51 — 世代バンプは funnel 一本）。
+        # ``_set_path_status`` が落とす（世代バンプは funnel 一本）。
         placeholder = self._file_list.current_icon()
         self._set_path_status(folder)
         self._content.show_folder(folder, placeholder_icon=placeholder)
@@ -3554,20 +3491,17 @@ class ViewerWindow(QMainWindow):
         self._sync_image_strip_current()
 
     def _on_file_list_folder_activated(self, folder: Path) -> None:
-        # 右一覧のフォルダをダブルクリック = **そのフォルダへドリルダウン**
-        # (UIレビュー 2026-08-28 N-91)。
+        # 右一覧のフォルダをダブルクリック = **そのフォルダへドリルダウン**。
         #
-        # 旧実装は ``set_root(folder.parent, pending_select=folder)`` で、
-        # 「左ペインのシングルクリックと同じ着地」を狙って 1 段浅いところに
-        # 立っていた。右ペイン・中央プレビューの中身は同じになるものの、
-        # **同じジェスチャ（ダブルクリック）が左右で別の階層に着地する**のは
-        # 説明できない差だったため、左グリッドの ``_on_folder_activated`` と
-        # 同じ「開く = ドリルダウン」へ揃える（2026-07 の「開くの一様化」の
-        # 適用漏れ）。
+        # ``set_root(folder.parent, pending_select=folder)`` で「左ペインの
+        # シングルクリックと同じ着地」にすると、**同じジェスチャ（ダブル
+        # クリック）が左右で別の階層に着地する**説明できない差になるので、
+        # 左グリッドの ``_on_folder_activated`` と同じ「開く = ドリルダウン」
+        # へ揃える。
         #
-        # 事前の同期 ``is_dir`` ゲートは置かない (レビュー 2026-07-31 #7):
-        # ``set_root`` 自身の単発ゲート + I07「見つかりません」プロンプトに
-        # 合流させる（従来は同じ stat の二重化 + 失敗時は無言 return だった）。
+        # 事前の同期 ``is_dir`` ゲートは置かない: ``set_root`` 自身の単発
+        # ゲート + I07「見つかりません」プロンプトに合流させる（同じ stat の
+        # 二重化 + 失敗時の無言 return を作らない）。
         self.set_root(folder, push_history=True)
 
     def _on_grid_file_selected(self, path: Path) -> None:
@@ -3581,21 +3515,21 @@ class ViewerWindow(QMainWindow):
         # current root keep the existing behaviour: clear the per-folder
         # right pane and just render the file in the centre preview.
         #
-        # ユーザー起点の明示選択は実行中の代表画像プローブを失効させる
-        # (レビュー 2026-07-31 #6 / 2026-09-03 項目 #47): このハンドラは
+        # ユーザー起点の明示選択は実行中の代表画像プローブを失効させる:
+        # このハンドラは
         # ``_current_folder = path.parent`` を立てるので、直前に同じフォルダで
         # 走り出したプローブの 2 ガード（世代・フォルダ一致）を両方通過して
         # しまい、着地が中央プレビューと右ペイン選択だけを先頭画像へ奪い返す
         # （``_current_preview_path`` は選んだファイルのまま = 三者不整合）。
         # 失効は下の 2 分岐がどちらも通る ``_set_path_status`` が落とす
-        # （項目#51 — 世代バンプは funnel 一本）。
+        # （世代バンプは funnel 一本）。
         self._last_previewed_file = path  # startup-resume capture (B01)
         self._pending_restore_preview.clear()
         # 右パネル = 選択ファイルの詳細表示エリア（役割再定義 2026-07-20）。
         self._refresh_file_detail(path)
-        # ``parent.is_dir()`` の同期 stat は置かない (レビュー 2026-07-31 #59):
+        # ``parent.is_dir()`` の同期 stat は置かない:
         # このハンドラは矢印キーで検索結果を歩くたびに走るホットパスで、
-        # コールド NAS では選択移動ごとに GUI が数百 ms 止まっていた
+        # コールド NAS では選択移動ごとに GUI が数百 ms 止まる
         # （``_stat_file_label`` を off-thread 化したのと同じ理由）。消失時は
         # ``set_folder`` の非同期スキャン失敗（エラーカード）に委ねる。
         parent = path.parent
@@ -3629,15 +3563,15 @@ class ViewerWindow(QMainWindow):
         # semantics; direct-child ZIPs drill in; unpreviewable kinds launch
         # the OS default app; every other previewable kind stages in place.
         #
-        # 右一覧の ``_on_file_activated`` と同じ 2 点（レビュー 2026-09-03
-        # 項目 #47）: ユーザーが明示的に開いた物は代表画像マークを持たない
-        # (#84)、かつ実行中の代表画像プローブを失効させる (#6) — バンプが
+        # 右一覧の ``_on_file_activated`` と同じ 2 点: ユーザーが明示的に
+        # 開いた物は代表画像マークを持たない、かつ実行中の代表画像プローブを
+        # 失効させる — バンプが
         # 無いと stale な着地が開いたファイルを先頭画像へ奪い返す。
-        # **ここのバンプは funnel（``_set_path_status``）へ寄せられない**
-        # （項目#51）: 下の分岐は ``_current_preview_path == path`` のとき
+        # **ここのバンプは funnel（``_set_path_status``）へ寄せられない**:
+        # 下の分岐は ``_current_preview_path == path`` のとき
         # funnel を呼ばず、ZIP ドリルイン / 既定アプリ起動の枝はそもそも
         # 通らないため、手書きのまま残す（重複ではなく、funnel の穴埋め）。
-        self._preview_shown_representative = None
+        self._preview_fallback.shown = None
         self._preview_stream.cancel()
         if path.suffix.lower() in _LIGHTBOX_MEDIA_SUFFIXES:
             if self._current_preview_path != path:
@@ -3647,7 +3581,7 @@ class ViewerWindow(QMainWindow):
             return
         parent = path.parent
         if parent != self._root:
-            # 事前の同期 ``is_dir`` は行わない (レビュー 2026-07-31 #7) —
+            # 事前の同期 ``is_dir`` は行わない —
             # 消失時は set_root の単発ゲートが I07 プロンプトで応答する。
             self.set_root(parent, push_history=True, pending_select=path)
             return
@@ -3657,7 +3591,7 @@ class ViewerWindow(QMainWindow):
         # A file the viewer has no dedicated preview for (PDF is previewed, but
         # e.g. .docx / .psd / .exe are not): double-click means "open" in
         # Explorer terms, so launch the OS default app rather than re-showing
-        # the same bare info card single-click already displays (L07).
+        # the same bare info card single-click already displays.
         if not has_dedicated_view(path):
             self._open_with_default_app(path)
             return
@@ -3668,7 +3602,7 @@ class ViewerWindow(QMainWindow):
         """「戻る」を 1 ホップ。*assume_exists* は :meth:`set_root` へ渡す.
 
         既定は「行き先を 2 秒プローブで確かめる」。一括ジャンプの**中間**
-        ホップだけが真を渡す（``_navigate_history_steps`` — 項目#108）。
+        ホップだけが真を渡す（``_navigate_history_steps``）。
         """
         if not self._history:
             return False
@@ -3682,7 +3616,7 @@ class ViewerWindow(QMainWindow):
             # The destination vanished (deleted / offline NAS) — set_root
             # warned and changed nothing, so put the entry back where it was
             # (the trail is preserved; the user can retry once the share is
-            # back) and just re-sync the ←/→ buttons (#6).
+            # back) and just re-sync the ←/→ buttons.
             self._restore_failed_history_entry(self._history, entry, result)
             return False
         # Remember where we were so 進む can re-do this hop, capturing its
@@ -3714,10 +3648,9 @@ class ViewerWindow(QMainWindow):
         self, stack: "list[NavEntry]", entry: NavEntry,
         result: SetRootResult,
     ) -> None:
-        """戻る/進むが失敗したときに pop したエントリを積み直す（#6 の復帰）。
+        """戻る/進むが失敗したときに pop したエントリを積み直す。
 
-        ただし**何も変わっていないとき（``UNCHANGED``）だけ**（レビュー
-        2026-09-03 項目 #107）。もう 1 つの失敗 ``REROUTED`` は「I07 プロンプト
+        ただし**何も変わっていないとき（``UNCHANGED``）だけ**。もう 1 つの失敗 ``REROUTED`` は「I07 プロンプト
         の『別のフォルダを開く』が内側で ``_on_root_change_requested`` を完走
         し、**別ルートへ遷移したうえでトレイルをハードリセットした**」。後者で
         積み直すと、ユーザーが明示的に開き直した直後のはずの ← が有効なまま
@@ -3738,7 +3671,7 @@ class ViewerWindow(QMainWindow):
         ``REROUTED`` means the I07 プロンプト が内側で別ルートを開いた。
 
         *assume_exists* は ``set_root`` の同期ゲート（2 秒の
-        ``probe_path_kind``）を飛ばす（項目#108）。一括ジャンプの**中間**
+        ``probe_path_kind``）を飛ばす。一括ジャンプの**中間**
         ホップだけが真 — 通過点でしかない位置に存在確認を撃つと、到達不能な
         共有では 2 秒 × n の積算フリーズと、n 本の張り付いた "path-probe"
         デーモンスレッドになる（早期 break は成立しない: タイムアウトは
@@ -3759,41 +3692,33 @@ class ViewerWindow(QMainWindow):
             getattr(self, "_center_split", None) is not None
             and same_root
             and entry.mode != self._ui_mode
-            # 比較は「積んだ時と同じ捉え方」で行う (レビュー #66 追修) —
+            # 比較は「積んだ時と同じ捉え方」で行う —
             # エントリ側は ``_capture_curation_search`` で積まれるため、一覧の
             # 上に絞り込みが載っていると常にスナップショットを持つ。現在側を
             # ``_capture_current_search`` で取ると「移動時に検索を解除」OFF で
             # 必ず None になり、何も変わっていなくても不一致 → フル復元（＝
-            # 一覧のツリー全再走査）へ落ちていた。
+            # 一覧のツリー全再走査）へ落ちる。
             and entry.search == self._capture_curation_search()
             # 横断一覧の出入りは母集合ごと入れ替わるので、モード切替だけの
-            # fast path には乗せない (UIレビュー 07-25 #58)。
+            # fast path には乗せない。
             and entry.curation == self._post_grid.current_curation_view()
             and entry.recent == self._post_grid.current_recent_view()
         ):
             if entry.mode == "browse":
-                # UIレビュー 07-25 #23: 最大化中に Ctrl+←/→ で投稿を送ってから
-                # 「←」で抜けると、履歴エントリが最大化に入った時点の選択を
-                # 持っているため選択だけが巻き戻っていた（G / Esc / ヘッダーの
-                # 出口は現選択を保つので、3 出口のうち 1 つだけ挙動が違う）。
+                # 最大化中に Ctrl+←/→ で投稿を送ってから「←」で抜けると、
+                # 履歴エントリが最大化に入った時点の選択を持っているため選択
+                # だけが巻き戻る（G / Esc / ヘッダーの出口は現選択を保つので、
+                # 3 出口のうち 1 つだけ挙動が違ってしまう）。
                 # 離脱時の現選択でエントリの selected を上書きして揃える。
                 current = self._post_grid.current_path()
                 target = current if current is not None else entry.selected
-                # 遷移先エントリは既に pop 済み（項目#186）。
+                # 遷移先エントリは既に pop 済み。
                 self._enter_browse_mode(reconcile_history=False)
                 if target is not None:
                     self._post_grid.set_pending_select(target)
-                # 記憶したスクロールは「最大化に入った時点の選択」に対する
-                # ものなので、最大化中に選択が動いていたら復元しない — 復元
-                # すると選択タイルが画面外のまま着地する（G / Esc の出口は
-                # 選択に追従したスクロールのまま抜ける）。選択が同じときだけ、
-                # 元の位置へ戻す。再ビルドの無いこの経路では queue すると
-                # 消費されず残留し、後続の無関係な再ビルドで古いオフセットが
-                # 適用されてしまうため、即時適用する（分割復帰の setSizes が
-                # 同期リレイアウト済みなのでレンジは確定している）。
-                if target == entry.selected:
-                    vbar = self._post_grid._view.verticalScrollBar()
-                    vbar.setValue(max(0, min(entry.scroll, vbar.maximum())))
+                # スクロール位置は書かない — 畳まれた席のアンカー（見ていた
+                # 位置、または最大化中に動いた選択）を分割復帰のリレイアウトが
+                # 適用する。G / Esc / ヘッダーの出口と同じ 1 本の経路。
             else:
                 if (
                     entry.selected is not None
@@ -3807,7 +3732,7 @@ class ViewerWindow(QMainWindow):
         # adjacent position doesn't bleed onto this one.  With the setting off,
         # neither runs and search persists.
         clear = self._state.search_clear_on_navigate and entry.search is None
-        # 横断キュレーション一覧の位置 (UIレビュー 07-25 #58): 一覧は
+        # 横断キュレーション一覧の位置: 一覧は
         # ``enter_curation_view`` が入口で検索状態を落としてから母集合を組む
         # ため、set_root では検索を復元させず（clear）、入場後に改めて
         # 絞り込みを載せ直す。こうしないと復元した絞り込みが入場で消える。
@@ -3833,7 +3758,7 @@ class ViewerWindow(QMainWindow):
                 self._post_grid.enter_recent_files_view(entry.recent)
             if entry.search is not None:
                 self._post_grid.restore_search_state(entry.search)
-            # 履歴の戻り / 進みは母集合を変えない — 現在地だけ (#187)。
+            # 履歴の戻り / 進みは母集合を変えない — 現在地だけ。
             self._sync_nav_rail_curation(counts=False)
         # Restore the remembered scroll offset (B-13).  Queued AFTER set_root so
         # it isn't reset by the fresh scan; the pane applies it once its tiles
@@ -3877,22 +3802,17 @@ class ViewerWindow(QMainWindow):
 
         A ZIP-extracted temp root shows the friendly archive name (from
         ``_zip_temp_dirs``) rather than a cryptic ``tmpXXXX`` path; the default
-        library shows the Japanese 「ライブラリ」 label (UIレビュー #16 — the
-        breadcrumb / status bar already localise it, so the dropdown must not
-        leak the raw English folder name).
+        library shows the Japanese 「ライブラリ」 label (the breadcrumb /
+        status bar already localise it, so the dropdown must not leak the raw
+        English folder name).
         """
-        zip_origin = self._zip_temp_dirs.get(root)
-        if zip_origin is not None:
-            return t("viewer.main_window.zip_history_label", name=zip_origin.name)
-        if root == self._default_library:
-            return t("viewer.main_window.library_menu")
-        return root.name or str(root)
+        return self._location_label(root)
 
     def _history_entry_label(self, entry: NavEntry) -> tuple[str, str]:
         """Display name + tooltip for a history entry.
 
-        (UIレビュー 08-28 N-25) The label used to be the root's name alone, so
-        the dropdown filled with runs of identical rows — 「最大化」 pushes the
+        The root's name alone is not enough: the dropdown would fill with
+        runs of identical rows — 「最大化」 pushes the
         browse position it left (``_enter_stage_mode``), and the two 横断一覧 /
         「最近追加されたファイル」 views are whole-grid overlays *on* a root, so
         the same folder name legitimately appears several times in a row with
@@ -3914,9 +3834,8 @@ class ViewerWindow(QMainWindow):
         tip = str(root)
         if entry.curation:
             # 一覧名の単一情報源（``PostGrid.curation_view_label``）を通す。
-            # 手書きの 2 値分岐だと N-71 のユーザータグ横断一覧
-            # （``"tag:<名前>"``）が全部「あとで見る一覧」に丸められる
-            # （レビュー 2026-09-03 項目 #55）。
+            # 手書きの 2 値分岐だとユーザータグ横断一覧
+            # （``"tag:<名前>"``）が全部「あとで見る一覧」に丸められる。
             base = self._post_grid.curation_view_label(entry.curation)
         elif entry.recent is not None:
             base = t(
@@ -3951,9 +3870,9 @@ class ViewerWindow(QMainWindow):
         sync) holds exactly — a bulk jump is just their repetition.  A failed
         hop (vanished destination — the step already warned and restored the
         stacks) aborts the remaining hops instead of re-hitting the same dead
-        entry *n* more times (#6).
+        entry *n* more times.
 
-        **存在確認は最終到達点だけ**（レビュー 2026-09-03 項目#108）。
+        **存在確認は最終到達点だけ**。
         ``set_root`` は先頭で ``path_probe.probe_path_kind``（既定 2 秒）を
         撃つが、到達不能な共有ではそれが毎回タイムアウトし、規約どおり
         「ディレクトリとみなして続行」するので ``set_root`` は True を返す —
@@ -3970,7 +3889,7 @@ class ViewerWindow(QMainWindow):
                 break
 
     def _on_go_up(self) -> None:
-        # UIレビュー 07-25 #4-③: ライブラリ境界で止める（ボタン / Alt+Up の
+        # ライブラリ境界で止める（ボタン / Alt+Up の
         # 無効化だけでなくハンドラ側でも守る — グリッドの Backspace や
         # 空フォルダカードの「上の階層へ」も同じここへ集まるため）。
         if not self._can_go_up():
@@ -3979,16 +3898,16 @@ class ViewerWindow(QMainWindow):
         if parent == self._root:
             return
         current = self._root
-        # バウンデッドなゲート（#132）— 素の ``is_dir`` は死んだ共有で GUI を
+        # バウンデッドなゲート — 素の ``is_dir`` は死んだ共有で GUI を
         # 数十秒止める。``set_root`` の同期ゲートと同じ判定を使う。
         if not self._is_reachable_dir(parent):
-            # UIレビュー 07-25 #69: 従来は完全に無言 return だった（空フォルダ
-            # カードの主要導線でもあるのに何も起きない）。他の 3 経路と同じ
+            # 無言 return にしない（空フォルダカードの主要導線でもあるのに
+            # 何も起きなくなる）。他の 3 経路と同じ
             # 「見つかりません」応答へ合流する。
-            if not self._handle_missing_folder(parent):
+            if self._handle_missing_folder(parent) != "retry":
                 return
         # どちらの枝も「進む」と決めた後なので ``set_root`` に判定をやり直させ
-        # ない（再指摘 H-2）: 渡さないと同じパスを 2 回プローブすることになり、
+        # ない: 渡さないと同じパスを 2 回プローブすることになり、
         # 死んだ共有ではフリーズが 2 倍、起きかけの共有では 1 回目と 2 回目で
         # 答えが変わって「見つかりません」へ落ちる。
         self.set_root(
@@ -4003,11 +3922,11 @@ class ViewerWindow(QMainWindow):
         # ↑Up: push the current position onto the back stack and clear the
         # forward stack (a fresh jump branches the trail).  A vanished path
         # (deleted / renamed between render and click) warns and is ignored.
-        # ↑Up と同じバウンデッドなゲート（#132）— 生の ``is_dir`` は死んだ
+        # ↑Up と同じバウンデッドなゲート — 生の ``is_dir`` は死んだ
         # 共有で GUI を数十秒止める。兄弟実装なので判定も同じものを使う
         # （片側だけ生 stat のままだと、パンくずの祖先クリックだけが数十秒
         # フリーズしたうえ「見つかりません」を名乗る非対称になる）。
-        # **現在地の早期 return はプローブより前**（再指摘 L-3）。後ろに置くと、
+        # **現在地の早期 return はプローブより前**。後ろに置くと、
         # 死んだ共有で現在地のパンくずを押しただけで 2 秒固まったうえ
         # 「フォルダが見つかりません」プロンプトが出て、閉じても何も起きない
         # （＝ I/O も対話も完全に無駄）。何もしないと決まっている操作で
@@ -4015,12 +3934,12 @@ class ViewerWindow(QMainWindow):
         if path == self._root:
             return
         if not self._is_reachable_dir(path):
-            # UIレビュー 07-25 #69: 生パス 1 行の警告ではなく、4 経路共通の
+            # 生パス 1 行の警告ではなく、4 経路共通の
             # 「見つかりません」応答へ（原因の説明 + 再試行 / 別のフォルダ）。
-            if not self._handle_missing_folder(path):
+            if self._handle_missing_folder(path) != "retry":
                 return
         came_from = self._root
-        # ↑Up と同じく、ここまで来たら判定は済んでいる（再指摘 H-2 — 二重
+        # ↑Up と同じく、ここまで来たら判定は済んでいる（二重
         # プローブをしない）。``assume_exists`` 付きの ``set_root`` は現状
         # 失敗しないが、戻り値のガードは残す（set_root の契約は「着地したか」
         # であって、将来別の理由で False になり得る — 片側だけ落ちた選択予約が
@@ -4033,29 +3952,33 @@ class ViewerWindow(QMainWindow):
         self._post_grid.set_pending_select(came_from, ancestor_fallback=True)
 
     def _on_reload(self) -> None:
-        # 存在確認の同期 ``is_dir`` ゲートは置かない (レビュー 2026-07-31 #8):
+        # 存在確認の同期 ``is_dir`` ゲートは置かない:
         # 切断 NAS では SMB タイムアウトまで GUI スレッドが凍結し、しかも
-        # False 時は無言 no-op だった。#70 の方針どおり ``assume_exists=True``
+        # False 時は無言 no-op になる。「見つかりません」再試行と同じく
+        # ``assume_exists=True``
         # で先へ進め、存在確認は非同期スキャンの失敗（エラーカード + 再試行
         # ボタン）に委ねる。
         # Preserve the *selected tile* across the reload, not just the folder
         # context: ``_current_selection()`` (= the left pane's current_path())
         # returns the selected file OR folder, whereas ``_current_folder`` is
-        # None for a plain root-level file selection / ZIP preview (#79).  This
+        # None for a plain root-level file selection / ZIP preview.  This
         # matches the back/forward path, which restores via the same accessor.
         keep_selected = self._current_selection()
         # F5 semantics for the 「ランダム」 sort: deal a fresh shuffle (no-op
         # for every other sort mode).
         self._post_grid.reshuffle_random_sort()
         # フィルムストリップの失敗確定セル（デコード失敗グリフ）を再試行対象へ
-        # 戻す（項目17）: パス列不変の再スキャンでは set_images が呼ばれない
+        # 戻す: パス列不変の再スキャンでは set_images が呼ばれない
         # （サムネ破棄防止）ため、ファイル修復後の F5 の再試行入口はここ。
         self._reset_filmstrip_failures()
-        # 同一ルートの再スキャン: ステージモードを保持する（項目9）。再スキャン後に
+        # 同一ルートの再スキャン: ステージモードを保持する。再スキャン後に
         # 保持対象の選択が消えたときだけ set_root が着地時にブラウズへ落とす。
         # 内容が変わったかもしれない明示リロード — 着地後の refire でも右ペインを
-        # 再スキャンさせる（#146 残課題1 の純 UI リビルド抑止を 1 回だけ解除）。
+        # 再スキャンさせる（純 UI リビルド時の再スキャン抑止を 1 回だけ解除）。
         self._pending_content_rescan.set(MARK)
+        # 中央プレビューの同一パス早道も 1 回解除する — 着地の再選択が
+        # 同じファイルを書き換え後の中身で読み直せるように。
+        self._content.invalidate_shown_path()
         self.set_root(
             self._root,
             push_history=False,
@@ -4099,19 +4022,19 @@ class ViewerWindow(QMainWindow):
         ):
             return
         # _on_reload と同じ「選択タイル保持」リロード。``assume_exists=True`` で
-        # ルートの同期 ``is_dir`` を行わない (レビュー 2026-07-31 #8): この通知は
+        # ルートの同期 ``is_dir`` を行わない: この通知は
         # ユーザー操作なしに発火する（プラグインのジョブ完了等）ため、切断 NAS での
-        # SMB タイムアウト分 GUI が凍結していた。フォルダ消失ダイアログ
+        # SMB タイムアウト分 GUI が凍結してしまう。フォルダ消失ダイアログ
         # （set_root の I07 プロンプト）も同フラグで出ない — ルート消失時は
         # 非同期スキャンの失敗（エラーカード）が引き受ける。ステージ閲覧中に
-        # 勝手にグリッドへ切り替わらないよう keep_mode=True でモードを維持する
-        # （項目9）。
+        # 勝手にグリッドへ切り替わらないよう keep_mode=True でモードを維持する。
         # 内容が書き換わった通知なので、失敗確定セルも再試行対象へ戻す
-        # （項目17 — F5 と同じ再試行入口）。
+        # （F5 と同じ再試行入口）。
         self._reset_filmstrip_failures()
         # F5 と同じく「内容が変わったかもしれない」明示リロード — 着地後の
-        # refire でも右ペインを再スキャンさせる（#146 残課題1）。
+        # refire でも右ペインを再スキャンさせる。
         self._pending_content_rescan.set(MARK)
+        self._content.invalidate_shown_path()  # F5 と同じ（中身が変わった）
         self.set_root(
             self._root,
             push_history=False,
@@ -4126,26 +4049,28 @@ class ViewerWindow(QMainWindow):
         pending_select: Path | None = None,
         *,
         assume_exists: bool = False,
-    ) -> None:
+    ) -> SetRootResult:
         # Navigate FIRST: a vanished destination (set_root warns + no-ops)
-        # must not wipe the trail the user still has (#6).
+        # must not wipe the trail the user still has.
         # ``assume_exists``: 呼び出し側が既に「見つかりません」応答を出して
-        # 再試行を選ばれた場合 — 同期 stat を重ねない (UIレビュー 07-25 #70)。
-        if not self.set_root(
+        # 再試行を選ばれた場合 — 同期 stat を重ねない。
+        result = self.set_root(
             path,
             push_history=False,
             pending_select=pending_select,
             assume_exists=assume_exists,
-        ):
-            return
+        )
+        if not result:
+            return result
         # Picking a brand-new root is a hard reset of the trail.
         self._history.clear()
         self._forward.clear()
         self._update_nav_buttons()
         self._record_recent_root(path)
+        return result
 
     def picker_places(self) -> list[Path]:
-        """Folders the non-native picker offers in its side panel (N-156).
+        """Folders the non-native picker offers in its side panel.
 
         Qt's own dialog has no shell 「クイックアクセス」, so the places the user
         already named — registered library roots first, then bookmarks — are
@@ -4162,21 +4087,25 @@ class ViewerWindow(QMainWindow):
                 places.append(place)
         return places
 
-    def _pick_root(self) -> None:
+    def _pick_root(self) -> bool:
+        """選んだフォルダへ開き直し、着地したか（入れ子の「別のフォルダを
+        開く」での着地を含む）を返す。取り消し・到達不能は ``False``。"""
         chosen = pick_existing_directory(
             self,
             t("common.action.choose_folder"),
             str(self._root),
             sidebar=self.picker_places(),
         )
-        if chosen:
-            self._on_root_change_requested(Path(chosen))
+        if not chosen:
+            return False
+        result = self._on_root_change_requested(Path(chosen))
+        return result is not SetRootResult.UNCHANGED
 
     # ----------------------------------------------------------- window D&D
 
     @staticmethod
     def _first_local_path(mime) -> Path | None:  # noqa: ANN001
-        """First local-file URL in *mime*, or ``None`` (L03 drop helper).
+        """First local-file URL in *mime*, or ``None`` (window drop helper).
 
         Purely inspects the URL payload — no filesystem I/O — so it is cheap
         enough to call on every ``dragEnterEvent`` without stat-ing an offline
@@ -4192,7 +4121,7 @@ class ViewerWindow(QMainWindow):
         return None
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802 (Qt API)
-        # Accept a folder / file drop onto the window to change the root (L03).
+        # Accept a folder / file drop onto the window to change the root.
         # Child widgets that accept their own drops (advanced_search / tag_chips
         # similar-search seed) consume the event before it reaches the window,
         # so this never steals their D&D.  Drags that ORIGINATE inside this app
@@ -4220,7 +4149,7 @@ class ViewerWindow(QMainWindow):
             event.ignore()
 
     def dropEvent(self, event) -> None:  # noqa: N802 (Qt API)
-        if event.source() is not None:  # in-app drag — never re-root (L03)
+        if event.source() is not None:  # in-app drag — never re-root
             event.ignore()
             return
         path = self._first_local_path(event.mimeData())
@@ -4231,24 +4160,22 @@ class ViewerWindow(QMainWindow):
         # Resolving dir-vs-file touches the filesystem, but only once on the
         # actual drop (not on hover).  A folder becomes the new root; a file
         # opens its parent folder with the file pre-selected — mirroring the
-        # positional-argument launch path (L02).  Unlike the folder picker
+        # positional-argument launch path.  Unlike the folder picker
         # (_on_root_change_requested = hard trail reset), a drop pushes the
         # position being left onto the back stack so 戻る undoes the drop —
         # an accidental drop would otherwise silently destroy the whole trail.
         #
-        # 判別も**バウンデッド**に行う（#132 差し戻し F3）。前ラウンドは
-        # 「ドロップ受けは dir/file の判別が要るのでプローブでは代替でき
-        # ない」として生 stat を残したが、``probe_path_kind`` はまさに
-        # ``dir`` / ``file`` / ``missing`` を返す関数（L02 の引数起動が同じ
-        # 判別に使っている）なので、この理由は成立していなかった。生 stat の
+        # 判別も**バウンデッド**に行う。ドロップ受けは dir/file の判別が
+        # 要るが、``probe_path_kind`` はまさに ``dir`` / ``file`` / ``missing``
+        # を返す関数（引数起動が同じ判別に使っている）なので生 stat は要らない。生 stat の
         # ままだと、死んだ共有のパスを（stale なエクスプローラ窓等から）
         # 落としたとき GUI が最大 2 回ぶんの SMB タイムアウト固まったうえ
         # 無言 no-op になる。タイムアウト（``None``）は他の同期ゲートと同じ
         # 「ディレクトリとみなす」— 報告は非同期スキャンのエラーカード +
         # [再試行] に委ねる。
         #
-        # **プローブの結果を捨てて ``set_root`` に判定させ直さないこと**
-        # （再指摘 H-2）: ``assume_exists`` を渡さないと ``set_root`` が
+        # **プローブの結果を捨てて ``set_root`` に判定させ直さないこと**:
+        # ``assume_exists`` を渡さないと ``set_root`` が
         # ``_is_reachable_dir`` で**同じパスをもう一度**プローブし、(a) 死んだ
         # 共有では固まる時間が 2 倍（最大 4 秒）になり、(b) スリープから起き
         # かけの共有（1 回目タイムアウト → 2 回目 ``file``）では、**ファイルの
@@ -4257,7 +4184,7 @@ class ViewerWindow(QMainWindow):
         kind = probe_path_kind(str(path))
         if kind in ("dir", None):
             landed = self.set_root(path, push_history=True, assume_exists=True)
-            # **MRU に載せるのは「dir だと確認できた」ときだけ**（再指摘 L-2）。
+            # **MRU に載せるのは「dir だと確認できた」ときだけ**。
             # ``None`` はタイムアウト＝*未確定*で、スリープから起きかけの共有
             # へファイルを落とすとここへ来る。ナビゲーションを楽観的に進める
             # のは正しい（報告は非同期スキャンのエラーカードに委ねる）が、MRU
@@ -4287,22 +4214,22 @@ class ViewerWindow(QMainWindow):
             and self._file_list.is_resolving_pending_select()
         )
         self._auto_select_no_detail = None
-        # ユーザー起点の明示選択は実行中の代表画像プローブを失効させる
-        # (レビュー 2026-07-31 #6): ``_on_first_image_found`` のガードは
+        # ユーザー起点の明示選択は実行中の代表画像プローブを失効させる:
+        # ``_on_first_image_found`` のガードは
         # generation と ``_current_folder`` しか見ないため、同一フォルダ内で
         # 別ファイルを選び直しても stale なプローブ着地が中央プレビューと
         # 右ペイン選択を先頭画像へ奪い返してしまう。バンプは下の
-        # ``_set_path_status`` が落とす（項目#51 — 世代バンプは funnel 一本）。
+        # ``_set_path_status`` が落とす（世代バンプは funnel 一本）。
         # プローブ自身の pending-select 解決（``auto_no_detail`` の文脈）は
-        # ``path == _preview_shown_representative`` で funnel 側が除外するので、
+        # ``path == _preview_fallback.shown`` で funnel 側が除外するので、
         # ``#thumb#`` 暫定表示の非同期差し替えは殺されない。
         self._last_previewed_file = path  # startup-resume capture (B01)
         self._pending_restore_preview.clear()
         # 代表画像の自動選択（右一覧の pending-select 解決）で来たときは
-        # 「代表:」接頭を保つ（N-104）: 代表がフォルダ直下にあると右一覧が
+        # 「代表:」接頭を保つ: 代表がフォルダ直下にあると右一覧が
         # その行を自動選択するため、素通しだと直前に立てた接頭がここで消え、
         # 同じジェスチャ（フォルダのシングルクリック）の表記が代表の在り処で
-        # 2 通りに割れていた。
+        # 2 通りに割れる。
         self._set_path_status(path, representative=auto_no_detail)
         self._content.show_path(path)
         # 右パネルは中央の選択（このファイル）の詳細表示エリア — ファイル詳細
@@ -4318,25 +4245,26 @@ class ViewerWindow(QMainWindow):
 
     def _on_file_activated(self, path: Path) -> None:
         # ユーザーが**明示的に**開いた物は、たとえそれがフォルダの代表画像と
-        # 同一パスでも「ウィンドウが選んだ代表画像」ではない (#84)。マークを
+        # 同一パスでも「ウィンドウが選んだ代表画像」ではない。マークを
         # 落としておかないと、デコード失敗時のフォールバック再プローブが
-        # 「選んだ物を黙って次候補へ差し替える」挙動になる（#84 の docstring が
-        # 明記する『ユーザーの明示選択の失敗はエラーカードのまま』に反する）。
-        # あわせて実行中の代表画像プローブも失効させる (#6 と同型): 選択と同じく
+        # 「選んだ物を黙って次候補へ差し替える」挙動になる（
+        # ``_on_preview_image_failed`` の docstring が明記する『ユーザーの
+        # 明示選択の失敗はエラーカードのまま』に反する）。
+        # あわせて実行中の代表画像プローブも失効させる: 選択と同じく
         # アクティベートも ``_current_folder`` を変えないため、バンプしないと
         # stale な着地（フォールバック再プローブを含む）が中央プレビューを
         # ユーザーの開いたファイルから先頭画像へ奪い返す。
-        # ``_on_grid_file_activated`` と同じ理由で funnel へ寄せない（項目#51）—
+        # ``_on_grid_file_activated`` と同じ理由で funnel へ寄せない —
         # 下の枝は ``_current_preview_path == path`` のとき ``_set_path_status``
         # を呼ばず、ZIP ドリルインの枝はそもそも通らない。
-        self._preview_shown_representative = None
+        self._preview_fallback.shown = None
         self._preview_stream.cancel()
         if path.suffix.lower() in ZIP_DRILL_SUFFIXES:
             self._open_zip_as_folder(path)
             return
-        # H4 統一（2026-07 分割ビュー再設計）: 右一覧の画像/動画ダブル
-        # クリックも左グリッドと同じ「プレビュー最大化」へ（旧・全画面ライト
-        # ボックス直行は廃止 — F11 / 表示メニューが全画面の唯一の入口）。
+        # 右一覧の画像/動画ダブルクリックも左グリッドと同じ「プレビュー
+        # 最大化」へ（全画面ライトボックスへは直行しない — F11 / 表示メニューが
+        # 全画面の唯一の入口）。
         if path.suffix.lower() in _LIGHTBOX_MEDIA_SUFFIXES:
             if self._current_preview_path != path:
                 self._set_path_status(path)
@@ -4344,15 +4272,14 @@ class ViewerWindow(QMainWindow):
             self._enter_stage_mode()
             return
         self._set_path_status(path)
-        # Unpreviewable file → OS default app on double-click (L07), mirroring
+        # Unpreviewable file → OS default app on double-click, mirroring
         # the left pane; previewable kinds keep the in-place preview.
         if not has_dedicated_view(path):
             self._open_with_default_app(path)
             return
         self._content.show_path(path)
-        # H4 統一はメディア枝だけでなく**専用ビューを持つ全種別**に効く
-        # （N-64 — 左グリッドの ``_on_grid_file_activated`` は同じ位置で
-        # 最大化しており、右一覧だけが分割のままだった）。
+        # この「最大化」はメディア枝だけでなく**専用ビューを持つ全種別**に効く
+        # （左グリッドの ``_on_grid_file_activated`` も同じ位置で最大化する）。
         self._enter_stage_mode()
 
     def _on_similar_search_requested(self, path: Path, pixmap: object) -> None:
@@ -4399,7 +4326,7 @@ class ViewerWindow(QMainWindow):
         self.statusBar().showMessage(text, timeout_ms)
 
     def _notify_extracted(self, text: str, duration_ms: int) -> None:
-        """``ZipDrillController`` の告知口（成功トーストへ変換する N-74）。
+        """``ZipDrillController`` の告知口（成功トーストへ変換する）。
 
         コントローラ側の型（``Callable[[str, int], None]``）はそのまま — 着地
         面だけをステータスバーからトーストへ差し替える。
@@ -4422,7 +4349,7 @@ class ViewerWindow(QMainWindow):
         ``duration_ms`` は表示時間（既定 3 秒。0 でクリックまで残す）— 長め /
         短めが要る呼び出し側もこの 1 本を通せるようにするための引数で、
         ``show_toast`` を親ウィンドウへ直接呼ぶ回避実装を作らないこと。
-        ``action_text`` / ``on_action`` は追随ボタン 1 つ（N-40 の共通 API）—
+        ``action_text`` / ``on_action`` は追随ボタン 1 つ（共通 API）—
         近道であって唯一の入口にはしないこと。
         """
         show_toast(
@@ -4455,13 +4382,13 @@ class ViewerWindow(QMainWindow):
         #
         # 歩く母集合は右ペインの生タイル列ではなく ``tile_paths()``
         # （post.md / #thumb# を除いた表示可能メディア）— ヘッダーの n/m・
-        # 画像トラック・閲覧モードのプレイリストと同じ集合にする
-        # (UIレビュー 07-25 #52)。これが無いと ‹ で Markdown ビューへ着地して
+        # 画像トラック・閲覧モードのプレイリストと同じ集合にする。
+        # これが無いと ‹ で Markdown ビューへ着地して
         # 「1 枚目が 2/8」になる。
         self._step_media_selection(delta)
 
     def _media_paths_and_index(self) -> tuple[list[Path], int]:
-        """表示可能メディアの母集合と現在位置 (UIレビュー 07-25 #52).
+        """表示可能メディアの母集合と現在位置.
 
         ``tile_paths()`` は右ペインのタイル列から内部ファイル（post.md /
         ``#thumb#…``）を除いたもの。現在選択がその集合の外（= post.md を
@@ -4492,10 +4419,10 @@ class ViewerWindow(QMainWindow):
         self._notify_media_edge(delta)
 
     def _notify_media_edge(self, delta: int) -> None:
-        """投稿内の端で ←→ を押したときの案内 (UIレビュー 07-25 #106).
+        """投稿内の端で ←→ を押したときの案内.
 
-        全画面（閲覧モード）は端で「もう一度 → で次の投稿へ」と教えるのに、
-        プレビュー最大化中は完全な無反応だった（キーが壊れたようにしか見え
+        全画面（閲覧モード）は端で「もう一度 → で次の投稿へ」と教えるので、
+        プレビュー最大化中も無反応にしない（キーが壊れたようにしか見え
         ない）。同じ部品の中央オーバーレイで、次/前の投稿へ行くキー
         （Ctrl+←/→ — 最大化中のみ有効なショートカット）を案内する。
         分割ビュー中は ‹ › ボタンと選択の見た目で「端」が読めるので出さない。
@@ -4511,12 +4438,12 @@ class ViewerWindow(QMainWindow):
         )
 
     def _on_content_jump_edge(self, last: bool) -> None:
-        """プレビューの Home/End — 現在フォルダの先頭 / 末尾ファイルへ（#22）。
+        """プレビューの Home/End — 現在フォルダの先頭 / 末尾ファイルへ。
 
         ``_on_content_navigate`` と同じく右ペイン（情報パネルのファイル一覧）の
         選択を動かすだけ: ``selection_changed`` → ``file_selected`` が同期で
         走り、中央プレビュー・画像トラック・ステータスがまとめて追従する。
-        母集合も ‹ › と同一（表示可能メディアのみ — UIレビュー 07-25 #52）。
+        母集合も ‹ › と同一（表示可能メディアのみ）。
         """
         paths = self._file_list.tile_paths()
         if not paths:
@@ -4561,10 +4488,10 @@ class ViewerWindow(QMainWindow):
 
         Parses the URL to ``(service, post_id)`` and looks it up in the
         search index's ``postref`` table.  **Purely textual — no filesystem
-        verification** (レビュー 2026-07-31 #9): this resolver runs on the GUI
+        verification**: this resolver runs on the GUI
         thread for EVERY anchor in the body on EVERY ``setHtml`` (initial
         render, viewport reflows, font-size changes, ``refresh_links``), so a
-        per-link NAS ``is_dir``/``is_file`` froze the GUI for links × latency
+        per-link NAS ``is_dir``/``is_file`` would freeze the GUI for links × latency
         on cold SMB — the same NAS-free rule the rest of markdown_view keeps.
         A stale index entry can therefore tag a since-deleted post; the
         click-time gate in ``_on_post_link_clicked`` (one stat per click)
@@ -4580,19 +4507,18 @@ class ViewerWindow(QMainWindow):
         # 📁 in a post body → navigate the left pane to the downloaded post:
         # re-root to its parent and select it (same pattern as a right-pane
         # folder double-click), which fires ``folder_selected`` → its post.md.
-        # クリック時の 1 回だけの stat も**バウンデッド**に（#132 差し戻し
-        # F3）: 他のナビゲーション同期ゲートと同じ 2 秒プローブで、到達不能
+        # クリック時の 1 回だけの stat も**バウンデッド**に: 他のナビゲーション同期ゲートと同じ 2 秒プローブで、到達不能
         # （タイムアウト）は「消えた」ではないので先へ進める。
         if not self._is_reachable_dir(folder):
             # 索引の ``postref`` 行は消されない（search_index が prune する
             # のは ``node`` だけ）ので、フォルダをリネーム / 移動 / 削除した
             # 後も 📁 は出続ける。黙って return するとボタンが完全な無反応に
-            # 見えるため、理由を出す（項目#177）。
+            # 見えるため、理由を出す。
             self._show_toast(
                 t("viewer.main_window.post_link_folder_missing"), "warning"
             )
             return
-        # 親のプローブはしない（再指摘 H-2 — 同じクリックで 2 回目の 2 秒
+        # 親のプローブはしない（同じクリックで 2 回目の 2 秒
         # ゲートを積まない）。子が ``dir`` と分かったなら親も必ずディレクトリ
         # で、タイムアウトだったなら他のゲートと同じ「あるとみなして進む」。
         self.set_root(
@@ -4621,22 +4547,22 @@ class ViewerWindow(QMainWindow):
         self._file_list.refresh_curation()
         if self._lightbox is not None and self._lightbox.isVisible():
             self._lightbox.refresh_curation()
-        # 最大化中の画像トラックの★マークも同じ map を読む (N-72)。
+        # 最大化中の画像トラックの★マークも同じ map を読む。
         # getattr ガードは __init__ を通さないテストハーネス向け（本ファイル
         # 内の他のクローム参照と同じ流儀）。
         strip = getattr(self, "_image_strip", None)
         if strip is not None:
             strip.update()
         # レールの「印を付けた件数」とユーザータグ行も同じ変更を映す
-        # (UIレビュー 2026-08-28 N-117 / N-71) — メモリ走査なので I/O ゼロ。
+        # — メモリ走査なので I/O ゼロ。
         self._sync_nav_rail_curation()
-        # プレビューヘッダーの現在★も同じ変更を映す (UIレビュー 07-25 #11)。
+        # プレビューヘッダーの現在★も同じ変更を映す。
         self._update_stage_header()
         # 情報パネルの詳細カードも同じ map を読んでいるが、値はカード生成時の
-        # スナップショットなので★を変えても再選択するまで古いままだった
-        # (UIレビュー 07-25 #134)。表示中の path のときだけ詰め直す — 同じ path
+        # スナップショットなので★を変えても再選択するまで古いままになる。
+        # 表示中の path のときだけ詰め直す — 同じ path
         # を渡す ``set_file_detail`` はサムネイルを保持するので、ここで
-        # 再デコードは起きない。ユーザータグ行 (#13①) も同じ経路で追従する。
+        # 再デコードは起きない。ユーザータグ行も同じ経路で追従する。
         detail = self._pending_file_detail.peek()
         if detail is not None:
             detail.star = self._file_star(detail.path)
@@ -4650,8 +4576,8 @@ class ViewerWindow(QMainWindow):
         # 映すので、ここで ``_apply_meta_card`` を呼ぶと★を 1 つ押すたびにカードの
         # QLabel を全部作り直すだけになる。
         # 詳細情報ウィンドウ（Ctrl+I）の印の 3 行は同じ変更を映す
-        # (UIレビュー07-25 追修 #94) — この窓は ``show_path`` = 選択変更でしか
-        # 更新されないため、選択を動かさない★付けでは開いたまま古い値が残った。
+        # — この窓は ``show_path`` = 選択変更でしか
+        # 更新されないため、選択を動かさない★付けでは開いたまま古い値が残る。
         detail_win = getattr(self, "_detail_window", None)
         if detail_win is not None and detail_win.isVisible():
             detail_win.refresh_curation()
@@ -4732,7 +4658,7 @@ class ViewerWindow(QMainWindow):
             return moved
 
         # 追い越し（``submit_job``）が前回のウォークを止めてから新しい世代を
-        # 配る（項目#88 — 世代だけ進めても走行中の scandir は止まらない）。
+        # 配る（世代だけ進めても走行中の scandir は止まらない）。
         self._rename_follow_stream.submit_job(_work)
 
     def _on_rename_follow_done(self, payload: object) -> None:
@@ -4763,12 +4689,11 @@ class ViewerWindow(QMainWindow):
             return
         # Rows moved onto the current-root folders — refresh the panes'
         # in-memory map so the badges appear on the renamed tiles.
+        # refresh_user_meta は _apply_curation と同じ尾部を通るので、★並び /
+        # 印の絞り込みの再構築と curation_changed（→ _on_curation_changed が
+        # 右一覧・レール件数・ステージヘッダー・情報パネル・全画面・詳細情報
+        # ウィンドウへ配る）はここで個別に足さない。
         self._post_grid.refresh_user_meta()
-        self._file_list.refresh_curation()
-        # refresh_user_meta は母集合（_user_meta_map）を差し替える 2 経路の
-        # 1 つ（もう 1 つは _apply_curation → curation_changed）。併合で
-        # 件数が減り得るので、レールの「印を付けた件数」もここで数え直す。
-        self._sync_nav_rail_curation()
 
     def _set_current_star(
         self, star: int, path: Path | None = None, *, notify: bool = True
@@ -4780,9 +4705,9 @@ class ViewerWindow(QMainWindow):
         through the single owner.
 
         確認フィードバックも同じ left pane の共通 funnel
-        (``show_star_feedback``) を通す（UIレビュー 07-25 #12）— これで
+        (``show_star_feedback``) を通す — これで
         グリッド / プレビュー（分割）/ プレビュー（最大化）の 3 面が同じ
-        「★★★ 対象名」トーストになる。対象名を必ず添えるのは #11 対応:
+        「★★★ 対象名」トーストになる。対象名を必ず添える理由:
         同じ 0-5 でもフォーカス位置により投稿フォルダとファイルで対象が
         変わるため、どちらに付いたかがトーストだけで分かるようにする。
 
@@ -4790,7 +4715,7 @@ class ViewerWindow(QMainWindow):
         画面中央に自前の「★★★」オーバーレイを出すので、背後の親ウィンドウへ
         トーストを重ねない（3 面統一の対象は分割 / 最大化のプレビュー面）。
 
-        書き込みが**永続化できなかったとき**は成功トーストを出さない (#53) —
+        書き込みが**永続化できなかったとき**は成功トーストを出さない —
         ``_apply_curation`` が偽を返し、失敗の警告トーストは向こうが出す。
         """
         if self._user_meta is None:
@@ -4803,11 +4728,11 @@ class ViewerWindow(QMainWindow):
     def _on_file_list_curation_requested(
         self, path: Path, kind: str, value: object,
     ) -> None:
-        """右一覧のキュレーション操作を左ペインの単一書き手へ渡す (#19).
+        """右一覧のキュレーション操作を左ペインの単一書き手へ渡す.
 
         ``_apply_curation`` の所有は :class:`PostGrid` のまま — こちらは「どの
         パスに何を」を伝えるだけ。★は共通トースト funnel を通すので、対象名
-        つきの確認が 3 面（グリッド / プレビュー / 右一覧）で揃う (#11/#12)。
+        つきの確認が 3 面（グリッド / プレビュー / 右一覧）で揃う。
         ``edit_tags`` は左ペインの編集ダイアログをそのまま開く（補完候補も
         完了トーストも 1 実装のまま）。
         """
@@ -4818,19 +4743,19 @@ class ViewerWindow(QMainWindow):
         self._post_grid.request_curation(path, kind, value)
 
     def _on_file_list_star_key(self, star: int) -> None:
-        """右一覧で 0-5 — 選択中のファイルへスターを付ける (UIレビュー #19)."""
+        """右一覧で 0-5 — 選択中のファイルへスターを付ける."""
         target = self._file_list.current_path()
         if target is None:
             return
         self._set_current_star(star, target)
 
     def _on_stage_star_key(self, star: int) -> None:
-        """プレビューでの 0-5 キー → 表示中画像へスターを永続化（UIレビュー #11）.
+        """プレビューでの 0-5 キー → 表示中画像へスターを永続化.
 
         ContentView（プレビュー列）にフォーカスがあるときだけ emit される。
         分割ビュー化でプレビューは常時可視なので、分割・最大化を問わず
-        受け付ける（旧・ブラウズ中ガードは「中央が裏面で不可視」という前提
-        ごと消えた）。user_meta 不在時は ``_set_current_star`` 側が no-op —
+        受け付ける（中央が裏面で不可視になる状態は無いのでブラウズ中ガードは
+        持たない）。user_meta 不在時は ``_set_current_star`` 側が no-op —
         グリッドの数字キーと同じ劣化。
         """
         self._set_current_star(star)
@@ -4841,36 +4766,6 @@ class ViewerWindow(QMainWindow):
         """現在の中央領域モード — ``"browse"``（分割ビュー）か ``"stage"``
         （プレビュー最大化）。値は履歴 (``NavEntry.mode``) 互換のため温存。"""
         return self._ui_mode
-
-    def _restore_grid_scroll_after_stage(self) -> None:
-        """最大化に入る前の左グリッドのスクロール位置へ戻す（項目#10）。
-
-        幅 0 のレイアウトでクランプされた値を、分割復帰で復元する。最大化中に
-        Ctrl+←/→ で選択が動いていたときは復元しない — 戻すと選択タイルが画面外
-        のまま着地するため（履歴 fast path が ``entry.selected`` と現選択を
-        比べているのと同じ判断）。``getattr`` ガードは ``__init__`` を通さない
-        テストハーネス向け。
-        """
-        scroll = getattr(self, "_stage_grid_scroll", None)
-        selected = getattr(self, "_stage_grid_selected", None)
-        self._stage_grid_scroll = None
-        self._stage_grid_selected = None
-        if scroll is None or self._post_grid.current_path() != selected:
-            return
-        # 収束適用 (issue #99): 復元値を B-13 の保留スクロールとして宣言的に
-        # 登録し、適用はグリッド自身の収束点（タイル再構築 / 遅延リレイアウト
-        # 完了 = ``relayout_converged``）に任せる。setSizes の子ジオメトリ
-        # 反映が何 tick 遅れても、幅が戻れば resizeEvent → コアレサ → 収束
-        # フックで必ず適用される — 従来ここに居た「flush + 即 setValue +
-        # 次 tick に 1 回だけ再試行」(#83 安全弁) は、反映が 1 tick を超えて
-        # 遅れる低速環境で不発のまま恒久的に諦めていた（CI 実測）。
-        self._post_grid.set_pending_scroll(scroll)
-        # 速い経路: ジオメトリ反映済みなら保留リレイアウトを畳んでその場で
-        # 適用し、先頭表示が一瞬見えるフラッシュを避ける。未反映（レンジが
-        # 幅 0 時代の縮退レイアウトのまま）なら ``_apply_pending_scroll`` の
-        # 縮退レイアウトガードが値を温存し、上記の収束フックへ引き継ぐ。
-        self._post_grid._view.flush_pending_relayout()
-        self._post_grid._apply_pending_scroll()
 
     def _set_preview_focus(self, on: bool) -> None:
         """分割 ⇄ プレビュー最大化の**見た目**を適用する（履歴に触れない）。
@@ -4883,26 +4778,22 @@ class ViewerWindow(QMainWindow):
         push/pop の対称性は呼び出し側（``_enter_stage_mode`` /
         ``_enter_browse_mode``）が担う — 取り崩しは
         ``_enter_browse_mode`` の**既定**で、履歴を自分で操作した直後の
-        2 経路だけが ``reconcile_history=False`` を明示する（項目#186）。
+        2 経路だけが ``reconcile_history=False`` を明示する。
         """
         split = self._center_split
         sizes = split.sizes()
         restore_preview_hidden = False
         if on:
-            # UIレビュー 07-25 #105: F6（プレビュー非表示）で畳んだ状態から
+            # F6（プレビュー非表示）で畳んだ状態から
             # 最大化すると、下の ``_set_preview_visible_flag(True)`` が永続
             # 設定を黙って上書きしてしまう。最大化前の非表示状態を覚えておき、
             # G / Esc で分割へ戻るときに復元する（1 フラグ）。
             self._preview_hidden_before_stage = not self._preview_visible
             if len(sizes) == 2 and sizes[0] > 0 and sizes[1] > 0:
                 self._center_split_saved = list(sizes)
-            # 項目#10: グリッド席を幅 0 に畳むと GalleryView が幅 0 で
-            # レイアウトし直し、垂直スクロール値がその時点の maximum へ
-            # クランプされる。幅が戻っても値は戻らないので、畳む前の位置を
-            # 選択とセットで控えておき、分割復帰で戻す（``_enter_stage_mode``
-            # の docstring が謳う「往復でスクロール位置と選択はそのまま」）。
-            self._stage_grid_scroll = self._post_grid.scroll_value()
-            self._stage_grid_selected = self._post_grid.current_path()
+            # 畳む前のスクロール位置は GalleryView が縮退レイアウトの間
+            # アンカーとして預かり、幅が戻った最初のリレイアウトで適用する
+            # （``GalleryView._do_relayout``）ので、ここでは何も控えない。
             total = sum(sizes) if sizes else 0
             split.setSizes([0, max(1, total)])
         else:
@@ -4916,15 +4807,17 @@ class ViewerWindow(QMainWindow):
                     saved = list(_CENTER_SPLIT_DEFAULT_SIZES)
                 # 比率で復元 — 最大化中にウィンドウ幅が変わっていても破綻しない。
                 self._apply_center_split_sizes(saved)
-                # 幅 0 レイアウトでクランプされたスクロール位置を戻す
-                # （setSizes は同期リレイアウト済みでレンジが確定している）。
-                self._restore_grid_scroll_after_stage()
+                # 預けたアンカーの適用（見ていた位置 / 最大化中に動いた選択）
+                # は幅が戻ったリレイアウトが行う。ジオメトリ反映済みなら保留
+                # リレイアウトをその場で畳み、縮退時の位置が一瞬見えるのを
+                # 避ける（未反映なら幅 0 のままで、アンカーは預けたまま残る）。
+                self._post_grid._view.flush_pending_relayout()
         # どちらの分岐でもプレビュー席は可視で終わる（最大化 = [0, x] /
         # 分割復帰 = 記憶比率）: 畳み中に E / activate で最大化した場合の
         # 「自動再表示」もここで checked 状態・永続フラグへ反映される。
         self._set_preview_visible_flag(True)
         self._stage_header.set_maximized(on)
-        # 表示メニューの ☑ / 有効状態を追従（UIレビュー 07-25 #66）。getattr
+        # 表示メニューの ☑ / 有効状態を追従する。getattr
         # ガードは _build_menus 前に走る構築順・テストハーネス向け。
         act_max = getattr(self, "_act_stage_mode", None)
         if act_max is not None:
@@ -4935,12 +4828,12 @@ class ViewerWindow(QMainWindow):
         self._set_stage_shortcuts_enabled(on)
         # 画像ダブルクリック: 分割中 = 最大化 / 最大化中 = 等倍⇄フィット。
         self._content.set_double_click_maximize(not on)
-        # UIレビュー 07-25 #104: 最大化中はヘッダー右端に [⛶ 全画面 (F11)] が
+        # 最大化中はヘッダー右端に [⛶ 全画面 (F11)] が
         # 常設されるので、ホバーカプセル側の全画面ボタンは重複（しかも
         # フィット/全画面が隣接して紛らわしい）。カプセルのボタンだけ畳む
         # （右クリックメニューの「全画面で表示」は残す = 入口は減らさない）。
         self._content.set_fullscreen_button_visible(not on)
-        # UIレビュー 07-25 #23: 最大化中の「←」は履歴の意味論どおり「分割ビューへ
+        # 最大化中の「←」は履歴の意味論どおり「分割ビューへ
         # 戻る」1 手になる（最大化時に分割位置を積んでいるため）。出口として
         # 使われることを見越して、最大化中だけツールチップを動的に差し替える。
         self._post_grid.back_btn.setToolTip(
@@ -4948,17 +4841,16 @@ class ViewerWindow(QMainWindow):
             if on
             else t("viewer.post_grid.back_tooltip")
         )
-        # 帯の同期はヘッダー更新まで面倒を見る（項目#108 と同型 — 素直に両方
+        # 帯の同期はヘッダー更新まで面倒を見る（素直に両方
         # 呼ぶと最大化のたびに ``tile_paths()`` の全走査が 2 回走る）。同期が
         # 走らなかったときだけ下でヘッダーを直接更新する。
         header_synced = False
         if on:
             header_synced = self._refresh_image_strip()
-            # フォーカスは**現在ページのサブビュー**へ（UIレビュー 07-25 #5）。
+            # フォーカスは**現在ページのサブビュー**へ。
             # +/-/R/Shift+R/F は ImageView 配下スコープ
             # (WidgetWithChildrenShortcut) なので、親の ContentView に
-            # setFocus していた旧実装ではズーム・回転が最大化直後に全滅して
-            # いた（コメントの約束と実装の乖離）。ContentView 自身の
+            # setFocus するとズーム・回転が最大化直後に全滅する。ContentView 自身の
             # keyPressEvent（0-5 / Space / Home / End）は、サブビューが
             # 受理しなかったキーが親へ伝播して届く。
             self._content.focus_current_page()
@@ -4968,11 +4860,11 @@ class ViewerWindow(QMainWindow):
         if not header_synced:
             self._update_stage_header()
         # グリッド席の畳み状態が変わった = 中央に案内カードを出してよいかが
-        # 変わる (UIレビュー 07-25 #51)。プレビュー中は no-op（``showing_
+        # 変わる。プレビュー中は no-op（``showing_
         # placeholder`` ガード）なので、空の状態のときだけ効く。
         self._sync_centre_placeholder()
         if restore_preview_hidden:
-            # #105: 最大化前の「F6 で非表示」へ戻す（表示トグル 3 導線の
+            # 最大化前の「F6 で非表示」へ戻す（表示トグル 3 導線の
             # checked と永続フラグは ``_on_preview_toggled`` が揃える）。
             self._on_preview_toggled(False)
 
@@ -5013,7 +4905,7 @@ class ViewerWindow(QMainWindow):
 
         ポップアップは ``Qt.ToolTip`` フレームで、閉じる責務は post_grid 側の
         ``filter_edit`` eventFilter が持つ（Esc で閉じる）。ウィンドウレベルの
-        Esc（#20）はそれを奪ってしまうので、開いている間は「取り消すものがある
+        Esc（``_on_escape``）はそれを奪ってしまうので、開いている間は「取り消すものがある
         入力欄」として委譲側へ倒すための判定（読み取りのみ）。
         """
         grid = getattr(self, "_post_grid", None)
@@ -5024,17 +4916,17 @@ class ViewerWindow(QMainWindow):
             return False
 
     def _on_escape(self) -> None:
-        """ウィンドウレベル Esc の単一ハンドラ（UIレビュー 07-25 #20）。
+        """ウィンドウレベル Esc の単一ハンドラ。
 
         Esc は「いま開いているものを 1 段閉じる」キーとして、フォーカス位置に
         よらず**常に同じ優先順位**で処理する:
 
         1. **編集中の入力ウィジェットへ委譲** — 入力中の Esc（取り消しのつもり）が
-           最大化やモードを畳んでしまわないように（項目16）。
+           最大化やモードを畳んでしまわないように。
         2. **プレビュー最大化中なら分割ビューへ戻す**（従来のステージ Esc）。
-        3. **それ以外は絞り込み / 検索の一括解除**（``_on_escape_clear`` — 従来は
-           GalleryView.keyPressEvent 経由だったため、プレビュー列や右一覧に
-           フォーカスがあると誰も拾わず無反応だった）。
+        3. **それ以外は絞り込み / 検索の一括解除**（``_on_escape_clear`` —
+           GalleryView.keyPressEvent 経由にすると、プレビュー列や右一覧に
+           フォーカスがあるとき誰も拾わず無反応になる）。
 
         入力ウィジェットの種別ごとの扱い（1 の内訳）:
 
@@ -5043,7 +4935,7 @@ class ViewerWindow(QMainWindow):
           アップ閉じ = filter_edit 自前の eventFilter）を走らせ、モードは維持する。
         * **QLineEdit（空・ポップアップも無し）** — Esc に取り消すものが無く、
           委譲すると Esc が完全な no-op になってキーボードで最大化から出られなく
-          なる（項目16 のトラップ）。通常どおり 2 / 3 へ進む。
+          なる（トラップ）。通常どおり 2 / 3 へ進む。
         * **QAbstractSpinBox（プレビュー内 PDF のページ入力等）** — Qt は Esc を
           ローカル処理しない（keyboardTracking で入力は即コミット済み）ため、
           委譲は恒久 no-op のトラップになる。編集状態だけを終わらせる —
@@ -5091,7 +4983,7 @@ class ViewerWindow(QMainWindow):
     def _exit_stage_to_browse(self) -> None:
         """ユーザー明示の最大化解除（G / Esc / ヘッダーの [◧ 分割に戻す]）。
 
-        :meth:`_enter_browse_mode` の薄い別名（レビュー 2026-09-03 項目#186）。
+        :meth:`_enter_browse_mode` の薄い別名。
         履歴の取り崩しは既定なので、この名前は「明示の出口」であることを
         読み手へ伝えるだけの役割になっている。
         """
@@ -5112,12 +5004,11 @@ class ViewerWindow(QMainWindow):
         呼び出し口だけ** — ``set_root``（再ルートの離脱位置を既に push 済み）
         と ``_navigate_history``（遷移先エントリを既に pop 済み）の 2 つ。
 
-        **既定を「取り崩す」側に置いている理由**（項目#186）: かつては素の
-        モード切替が既定で、対称な取り崩しは ``_exit_stage_to_browse`` に
-        しか無く、「どちらを呼ぶか」は呼び出し側の知識だった。既定が危険側
-        だったため同じ規約違反が 2 回起きている（#107 の
-        ``_on_recent_files_requested`` と、``_on_loading_changed`` の同一
-        ルート再スキャンで保持対象が消えたときの離脱）。新しい離脱経路が
+        **既定を「取り崩す」側に置いている理由**: 素のモード切替を既定に
+        すると、対称な取り崩しを呼ぶかどうかが呼び出し側の知識になり、
+        離脱経路（``_on_recent_files_requested`` や、``_on_loading_changed``
+        の同一ルート再スキャンで保持対象が消えたときの離脱）ごとに同じ規約
+        違反を起こしやすい。新しい離脱経路が
         素朴に ``_enter_browse_mode()`` と書いても対称になるよう、既定を
         安全側へ倒してある。**この既定を戻さないこと**。
         """
@@ -5140,8 +5031,8 @@ class ViewerWindow(QMainWindow):
             self._update_nav_buttons()
 
     def _set_stage_shortcuts_enabled(self, on: bool) -> None:
-        # Esc は含めない — UIレビュー 07-25 #20 でウィンドウレベル常時有効の
-        # 単一ハンドラ (``_sc_escape`` → ``_on_escape``) へ集約した。
+        # Esc は含めない — ウィンドウレベル常時有効の
+        # 単一ハンドラ (``_sc_escape`` → ``_on_escape``) へ集約してある。
         for sc in (self._sc_stage_prev, self._sc_stage_next):
             sc.setEnabled(on)
 
@@ -5155,7 +5046,7 @@ class ViewerWindow(QMainWindow):
         """
         self._post_grid.step_selection(delta)
 
-    # --------------------------------- 情報パネル (右) — Phase 2-2 (2026-07)
+    # --------------------------------- 情報パネル (右)
 
     def _on_info_panel_toggled(self, visible: bool) -> None:
         """Show/hide the right 情報パネル (F8 / 表示 popover check).
@@ -5172,7 +5063,7 @@ class ViewerWindow(QMainWindow):
             if not visible and not self._info_panel.isHidden():
                 sizes = self._splitter.sizes()
                 # レール側（``_on_nav_rail_toggled``）と同じ下限 — 理由は
-                # そちらのコメント（項目#8(a) の対称適用）。
+                # そちらのコメント（対称適用）。
                 if (
                     len(sizes) == 3
                     and sizes[2] >= _INFO_PANEL_DEFAULT_WIDTH
@@ -5209,7 +5100,7 @@ class ViewerWindow(QMainWindow):
         finally:
             self._syncing_info_panel = was
 
-    # --------------------------------- ナビレール (左) — Phase 2-3 (2026-07)
+    # --------------------------------- ナビレール (左)
 
     def _on_nav_rail_toggled(self, visible: bool) -> None:
         """Show/hide the left ナビレール (F7 / 表示 popover check).
@@ -5219,10 +5110,10 @@ class ViewerWindow(QMainWindow):
         against the mutual ``setChecked`` re-entering) and remembers the rail's
         width so a re-show restores its column instead of collapsing to zero.
 
-        隠すときは解放幅の**行き先を明示する**（項目#11）: 外殻の stretch は
+        隠すときは解放幅の**行き先を明示する**: 外殻の stretch は
         0/7/2 なので、素で隠すと Qt が解放幅を中央と情報パネルへ 7:2 で配る
-        一方、再表示は中央からしか取り戻さない。この非対称のせいで F7 の往復
-        ごとに情報パネルが約 51px ずつ太り、中央が同じだけ痩せていた（終了時
+        一方、再表示は中央からしか取り戻さない。この非対称のままだと F7 の往復
+        ごとに情報パネルが約 51px ずつ太り、中央が同じだけ痩せる（終了時
         に ``_collect_state`` がそのサイズを書くのでドリフトは再起動後も残る）。
         情報パネルは畳む前の幅のまま据え置き、解放幅は全部中央へ渡す。
         """
@@ -5233,7 +5124,7 @@ class ViewerWindow(QMainWindow):
             before = self._splitter.sizes()
             if not visible and not self._nav_rail.isHidden():
                 # 記憶幅の採用条件はドラッグ追従（``_on_outer_split_moved``）
-                # と同じ「再表示既定幅以上」に揃える（項目#8(a)）: ハンドルで
+                # と同じ「再表示既定幅以上」に揃える: ハンドルで
                 # 細く引いた直後に F7 で畳むと、下限が無ければその細い幅が
                 # 記憶され、再表示が読めない帯になり ``_collect_state`` が
                 # それを永続化してしまう。既定幅未満のときは直前の記憶を温存。
@@ -5281,9 +5172,9 @@ class ViewerWindow(QMainWindow):
         追従させ、``setVisible`` はしない — 同じドラッグで引き戻せるまま残す
         （途中で隠すとハンドルごと消えてジェスチャが破綻する）。幅が再表示
         既定幅（``_NAV_RAIL_DEFAULT_WIDTH`` / ``_INFO_PANEL_DEFAULT_WIDTH``）
-        以上ある間だけ再表示用の記憶幅を更新する（項目#8(a): この関数は
-        ドラッグ**中**の全サンプルで呼ばれるため、下限が無い/低い（項目#9 の
-        80px）と畳みへ向かう途中のサンプルが記憶幅を既定幅未満へ侵食し、
+        以上ある間だけ再表示用の記憶幅を更新する（この関数は
+        ドラッグ**中**の全サンプルで呼ばれるため、下限が無い/低い（
+        ``_SPLIT_REMEMBER_MIN_PX`` の 80px）と畳みへ向かう途中のサンプルが記憶幅を既定幅未満へ侵食し、
         トグル再表示が細い列になる。既定幅未満のサンプルでは直前の記憶を
         温存する）。永続化は ``_collect_state`` が同じ「幅 0 = OFF」規約で書く。
         """
@@ -5370,7 +5261,7 @@ class ViewerWindow(QMainWindow):
             self._syncing_preview = was
 
     def _refresh_nav_rail_libraries(self) -> None:
-        """Push the current library roots + highlight to the rail (Phase 2-3).
+        """Push the current library roots + highlight to the rail.
 
         Called from :meth:`_rebuild_library_menu` so the rail follows every
         register / manage exactly like the ファイル ▸ ライブラリ submenu.  Reuses
@@ -5395,17 +5286,17 @@ class ViewerWindow(QMainWindow):
         if rail is None:
             return
         searches = self._state.saved_searches
-        # 名前だけでは中身も適用範囲も分からない (UIレビュー 07-25 #34) —
+        # 名前だけでは中身も適用範囲も分からない —
         # 条件サマリ + 「現在のフォルダを起点に適用」をレール行にも配る
         # （メニュー・管理ダイアログと同じ 1 本の要約から）。
         rail.set_saved_searches(
             searches, [saved_search_tooltip(e) for e in searches],
         )
 
-    # ------------------------------------ 編集メニュー（選択中の項目・N-70/157）
+    # ------------------------------------ 編集メニュー（選択中の項目）
 
     def _rebuild_curation_menu(self) -> None:
-        """「編集 ▸ スター・あとで見る」 — 横断一覧への入口 (N-70).
+        """「編集 ▸ スター・あとで見る」 — 横断一覧への入口.
 
         レール行と同じ 3 種（スター付き / あとで見る / 各ユーザータグ）を同じ
         1 本の情報源（``PostGrid.curation_pool_count`` / ``all_user_tags``）から
@@ -5421,8 +5312,7 @@ class ViewerWindow(QMainWindow):
             menu.setEnabled(False)
             return
         menu.setEnabled(True)
-        kinds = ["starred", "later"]
-        kinds += [f"tag:{tag}" for tag in grid.all_user_tags()]
+        kinds = CurationList.kinds(grid.all_user_tags())
         for kind in kinds:
             label = t(
                 "viewer.nav_rail.curation_row_count",
@@ -5431,7 +5321,7 @@ class ViewerWindow(QMainWindow):
             )
             act = QAction(label, self)
             # 件数の意味（印を付けた数）と、同じ行き先が**レールにも常設**で
-            # あることを添える (UIレビュー 2026-08-28 N-106)。メニューは
+            # あることを添える。メニューは
             # レールを畳んでいる利用者の唯一の入口なので削らず、2 つが同じ
             # 行き先だと分かるようにする。
             act.setToolTip(
@@ -5489,7 +5379,7 @@ class ViewerWindow(QMainWindow):
             self._edit_entry_actions.append(act)
 
     def _on_toggle_later(self, checked: bool = False) -> None:
-        """``L`` — フォーカスのある席の対象の「あとで見る」を反転する (N-74 / N-16).
+        """``L`` — フォーカスのある席の対象の「あとで見る」を反転する.
 
         対象は ``resolve_target``（0-5 / 右クリックと同じ判定点）。書き込みと
         確認トーストは左ペインの funnel ``PostGrid.request_curation`` が持つ。
@@ -5505,7 +5395,7 @@ class ViewerWindow(QMainWindow):
             # 席が全画面（= 全画面がアクティブ、または両窓とも非アクティブで
             # 判定材料が無い）なら、告知（中央オーバーレイ）を持つ全画面自身の
             # 経路へ委ねる — ここから直接書くとトーストも出ない無音の書き込みに
-            # なる（PR #183 レビュー）。本窓がアクティブなら ``focused_seat`` が
+            # なる。本窓がアクティブなら ``focused_seat`` が
             # 本窓の席を返すので、この分岐には来ずに下の funnel（本窓のトースト）
             # で告知される。
             lb._toggle_later()
@@ -5529,7 +5419,7 @@ class ViewerWindow(QMainWindow):
         1px も見えない。入口はどれも最大化中に撃てる（ナビレールは外殻
         スプリッタに残るので最大化中も可視・編集メニューは窓ショートカット）
         ため、**入れ替え前に必ず分割へ戻す**。抜け方は G / Esc / ヘッダーと
-        同じ正規の出口（履歴の取り崩し込み — 項目#107 / #186）。
+        同じ正規の出口（履歴の取り崩し込み）。
 
         窓側の入口ごとに前置きを書くのではなく、入れ替えを実行するグリッドに
         告げさせて配線 1 本で受ける — 新しい入口（プラグイン API・新メニュー）
@@ -5541,13 +5431,13 @@ class ViewerWindow(QMainWindow):
             self._exit_stage_to_browse()
 
     def _on_rail_curation_requested(self, kind: str) -> None:
-        """ナビレールの「キュレーション」行 → 横断ビュー (UIレビュー 07-25 #57).
+        """ナビレールの「キュレーション」行 → 横断ビュー.
 
         メニューの 「スター付き一覧」/「あとで見る一覧」 と同じ入口
         （``enter_curation_view``）へ流すだけ — レール側はダムビュー。
         """
         self._post_grid.enter_curation_view(kind)
-        # 一覧へ入るだけ = 母集合は不変。現在地ハイライトだけ書き直す (#187)。
+        # 一覧へ入るだけ = 母集合は不変。現在地ハイライトだけ書き直す。
         self._sync_nav_rail_curation(counts=False)
 
     def _on_recent_files_requested(self) -> None:
@@ -5578,13 +5468,13 @@ class ViewerWindow(QMainWindow):
         self._post_grid.enter_recent_files_view(target)
 
     def _sync_nav_rail_curation(self, *, counts: bool = True) -> None:
-        """レールのキュレーション行を現在の横断ビュー状態へ同期する (#57).
+        """レールのキュレーション行を現在の横断ビュー状態へ同期する.
 
-        「現在地」表示は選択とは独立した描画（UIレビュー 07-25 #7）なので、
+        「現在地」表示は選択とは独立した描画なので、
         グリッドの再構築（``counts_changed``）と ``curation_changed`` に相乗り
         して入場・退場・件数変化のどれにも追従できる。
 
-        件数とユーザータグ行 (UIレビュー 2026-08-28 N-117 / N-71) はどちらも
+        件数とユーザータグ行はどちらも
         左ペインのメモリ上の ``_user_meta_map`` 由来（``curation_pool_count`` /
         ``all_user_tags``）なので I/O はゼロ — レールは相変わらずダムビューで、
         自分では何も読まない。
@@ -5593,12 +5483,11 @@ class ViewerWindow(QMainWindow):
         (``_user_meta_map``) が変わるのは ``_apply_curation`` と
         ``refresh_user_meta`` の 2 か所だけなのに、``counts_changed`` は
         絞り込みの 1 打鍵ごとに飛ぶので、``all_user_tags`` + ``2 + タグ数``
-        回のマップ全走査を打鍵ごとに繰り返していた（レビュー 2026-09-03
-        項目 #187）。``_apply_tab_order(only_if_changed=True)`` が同じ経路で
+        回のマップ全走査を打鍵ごとに繰り返すことになる。``_apply_tab_order(only_if_changed=True)`` が同じ経路で
         採っている「変わったときだけ歩く」の姉妹。現在地は
         ``enter_curation_view`` / ``enter_recent_files_view`` 経由でも動くので、
-        ``counts=False`` でも必ず書き直す（落とすと #57 / N-117 の現在地
-        表示が退行する）。
+        ``counts=False`` でも必ず書き直す（落とすとレールの現在地
+        表示が追従しなくなる）。
         """
         rail = getattr(self, "_nav_rail", None)
         if rail is None:
@@ -5607,7 +5496,7 @@ class ViewerWindow(QMainWindow):
             # 店が無い構成は行ごと消す。走査を伴わないので *counts* に依らず
             # 毎回通してよい（そもそも件数を数える相手が居ない）。店が開けな
             # かった理由があるときは、レールの空文言も「付ければ一覧できます」
-            # から「保存できません」へ差し替える（N-128 — 理由の詳細は起動時の
+            # から「保存できません」へ差し替える（理由の詳細は起動時の
             # 警告トーストが 1 度だけ出す）。
             rail.set_curation(
                 False, reason=getattr(self, "_user_meta_error", None)
@@ -5617,7 +5506,7 @@ class ViewerWindow(QMainWindow):
         grid = self._post_grid
         if counts:
             tags = grid.all_user_tags()
-            kinds = ["starred", "later", *(f"tag:{tag}" for tag in tags)]
+            kinds = CurationList.kinds(tags)
             rail.set_curation(
                 True,
                 {kind: grid.curation_pool_count(kind) for kind in kinds},
@@ -5632,13 +5521,13 @@ class ViewerWindow(QMainWindow):
         when *folder* isn't already known to lack a ``post.md`` — dispatches an
         off-thread :func:`read_post_meta_checked`; :meth:`_on_info_meta_read` caches the
         result and calls :meth:`_apply_meta_card`, which decides whether to show
-        it (collapsed while the stage shows that same post.md — UIレビュー #22).
+        it (collapsed while the stage shows that same post.md).
         Token-guarded so a rapid selection change drops the superseded read.
         """
         # 走っている読みを降ろす（このあと投げ直すとは限らない — 下の 2 つの
         # 早期 return がその枝）。
         self._info_meta_stream.cancel()
-        # 選択が動いたので issue #94 のリトライ予約はご破算（新しい読みが走る）。
+        # 選択が動いたので post.md 再読込のリトライ予約はご破算（新しい読みが走る）。
         self._info_meta_retried = False
         self._info_meta_retry_timer.rearm()
         self._info_meta_last = None
@@ -5660,9 +5549,9 @@ class ViewerWindow(QMainWindow):
         self._submit_info_meta_read(folder)
 
     def _submit_info_meta_read(self, folder: Path) -> None:
-        """post.md のメタ読みを投入する**唯一の口**（初回 / #94 のリトライ）.
+        """post.md のメタ読みを投入する**唯一の口**（初回 / 失敗後のリトライ）.
 
-        2 箇所が同じ 3 行を書いていたので 1 メソッドへ畳んだ。リトライは
+        初回とリトライの 2 箇所から呼ぶ。リトライは
         「いま最新の要求」なので、追い越し（``submit``）で新しい世代を取る
         のが正しい — 着地は通常経路 :meth:`_on_info_meta_read` に乗る。
         """
@@ -5679,11 +5568,11 @@ class ViewerWindow(QMainWindow):
             maybe, flag = payload
             parsed = maybe if isinstance(maybe, ParsedPost) else None
             retryable = bool(flag)
-        # issue #94: 一過性の read 失敗（共有の瞬断・書き込み中の並走読みで
+        # 一過性の read 失敗（共有の瞬断・書き込み中の並走読みで
         # 空 head 等）だと post.md が実在してもカードが選択変更まで出ない。
         # read が「失敗」と報告したか、スキャン済みエントリが has_post_md=True
         # と知っているのに None が返ったときだけ、短い backoff 後に 1 回に
-        # 限り再読込する（リトライ待ちの間も従来どおり None を確定させる —
+        # 限り再読込する（リトライ待ちの間も None を確定させる —
         # カードは畳まれたまま、リトライ着地で上書きされる）。
         if parsed is None and not self._info_meta_retried:
             folder = self._info_meta_folder
@@ -5696,8 +5585,8 @@ class ViewerWindow(QMainWindow):
             if folder is not None and (retryable or known_present):
                 self._info_meta_retried = True
                 self._info_meta_retry_timer.trigger()
-        # Cache + apply through the single funnel so #22 suppression (stage
-        # showing this post.md) is honoured whether it's already true now or
+        # Cache + apply through the single funnel so the double-display
+        # suppression (stage showing this post.md) is honoured whether it's already true now or
         # becomes true on a later mode change.
         self._info_meta_last = (self._info_meta_folder, parsed)
         self._apply_meta_card()
@@ -5717,7 +5606,7 @@ class ViewerWindow(QMainWindow):
         self._update_stage_header()
 
     def _retry_info_meta(self) -> None:
-        """issue #94: backoff 後の post.md 再読込（1 選択につき 1 回限り）.
+        """backoff 後の post.md 再読込（1 選択につき 1 回限り）.
 
         タイマーは :meth:`_refresh_info_meta`（= 選択変更）で必ず停止される
         ので、発火時の ``_info_meta_folder`` は予約時と同じ選択を指している。
@@ -5730,21 +5619,20 @@ class ViewerWindow(QMainWindow):
         self._submit_info_meta_read(folder)
 
     def _apply_meta_card(self) -> None:
-        """Show / collapse the 情報パネル post meta card from live state (#22).
+        """Show / collapse the 情報パネル post meta card from live state.
 
         The card mirrors the selected post's ``post.md`` metadata — but while
         the preview already shows that same ``post.md`` body, the two are an
-        identical 7-row double display (UIレビュー #22), so the card is
-        collapsed in exactly that case.  分割ビュー化 (2026-07) で条件は
-        「プレビューが当該 post.md 本文を表示中」だけに単純化された（モード
-        非依存 — プレビューは常時可視）。A post shown as its representative
+        identical 7-row double display, so the card is
+        collapsed in exactly that case.  条件は「プレビューが当該 post.md
+        本文を表示中」だけ（モード非依存 — 分割ビューでもプレビューは常時可視）。A post shown as its representative
         image keeps the card (a file selection additionally hides it via the
         panel's own file-card / meta-card mutual exclusivity).  Cheap +
         idempotent, so it can be re-run on every selection change.
         """
         # getattr ガードは __init__ を通さないテストハーネス向け
         # （``_capture_current_position`` 等と同じ流儀）— ``_on_curation_changed``
-        # からも呼ばれるようになったので (N-11)、素の窓でも安全に落ちること。
+        # からも呼ばれるので、素の窓でも安全に落ちること。
         last = getattr(self, "_info_meta_last", None)
         if last is None:
             return  # no post.md read yet — card already cleared
@@ -5760,7 +5648,7 @@ class ViewerWindow(QMainWindow):
 
         まず右一覧の post.md 行の選択を試みる（既存の
         ``file_selected`` → ``show_path`` 経路に乗るので、画像トラック /
-        ヘッダー / #22 抑止が全部自動で追従する）。スキャン未着地等で行が
+        ヘッダー / 二重表示抑止が全部自動で追従する）。スキャン未着地等で行が
         まだ無ければ直接 ``show_markdown`` へフォールバックする。
         """
         last = self._info_meta_last
@@ -5774,14 +5662,14 @@ class ViewerWindow(QMainWindow):
         # 時点で post.md を選ぶよう pending に積み替える — 積み替えないと、
         # フォルダ選択が積んだ**代表画像**の pending が着地時に解決されて
         # ``file_selected`` → ``show_path`` がいま出した本文を画像で奪い返す
-        # （PR #154 の viewer-b 反復実行で実測）。ユーザー操作は飛行中の
-        # 自動選択を陳腐化させる（#148 の弁と同じ意図の、右一覧の選択を
-        # 経由しない経路）。同じ理由で代表画像プローブも失効させる
-        # （``_on_file_selected`` の明示選択と同じ扱い — レビュー 2026-07-31 #6）。
+        # （負荷下の反復実行で実測）。ユーザー操作は飛行中の
+        # 自動選択を陳腐化させる（右一覧の選択を経由しない経路）。同じ理由で
+        # 代表画像プローブも失効させる
+        # （``_on_file_selected`` の明示選択と同じ扱い）。
         self._file_list.set_pending_select(post_md)
         self._set_path_status(post_md)
         self._content.show_markdown(post_md)
-        # プレビューが本文になったので #22 の二重表示抑止を再評価する。
+        # プレビューが本文になったのでメタカードの二重表示抑止を再評価する。
         self._apply_meta_card()
 
     # ------------------------------------------------ file-detail card (右)
@@ -5806,8 +5694,10 @@ class ViewerWindow(QMainWindow):
             self._info_panel.set_file_detail(None)
             if path is not None:
                 # A meta/marker file (e.g. post.md) was explicitly selected —
-                # re-evaluate #22 suppression now that the preview changed.
+                # re-evaluate the double-display suppression now that the preview changed.
                 self._apply_meta_card()
+            # 印ストリップの対象はファイル詳細の席を読むので、席を空けた後に配り直す。
+            self._update_stage_header()
             return
         detail = FileDetail(
             path=path,
@@ -5848,8 +5738,8 @@ class ViewerWindow(QMainWindow):
     def _file_user_tags(self, path: Path) -> tuple[str, ...]:
         """The user's own tags for *path* from the in-memory map (no I/O).
 
-        UIレビュー 07-25 #13①: ユーザータグは付けても製品のどこにも出てこない
-        次元だった — 詳細カードがその表示面になる。
+        詳細カードがユーザータグの表示面になる（付けたタグが製品のどこにも
+        出てこない次元にしない）。
         """
         try:
             meta = self._post_grid.user_meta_for(path)
@@ -5860,9 +5750,9 @@ class ViewerWindow(QMainWindow):
     def _file_later(self, path: Path) -> bool:
         """The 「あとで見る」 flag for *path* from the in-memory map (no I/O).
 
-        UIレビュー 2026-08-28 N-11: the file card showed ★ + ユーザータグ but not
-        this one, so the three curation dimensions were displayed in different
-        amounts on each surface that shows them.
+        The file card shows ★ + ユーザータグ and this one too, so the three
+        curation dimensions are displayed in the same amount on each surface
+        that shows them.
         """
         try:
             _star, later = self._post_grid._curation_badge_for(path)
@@ -5911,8 +5801,8 @@ class ViewerWindow(QMainWindow):
         # Right pane rebuilt (scan landing / re-sort) — keep the image track
         # in sync (a cheap no-op while the split view is showing) and the
         # header's n/m position fresh (updated in both modes).  分割中は帯の
-        # 同期が冒頭で降りるので、そのときだけヘッダーを直接更新する（項目#108
-        # — 素直に両方呼ぶと最大化中に ``tile_paths()`` の全走査が 3 回走る）。
+        # 同期が冒頭で降りるので、そのときだけヘッダーを直接更新する（
+        # 素直に両方呼ぶと最大化中に ``tile_paths()`` の全走査が 3 回走る）。
         if not self._refresh_image_strip():
             self._update_stage_header()
 
@@ -5922,14 +5812,14 @@ class ViewerWindow(QMainWindow):
         プレビュー最大化中のみ（分割中は帯ごと非表示 — 右情報パネルの
         ファイル一覧が同役割）。中身は「現在の投稿（フォルダ）の中身のうち
         **画像・動画**」= ``_stage_media_paths(tile_paths())`` で、ヘッダーの
-        ``n/m``（``_stage_position_readout``）と母数を揃える（N-109 — 帯が
-        ``.part`` まで並べるので「3 枚あるのに 2/2」と読めていた）。歩く母集合
+        ``n/m``（``_stage_position_readout``）と母数を揃える（帯が
+        ``.part`` まで並べると「3 枚あるのに 2/2」と読める）。歩く母集合
         ``tile_paths`` そのものは変えない（``playlist ⊆ tile_paths`` の不変
-        条件 #137）。パス列不変なら ``set_images`` を呼ばず（呼ぶと取得済み
+        条件）。パス列不変なら ``set_images`` を呼ばず（呼ぶと取得済み
         サムネが全破棄され、リビルド毎にチラつくため）、1 件以下なら帯を畳む。
 
         戻り値は「帯を同期した（＝ヘッダーも更新済み）」か。呼び出し元が
-        ヘッダー更新を二重に走らせないための合図（項目#108）。
+        ヘッダー更新を二重に走らせないための合図。
         """
         strip = getattr(self, "_image_strip", None)
         if strip is None or self._ui_mode != "stage":
@@ -5947,15 +5837,14 @@ class ViewerWindow(QMainWindow):
         """右ペイン選択（= 表示中ファイル）→ 画像トラックのハイライト追従。
 
         カプセルの ‹ › / ←→ は右ペインの選択を歩む（``_on_content_navigate``）
-        ため、ここに追従させるだけで「送れば帯が動く」が成立する（UIレビュー
-        #13 の根治）。帯の追従は最大化中のみだが、ヘッダーの ``n/m`` 位置は
+        ため、ここに追従させるだけで「送れば帯が動く」が成立する。帯の追従は最大化中のみだが、ヘッダーの ``n/m`` 位置は
         分割中も常時更新する（ヘッダーは常設）。getattr ガードは __init__ を
         通さないテストハーネス向け。
 
         *paths* は呼び出し元が既に取った右ペインのタイル列（``tile_paths()``
-        はキャッシュを持たない全走査なので、あるものは使い回す — 項目#108）。
+        はキャッシュを持たない全走査なので、あるものは使い回す）。
         帯と同じメディアだけの列を渡してもよい（``_stage_position_readout``
-        が自分で ``_stage_media_paths`` を通すので冪等 — N-109）。
+        が自分で ``_stage_media_paths`` を通すので冪等）。
         """
         strip = getattr(self, "_image_strip", None)
         if strip is None:
@@ -6008,7 +5897,10 @@ class ViewerWindow(QMainWindow):
             if seat is header:
                 header.set_curation(seat_target, *values)
             else:
-                panel.set_curation_target(seat_target, *values)
+                panel.set_curation_target(
+                    seat_target, *values,
+                    display_name=self._location_label(seat_target),
+                )
 
     def _update_stage_header(
         self, paths: "list[Path] | None" = None,
@@ -6021,7 +5913,7 @@ class ViewerWindow(QMainWindow):
         が ``_stage_title_override`` を積んで再度ここを呼ぶ）。``n/m`` は
         右ペインのタイル列（= ‹ ›/←→ の画像送りが歩む列）内の現在位置。
 
-        *paths* を渡すと ``tile_paths()`` の再走査を省く（項目#108）。
+        *paths* を渡すと ``tile_paths()`` の再走査を省く。
         """
         header = getattr(self, "_stage_header", None)
         if header is None:
@@ -6029,11 +5921,8 @@ class ViewerWindow(QMainWindow):
         folder = self._current_folder or self._root
         title = ""
         if folder is not None:
-            if folder == self._default_library:
-                # 既定ライブラリはパンくず/履歴と同じ日本語表示（07-18 #6 系）。
-                title = t("viewer.main_window.library_menu")
-            else:
-                title = folder.name or str(folder)
+            # 既定ライブラリ / ZIP 展開先はパンくず・履歴と同じ友好名。
+            title = self._location_label(folder)
             override = self._stage_title_override
             if override is not None and override[0] == folder and override[1]:
                 title = override[1]
@@ -6046,10 +5935,10 @@ class ViewerWindow(QMainWindow):
         header.set_context(
             title, position, position_tooltip, back_to_media=back_to_media,
         )
-        # 全画面ボタンの予告（N-21）: 非メディア**ファイル**表示中の F11 は
+        # 全画面ボタンの予告: 非メディア**ファイル**表示中の F11 は
         # フォルダ流し見へ落ちる。判定は ``_toggle_lightbox`` と共有する。
         header.set_fullscreen_folder_mode(self._preview_is_non_media_file())
-        # 現在★の表示 (UIレビュー 07-25 #11): 0-5 キーの対象が「投稿
+        # 現在★の表示: 0-5 キーの対象が「投稿
         # フォルダ」か「プレビュー中の画像ファイル」かはフォーカス位置で
         # 変わるため、いま何に何個付いているかを見えるようにする。対象は
         # プレビューが実際に映しているもの（= 右ペインの選択、無ければ
@@ -6057,11 +5946,17 @@ class ViewerWindow(QMainWindow):
         # かつ幅が足りるときだけ**（``stage_view._sync_strip``）で、分割
         # ビューでは情報パネル側の席しか見えない — ここは席の可視性を
         # 判定せず対象と値を配るだけなので、「常設」と読まないこと。
+        subject = folder
+        if self._current_folder is None and (
+            self._post_grid.current_curation_view() is not None
+            or self._post_grid.current_recent_view() is not None
+        ):
+            subject = None  # 横断一覧で無選択: ライブラリ根を印の対象にしない
         star_target = self._current_preview_path or self._file_list.current_path()
-        if star_target is None:
-            star_target = folder
+        if star_target is None or star_target == folder:
+            star_target = subject
         if star_target is not None:
-            # 投稿本文（post.md）を表示中は投稿フォルダの印（N-51）。
+            # 投稿本文（post.md）を表示中は投稿フォルダの印。
             star_target = curation_subject(star_target)
         # 情報パネルの席は「パネルが説明しているもの」に付く（カードの排他と
         # 同じ規則 — ``_refresh_file_detail`` の対象）: ファイルカードが出て
@@ -6069,10 +5964,10 @@ class ViewerWindow(QMainWindow):
         # 映しているだけのときも同じ）。ヘッダーの席はプレビューが映している
         # もの（= プレビューでの 0-5 と同じ対象）。
         detail = self._pending_file_detail.peek()
-        panel_target = detail.path if detail is not None else (folder or star_target)
+        panel_target = detail.path if detail is not None else (subject or star_target)
         self._sync_curation_strips(header, star_target, panel_target)
-        # 送りボタンの活性 (UIレビュー 07-25 #15): 歩ける先が無いとき
-        # （空グリッド・端）は押せる見た目のまま無反応だった。``step_selection``
+        # 送りボタンの活性: 歩ける先が無いとき
+        # （空グリッド・端）に押せる見た目のまま無反応にしない。``step_selection``
         # と同じ母集団（グリッドのタイル列）・同じ規則で判定する — 無選択でも
         # ``step_selection`` は端のタイルを掴んで動くので、タイルさえあれば
         # 両方向とも歩ける（無効化するのは空グリッドだけ）。
@@ -6091,7 +5986,7 @@ class ViewerWindow(QMainWindow):
             )
 
     def _preview_is_non_media_file(self) -> bool:
-        """表示中が「画像・動画ではない**ファイル**」か（N-21 の予告条件）.
+        """表示中が「画像・動画ではない**ファイル**」か（全画面ボタンの予告条件）.
 
         フォルダ選択（代表画像プレビュー / フォルダプレビュー）は対象外 —
         そこでの F11 は元々「このフォルダを流し見」が素直な期待で、G05 の
@@ -6124,10 +6019,9 @@ class ViewerWindow(QMainWindow):
     ) -> "tuple[str, str, bool]":
         """ヘッダーの位置カウンタ ``(表示文字列, ツールチップ, 戻り導線)``.
 
-        **表示層だけをメディア基準にする**（UIレビュー 2026-08-28 N-22② —
-        P5 案B）。歩く母集合そのもの（``ChildrenGrid.tile_paths`` = ‹ ›/←→ と
+        **表示層だけをメディア基準にする**。歩く母集合そのもの（``ChildrenGrid.tile_paths`` = ‹ ›/←→ と
         選択同期が使う列）は**変えない** — その列は ``playlist ⊆ tile_paths``
-        の不変条件（#137）を担っており、全画面を閉じたときの着地ファイルが
+        の不変条件を担っており、全画面を閉じたときの着地ファイルが
         必ず右ペインのタイルとして存在することを保証しているため。ここで
         変わるのはヘッダーに見える数字だけで、``.part`` / ZIP / PDF /
         テキストのような非メディアを数に含めないので、分割・最大化と全画面の
@@ -6135,11 +6029,11 @@ class ViewerWindow(QMainWindow):
 
         表示中が画像・動画でないときは位置を出さず、代わりに:
 
-        * ``post.md`` 本文 → 「投稿本文」+ 戻り導線 True（N-87 — post.md は
-          母集合の外なので n/m もトラックのハイライトも消え、最大化中の
-          現在地が完全に無所属になっていた）
-        * フォルダ（右一覧のサブフォルダ行）→ 「フォルダ」（N-137）
-        * ``.part`` → 「ダウンロード途中」（N-114）
+        * ``post.md`` 本文 → 「投稿本文」+ 戻り導線 True（post.md は
+          母集合の外なので n/m もトラックのハイライトも消え、何も出さないと
+          最大化中の現在地が完全に無所属になる）
+        * フォルダ（右一覧のサブフォルダ行）→ 「フォルダ」
+        * ``.part`` → 「ダウンロード途中」
         * それ以外の非メディア → 種別ラベル（「ZIP ファイル」…）
         """
         if current is None:
@@ -6163,10 +6057,10 @@ class ViewerWindow(QMainWindow):
                 bool(media),
             )
         # 右一覧のサブフォルダ行を選ぶと ``current`` はディレクトリになる。
-        # 拡張子をそのまま種別にすると「作品集 vol.2」が種別「2」になる
-        # （N-137）。判定はインメモリの ``entry_for`` のみ — GUI スレッドで
+        # 拡張子をそのまま種別にすると「作品集 vol.2」が種別「2」になる。
+        # 判定はインメモリの ``entry_for`` のみ — GUI スレッドで
         # ``is_dir()`` を呼ぶと到達不能 NAS で窓が止まる。未 populate で
-        # ``None`` のときは従来どおり種別ラベルへ落ちる。
+        # ``None`` のときは種別ラベルへ落ちる。
         entry = self._file_list.entry_for(current)
         if entry is not None and entry.is_dir:
             return (
@@ -6175,7 +6069,7 @@ class ViewerWindow(QMainWindow):
                 False,
             )
         if current.suffix.lower() == PART_SUFFIX:
-            # 拡張子をそのまま見せると「PART」としか読めない（N-114）。
+            # 拡張子をそのまま見せると「PART」としか読めない。
             # 書きかけファイルであることは健全性チェックと同じ語彙で言う。
             return (
                 t("viewer.stage_view.position_part"),
@@ -6198,13 +6092,13 @@ class ViewerWindow(QMainWindow):
         )
 
     def _on_stage_back_to_media(self) -> None:
-        """post.md 本文表示中の「画像に戻る」→ 先頭の画像・動画を選び直す（N-87）."""
+        """post.md 本文表示中の「画像に戻る」→ 先頭の画像・動画を選び直す."""
         media = self._stage_media_paths(self._file_list.tile_paths())
         if media:
             self._file_list.select_path(media[0])
 
     def _reset_filmstrip_failures(self) -> None:
-        """画像トラックの失敗確定セルを再試行対象へ戻す（項目17）.
+        """画像トラックの失敗確定セルを再試行対象へ戻す.
 
         F5 リロード / ``notify_library_changed`` の再スキャン入口から呼ぶ。
         パス列が不変の再スキャンでは ``_refresh_image_strip`` が
@@ -6242,7 +6136,7 @@ class ViewerWindow(QMainWindow):
                 folder_cache=self._folder_cache,
             )
             self._strip_loader.loaded.connect(self._on_stage_thumb_loaded)
-            # デコード失敗（破損画像 / フォルダに絵が無い）を確定させる（項目17）。
+            # デコード失敗（破損画像 / フォルダに絵が無い）を確定させる。
             # 未接続だと失敗セルが永久プレースホルダのまま「読み込み中」に見え続け、
             # 一度 request したパスは再要求もされない。グリッド側 C03
             # （mark_thumb_failed → 静的グリフ）と同じ劣化に揃える。
@@ -6325,7 +6219,7 @@ class ViewerWindow(QMainWindow):
             self._info_panel.set_file_thumbnail(path, QPixmap.fromImage(image))
 
     def _on_stage_thumb_failed(self, key: str) -> None:
-        """画像トラックのデコード失敗セルを静的な失敗グリフで確定させる（項目17）.
+        """画像トラックのデコード失敗セルを静的な失敗グリフで確定させる.
 
         ``FilmstripView`` の空セルは平坦なプレースホルダ塗りで、失敗しても
         「読み込み中」と区別が付かず、一度 request 済みのパスは（``set_images``
@@ -6334,11 +6228,11 @@ class ViewerWindow(QMainWindow):
         ことで、① セルが読み込み中に見え続けるのを止め、② pixmap 常駐により
         再要求を抑止する — グリッド側 C03（``mark_thumb_failed`` → 静的グリフ）と
         同じ劣化に揃える。``mark_failed`` は失敗として記録もするので、F5 再スキャン
-        （``reset_failed``）でこのセルだけ再デコードへ戻せる（項目17 — パス列不変の
+        （``reset_failed``）でこのセルだけ再デコードへ戻せる（パス列不変の
         再スキャンでは ``set_images`` が呼ばれずグリフが常駐し続けるため）。
         GUI スレッド専用（QPixmap 生成のため）。
 
-        **フォルダは失敗ではない**（UIレビュー 2026-08-28 N-84）: 代表画像を
+        **フォルダは失敗ではない**: 代表画像を
         持たないフォルダは ``resolve_in_folder`` の解決に失敗してここへ来るが、
         それは「絵が無い」だけで破損ではない。凡例に 1 行も無い「×」（慣習的に
         破損を意味する）で描くと、左グリッドが同じ対象を金のフォルダ図像で
@@ -6361,10 +6255,9 @@ class ViewerWindow(QMainWindow):
             return
         if key.startswith(self._DETAIL_KEY_PREFIX):
             # 情報パネル詳細カードのサムネ枠（最低 ``_DETAIL_THUMB_EDGE`` の
-            # QLabel）も同じ失敗グリフで確定させる（レビュー 2026-07-31 #60 —
-            # 成功側の ``_on_stage_thumb_loaded`` は両プレフィクスを振り分けて
-            # いるのに失敗側が片方だけで、破損画像・0 バイトファイルを選ぶ
-            # たびに 200px の空白が確定も再試行もされないまま残っていた）。
+            # QLabel）も同じ失敗グリフで確定させる（成功側の
+            # ``_on_stage_thumb_loaded`` と対 — 片方だけだと破損画像・0 バイト
+            # ファイルを選ぶたびに 200px の空白が確定も再試行もされないまま残る）。
             # 宛先が別ファイルへ移っていれば ``set_file_thumbnail`` が no-op。
             path = Path(key[len(self._DETAIL_KEY_PREFIX):])
             self._info_panel.set_file_thumbnail(
@@ -6394,7 +6287,7 @@ class ViewerWindow(QMainWindow):
         ハードコードしない（design.md）。セル全面の淡いプレースホルダ地に、
         中央へニュートラルな「×」を重ねて「読み込み中」の平坦プレースホルダと
         視覚的に区別する。*strip* 省略時は画像トラック。*edge* を渡すと帯以外
-        （情報パネルの詳細サムネ枠 — #60）の寸法でも同じ絵を描ける。
+        （情報パネルの詳細サムネ枠）の寸法でも同じ絵を描ける。
         """
         from PySide6.QtGui import QColor, QPainter
 
@@ -6419,7 +6312,7 @@ class ViewerWindow(QMainWindow):
         return pm
 
     def _stage_folder_glyph(self, strip=None, *, edge: int | None = None) -> QPixmap:
-        """代表画像を持たないフォルダ用の中立フォルダ図像（N-84）.
+        """代表画像を持たないフォルダ用の中立フォルダ図像.
 
         失敗の「×」でも書類（``_stage_doc_glyph``）でもなく、**左グリッドと
         同じ金のフォルダ図像**を描いて 2 面の表現を揃える。silhouette は
@@ -6515,7 +6408,7 @@ class ViewerWindow(QMainWindow):
             # is browsing.
             lb.set_post_provider(self._post_grid.folder_paths)
             lb.set_root_provider(lambda: self._root)
-            # 現在画像のスターを左下カウンタへ併記する (UIレビュー 07-25 #46) —
+            # 現在画像のスターを左下カウンタへ併記する —
             # 左ペインのインメモリ map からの同期読み取り（sqlite / NAS なし）。
             lb.set_star_provider(self._post_grid._star_of)
             lb.set_slideshow_interval(self._state.slideshow_interval_sec)
@@ -6527,7 +6420,7 @@ class ViewerWindow(QMainWindow):
             lb.apply_media_settings(self._state)
             # 閲覧モードの ImageView は中央ペインとは別インスタンスなので、
             # ImageView 系のユーザー設定（キャッシュ / 先読み / ズーム維持 /
-            # ミニマップ）も同じく流し込む（項目#29 = #21/#34）— これが無いと
+            # ミニマップ）も同じく流し込む — これが無いと
             # 設定が閲覧モードにだけ届かず、モジュール既定のまま動き続ける。
             lb.apply_view_state(self._state)
             lb.media_loop_toggled.connect(self._on_media_loop_toggled)
@@ -6536,7 +6429,7 @@ class ViewerWindow(QMainWindow):
                 self._on_media_playback_rate_changed
             )
             # 全画面の ImageView 右クリックで切り替えたビュー設定も中央ペインと
-            # 同じハンドラで ViewerState へ書き戻す（N-78 — これが無いと押せる
+            # 同じハンドラで ViewerState へ書き戻す（これが無いと押せる
             # のに保存されず、次回オープン時 apply_view_state が上書きする）。
             lb.image_zoom_persist_toggled.connect(self._on_image_zoom_persist_toggled)
             lb.image_minimap_toggled.connect(self._on_image_minimap_toggled)
@@ -6555,7 +6448,7 @@ class ViewerWindow(QMainWindow):
                 )
                 lb.star_key_requested.connect(
                     # notify=False: ライトボックスは中央オーバーレイで自前に
-                    # 確認を出す（UIレビュー 07-25 #12 のトーストは分割 /
+                    # 確認を出す（★の確認トーストは分割 /
                     # 最大化のプレビュー面が対象）。
                     lambda star, path: self._set_current_star(
                         star, path, notify=False
@@ -6574,7 +6467,7 @@ class ViewerWindow(QMainWindow):
         a single image.
 
         非メディアを**表示中**にこの経路へ落ちるときだけは、意図した機能でも
-        「別のファイルが無言で開いた」と読まれる（N-21）。ボタン側のラベルは
+        「別のファイルが無言で開いた」と読まれる。ボタン側のラベルは
         ``_sync_stage_fullscreen_mode`` が予告し、押下時はライトボックス着地
         後に一言告げる。
         """
@@ -6582,9 +6475,9 @@ class ViewerWindow(QMainWindow):
             self._lightbox.close()
             return
         path = self._current_preview_path
-        # 右一覧でサブフォルダを選んでいるなら、流し見の対象は**その**フォルダ
-        # （N-14）。フォルダ行の選択は ``_current_folder`` を動かさないので、
-        # 従来は親フォルダが開いて「隣の投稿まで混ざる」と読まれていた。判定は
+        # 右一覧でサブフォルダを選んでいるなら、流し見の対象は**その**フォルダ。
+        # フォルダ行の選択は ``_current_folder`` を動かさないので、
+        # それを使うと親フォルダが開いて「隣の投稿まで混ざる」と読まれる。判定は
         # 右一覧のインメモリ表（``entry_for``）だけで行う — GUI スレッドで
         # ``is_dir()`` を呼ぶと到達不能 NAS で窓が止まる。拡張子付きのフォルダ名
         # （``2024.mp4`` 等）がメディア扱いで開かれる退化も同じガードで塞がる。
@@ -6596,8 +6489,13 @@ class ViewerWindow(QMainWindow):
             return
         else:
             folder = self._current_folder or self._root
+        rep = self._preview_fallback.shown
+        if rep is not None and rep.suffix.lower() in _LIGHTBOX_MEDIA_SUFFIXES:
+            # 代表画像を表示中なら見えている画像から入る（直下が空のフォルダで空カードにしない）。
+            self._open_lightbox(rep)
+            return
         if folder is not None:
-            # 入場時の態を控える（N-139 — 復路が再ルートになる場合の戻し先）。
+            # 入場時の態を控える（復路が再ルートになる場合の戻し先）。
             # getattr ガードは __init__ を通さないテストハーネス向け。
             self._lightbox_entry_mode = getattr(self, "_ui_mode", "browse")
             self._pause_centre_media_for_lightbox()
@@ -6608,22 +6506,22 @@ class ViewerWindow(QMainWindow):
             )
             self._ensure_lightbox().open_folder(folder, notice)
             return
-        # 失敗通知は共通ファネルへ（N-74 — トースト → ステータス → ログの
+        # 失敗通知は共通ファネルへ（トースト → ステータス → ログの
         # 3 段。ステータスバー直書きは常設のパス表示を潰す）。
         notify_failure(self, t("viewer.main_window.no_fullscreen_image"))
 
     def _search_result_playlist(self, path: Path) -> "list[Path] | None":
-        """G07 の確定プレイリスト — 検索/絞り込み結果の流し見 (#54).
+        """G07 の確定プレイリスト — 検索/絞り込み結果の流し見.
 
         左ペインが検索次元をエンゲージしている（``search_engaged``）間は、
         表示中のメディアタイルの並びがそのまま閲覧モードのプレイリストになる
         — フォルダ再列挙も投稿横断も行わず、「絞り込んだ結果だけを流し見」する
         （``ChildrenGrid.media_tile_paths`` / ``LightboxWindow.open_at`` の
-        ``playlist`` 経路。従来この配線が無く、検索結果からの F11 はフォルダ
-        完全列挙へフォールバックしてヒットしなかった画像も混ざっていた）。
+        ``playlist`` 経路。この配線が無いと、検索結果からの F11 はフォルダ
+        完全列挙へフォールバックしてヒットしなかった画像も混ざる）。
 
         通常ブラウズ（検索なし）と、起点が結果に含まれない場合は ``None`` を
-        返し、従来どおりフォルダ列挙のプレイリストに委ねる。
+        返し、フォルダ列挙のプレイリストに委ねる。
         """
         if not self._post_grid.search_engaged():
             return None
@@ -6635,7 +6533,7 @@ class ViewerWindow(QMainWindow):
         return playlist
 
     def _pause_centre_media_for_lightbox(self) -> "MediaResume | None":
-        """閲覧モードを開く前に中央プレビューの動画を一時停止する（項目#30）.
+        """閲覧モードを開く前に中央プレビューの動画を一時停止する.
 
         閲覧モードは自前の ``MediaView``（2 つ目の ``QMediaPlayer`` +
         ``QAudioOutput``）を持ち、別トップレベルウィンドウなので
@@ -6650,17 +6548,16 @@ class ViewerWindow(QMainWindow):
 
         戻り値は一時停止した動画の :class:`~.lightbox.MediaResume` — 全画面側の
         ``MediaView`` は別インスタンスで位置を知らないので、その値を
-        引き継がせるために返す (UIレビュー 2026-08-28 N-142)。
+        引き継がせるために返す。
 
-        「止められたか」と「位置を読めるか」は別の問い（レビュー 2026-09-03
-        項目 #77）。``pause_media_playback()`` は既に一時停止中なら no-op で
+        「止められたか」と「位置を読めるか」は別の問い。``pause_media_playback()`` は既に一時停止中なら no-op で
         ``False`` を返すので、その戻り値でゲートすると **ユーザーが Space で
         自分で止めてから F11 したときだけ** 位置が引き継がれず 0:00 から
         始まる（再生中なら引き継ぐので挙動が反転する）。復路
         （:meth:`_apply_lightbox_media_resume`）はパス一致だけで判定して
         いるので、往路も再生状態を見ない。未構築 / 未ロードなら
         ``media_current_path()`` が ``None`` を返し、引き継ぎ無し
-        （``None``）として従来どおり 0 から流し直す。
+        （``None``）として 0 から流し直す。
         """
         self._content.pause_media_playback()
         self._content.pause_image_animation()
@@ -6672,12 +6569,12 @@ class ViewerWindow(QMainWindow):
     def _open_lightbox(
         self, path: Path, playlist: "list[Path] | None" = None,
     ) -> None:
-        # 入場時の態を控える（N-139 — 復路が再ルートになる場合の戻し先）。
+        # 入場時の態を控える（復路が再ルートになる場合の戻し先）。
         # getattr ガードは __init__ を通さないテストハーネス向け。
         self._lightbox_entry_mode = getattr(self, "_ui_mode", "browse")
         paused_at = self._pause_centre_media_for_lightbox()
         lb = self._ensure_lightbox()
-        # 中央で一時停止した動画の位置を全画面へ引き継ぐ (N-142)。
+        # 中央で一時停止した動画の位置を全画面へ引き継ぐ。
         lb.set_resume_media(paused_at)
         if playlist is not None:
             # G07: search / filter result — the flat displayed list is the
@@ -6691,7 +6588,7 @@ class ViewerWindow(QMainWindow):
         lb.open_at(path, siblings if index >= 0 else None)
 
     def _apply_lightbox_media_resume(self, resume: "MediaResume | None") -> None:
-        """全画面側で進んだ再生位置を中央プレビューへ当てる (N-142).
+        """全画面側で進んだ再生位置を中央プレビューへ当てる.
 
         「引き継ぎ無し」を表すのは **値そのものが無いこと**だけ——往路
         （``MediaView`` の保留 seek）と同じ裁定で、``0`` は番兵ではなく
@@ -6714,8 +6611,10 @@ class ViewerWindow(QMainWindow):
         # background) so closing the lightbox lands where the user was.
         self._post_grid.select_path(folder)
 
-    def _on_lightbox_closed(self, folder: object, image: object) -> None:
-        # 全画面で進めた動画の再生位置を中央プレビューへ返す (N-142) —
+    def _on_lightbox_closed(
+        self, folder: object, image: object, crossed: bool,
+    ) -> None:
+        # 全画面で進めた動画の再生位置を中央プレビューへ返す —
         # 往路だけ引き継ぐと「行きは続きから / 帰りは止めた位置」と
         # 位置が 2 回飛ぶ。パネル同期より先に控えておき、着地後に
         # 「中央が同じファイルを開いたままなら」だけ当てる（別の
@@ -6725,6 +6624,11 @@ class ViewerWindow(QMainWindow):
         self._apply_lightbox_media_resume(
             lb.media_playback_position() if lb is not None else None
         )
+        # 往路で止めた中央のアニメ GIF / WebP を戻す。同じ画像のまま閉じると
+        # 下の再選択は emit せず中央は作り直されないので、ここで戻さないと
+        # 止まったまま残る（別の画像へ移っていれば QMovie は作り直し済みで
+        # no-op）。
+        self._content.resume_image_animation()
         # Sync the final position back into the panes: the post folder in the
         # left pane (when it changed) and the last-viewed file in the right
         # pane — whose selection also routes the centre preview to it.
@@ -6732,6 +6636,24 @@ class ViewerWindow(QMainWindow):
             return
         target = folder if isinstance(folder, Path) else image.parent
         if target != self._current_folder:
+            # 横断していない（右一覧のサブフォルダ行から F11 した場合は入場
+            # フォルダ自体が ``_current_folder`` の子）— 下の再ルートに落とすと
+            # 開いて閉じただけで左グリッドが投稿の中へ降り、検索が破棄され
+            # 履歴も 1 段積まれる。右一覧側で選び直す（画像が無ければフォルダ行）。
+            if not crossed:
+                if not self._file_list.select_path(image):
+                    self._file_list.select_path(target)
+                return
+            # 検索結果から開いた全画面（G07）の確定プレイリストは複数フォルダに
+            # 跨るので、閉じた folder が ``_current_folder`` と違っても横断では
+            # ない。検索中の左グリッドはファイルの
+            # タイルを持つ — 最後に見た画像のタイルを選べばそれが着地で、
+            # ``file_selected`` が右一覧・中央まで追従させる。フォルダの
+            # ``select_path`` は必ず失敗し、下の再ルートが検索を破棄してしまう。
+            if self._post_grid.search_engaged() and self._post_grid.select_path(
+                image
+            ):
+                return
             # The DFS lightbox can cross into a deeper / different-level
             # folder that isn't shown as a tile under the current root.  When
             # ``select_path`` can't find it there, re-root one level up so it
@@ -6742,19 +6664,19 @@ class ViewerWindow(QMainWindow):
                 # Re-root repopulates the panes asynchronously; selecting
                 # the exact image would race that scan, so land the user
                 # on the folder (its default preview) and stop here.
-                # 事前の同期 ``is_dir`` ゲートは置かない (レビュー 2026-07-31
-                # #7) — 消失時は set_root の単発ゲートが I07 プロンプトで
-                # 応答する（従来は無言でファイル一覧の再選択に落ちていた）。
+                # 事前の同期 ``is_dir`` ゲートは置かない — 消失時は
+                # set_root の単発ゲートが I07 プロンプトで応答する（無言で
+                # ファイル一覧の再選択に落とさない）。
                 self.set_root(
                     target.parent, push_history=True, pending_select=target
                 )
                 # 再ルートは「ナビゲーションは分割へ着地する」既定に従って
                 # 最大化を解く。全画面へ最大化から入っていたなら態を戻す
-                # （N-139）— ``_stage_settle_pending`` を立てるのが要点で、
+                # — ``_stage_settle_pending`` を立てるのが要点で、
                 # 再ルートは非同期なので着地時に保持対象が消えていれば
                 # ``WindowStatus.settle_stage_after_scan`` が分割へ落とす安全弁
                 # に乗る。
-                # 履歴は再ルート側が既に push している（項目#186）。
+                # 履歴は再ルート側が既に push している。
                 if getattr(self, "_lightbox_entry_mode", "browse") == "stage":
                     self._stage_settle_pending = True
                     self._enter_stage_mode(push_history=False)
@@ -6797,17 +6719,16 @@ class ViewerWindow(QMainWindow):
     def _rebuild_recent_menu(self) -> None:
         """Repopulate the ファイル → 最近開いたフォルダ submenu from state.
 
-        Deliberately NAS-free (#10): every entry is added enabled with **no
+        Deliberately NAS-free: every entry is added enabled with **no
         ``is_dir`` check** — a per-entry stat here runs on the GUI thread at
-        startup / on every root change, and an offline NAS share froze the
-        whole window for its timeout × up to 10 entries.  A vanished path is
+        startup / on every root change, and an offline NAS share would freeze
+        the whole window for its timeout × up to 10 entries.  A vanished path is
         handled at click time instead: ``_on_root_change_requested`` →
-        ``set_root`` warns and leaves the trail + MRU untouched (#6).  Menu
+        ``set_root`` warns and leaves the trail + MRU untouched.  Menu
         building must stay NAS-free (same rule as ``context_menus.py``).
         """
         menu = self._recent_menu
         menu.clear()
-        menu.setToolTipsVisible(True)
         if not self._state.recent_roots:
             act_empty = QAction(t("viewer.common.no_history"), self)
             act_empty.setEnabled(False)
@@ -6826,49 +6747,31 @@ class ViewerWindow(QMainWindow):
     # ------------------------------------------------------- libraries (M02)
 
     def _compute_library_bases(self) -> list[tuple[Path, str]]:
-        """Library roots the breadcrumb renders the trail relative to (#5/#6).
+        """Library roots the breadcrumb renders the trail relative to.
 
-        The default library (``paths.library``) is always first, labelled with
-        the Japanese 「ライブラリ」 so the English folder name never appears as
-        the current location (UIレビュー #6).  Each user-registered library root
-        (M02) follows, labelled with its own folder name — disambiguated to
-        ``親/名前`` when two registered roots share a tail
-        (:func:`~snappix.common.fsutil.tail_display_labels`; ファイル ▸
-        ライブラリ submenu も同じ表を使う).  Deduped by path so a
-        user who registered the default library keeps the Japanese label.  No
-        filesystem I/O — pure path arithmetic, so it stays NAS-free.
+        「基準パス → 友好ラベル」の表そのもの（正本は
+        :func:`~snappix.viewer.locations.location_bases`）— ZIP 展開先
+        （アーカイブ名）→ 既定ライブラリ（「ライブラリ」）→ 登録ライブラリ
+        （末尾フォルダ名、衝突時のみ ``親/名前``）。パンくずの基準にも、
+        各面の場所の名乗り（:meth:`_location_label`）にも同じ表を使う。
+        No filesystem I/O — pure path arithmetic, so it stays NAS-free.
+        getattr ガードは構築順（``_library_roots`` は ``_build_ui`` 後に張られる）と、
+        ``__init__`` を通さないテストハーネス向け。
         """
-        # ZIP ドリルインの展開先は「そのアーカイブが境界」— ``data/tmp`` 配下の
-        # 内部パスなので、基準に載せないとパンくずが生の temp パスを出し、
-        # ``_can_go_up`` が段数 > 1 を返して ↑ / Alt+Up / パンくず祖先クリックが
-        # アプリ自身の ``data/``（user_meta.db / 各キャッシュ / logs）へ降りて
-        # しまう（``last_root`` に焼き付くので次回起動もそこで開く）。タイトル
-        # (:meth:`_sync_window_title`) と履歴 (:meth:`_history_root_name`) は
-        # 既に ``_zip_temp_dirs`` で友好名を出しており、その対の片側欠落。
-        bases: list[tuple[Path, str]] = [
-            (
-                temp_dir,
-                t("viewer.main_window.zip_history_label", name=zip_path.name),
-            )
-            for temp_dir, zip_path in getattr(self, "_zip_temp_dirs", {}).items()
-        ]
-        bases.append(
-            (self._default_library, t("viewer.main_window.library_menu"))
+        return location_bases(
+            getattr(self, "_zip_temp_dirs", {}),
+            self._default_library,
+            getattr(self, "_library_roots", ()),
         )
-        seen = {self._default_library}
-        labels = tail_display_labels(list(self._library_roots))
-        for raw in self._library_roots:
-            p = Path(raw)
-            if p in seen:
-                continue
-            seen.add(p)
-            bases.append((p, labels[raw]))
-        return bases
+
+    def _location_label(self, path: Path) -> str:
+        """場所の表示名（窓の全ての面がこれ 1 本で名乗る — ``locations``）."""
+        return location_label(path, self._compute_library_bases())
 
     def _refresh_library_bases(self) -> None:
-        """Push the current library roots to the breadcrumb (#5/#6)."""
+        """Push the current library roots to the breadcrumb."""
         self._post_grid.breadcrumb.set_library_bases(self._compute_library_bases())
-        # ライブラリ登録の増減は「↑」の停止条件を変える（UIレビュー 07-25 #4-③）。
+        # ライブラリ登録の増減は「↑」の停止条件を変える。
         if getattr(self, "_history", None) is not None:
             self._update_nav_buttons()
 
@@ -6887,17 +6790,16 @@ class ViewerWindow(QMainWindow):
         NAS-free like ``_rebuild_recent_menu``: every registered root is added
         enabled with **no ``is_dir`` check** (a per-entry stat on the GUI thread
         would freeze the window on an offline share).  A vanished path is caught
-        at click time by ``set_root`` (#6).  Unlike the auto-tracked MRU, this
+        at click time by ``set_root``.  Unlike the auto-tracked MRU, this
         list is explicit — the user registers / removes roots — so the entries
         act as durable "library switch" targets.
 
         ラベルは生パス全文ではなく「末尾フォルダ名（衝突時のみ 親/名前）」
-        （UIレビュー 2026-08-28 後続裁定 — N-42 系統の統一。レール / パンくず
-        基点 / ライブラリ管理と同じ規則で、生パス全文はツールチップが持つ）。
+        （レール / パンくず基点 / ライブラリ管理と同じ規則で、生パス全文は
+        ツールチップが持つ）。
         """
         menu = self._library_menu
         menu.clear()
-        menu.setToolTipsVisible(True)
         labels = tail_display_labels(list(self._library_roots))
         for raw in self._library_roots:
             act = QAction(labels[raw], self)
@@ -6918,12 +6820,37 @@ class ViewerWindow(QMainWindow):
         )
         act_register.triggered.connect(self._register_current_library)
         menu.addAction(act_register)
+        self._act_library_register = act_register
+        self._sync_library_register_action()
         act_manage = QAction(menu_label("viewer.library_dialog.title"), self)
         act_manage.setEnabled(bool(self._library_roots))
         act_manage.triggered.connect(self._manage_libraries)
         menu.addAction(act_manage)
         # Keep the ナビレール's ライブラリ section in step with this submenu.
         self._refresh_nav_rail_libraries()
+
+    def _root_is_ephemeral(self) -> bool:
+        """今のルートが閉じると消える ZIP 展開先か（永続化の席が引く 1 本）."""
+        return is_zip_temp_path(getattr(self, "_root", None))
+
+    def _refuse_ephemeral_root(self) -> bool:
+        """ZIP 展開先なら登録を断って案内する（断ったら ``True``）.
+
+        メニュー項目は無効化しているが、項目を経由しない呼び出しにも同じ
+        判定を効かせる（書き込み口で拒否する）。
+        """
+        if not self._root_is_ephemeral():
+            return False
+        self._show_toast(t("viewer.main_window.zip_temp_not_registrable"), "info")
+        return True
+
+    def _sync_library_register_action(self) -> None:
+        """「現在のフォルダをライブラリに登録」の活性を今のルートへ合わせる."""
+        act = getattr(self, "_act_library_register", None)
+        if act is None:
+            return
+        root = getattr(self, "_root", None)
+        act.setEnabled(root is not None and not self._root_is_ephemeral())
 
     def _register_current_library(self) -> None:
         """Register the current root as a library (M02)."""
@@ -6932,18 +6859,18 @@ class ViewerWindow(QMainWindow):
         # として登録されてしまう）。同ファイル内で ``_root`` を None 込みで
         # 扱う述語（``_can_go_up`` / ``_sync_bookmark_actions``）と前提を揃える。
         root = getattr(self, "_root", None)
-        if root is None:
+        if root is None or self._refuse_ephemeral_root():
             return
         target = str(root)
         # 書き込みは ``shared_prefs.json`` の 1 本の flusher を通る（テーマ /
-        # ライブラリ管理と共有 — レビュー 2026-09-03 項目#52）。**投げっぱなし
+        # ライブラリ管理と共有）。**投げっぱなし
         # にはしない**: ``BoundedFlusher.run`` は先行フラッシュが飛行中だと
         # ``work`` を呼ばずに落とす仕様で、``add_library_root`` は差分書き込み
         # （後続のスナップショット保存に相乗りできない）なので、捨てられると
         # 登録は恒久に消える。``library_roots`` は ``viewer_state.json`` 側に
         # 対応フィールドが無く救済もされない。待ちは有界（ブックマーク /
         # 保存した検索と同じ ``_SETTINGS_PERSIST_WAIT_S``）で、落ちたときは
-        # 成功トーストを出さず常駐警告へ回す（N-07）。
+        # 成功トーストを出さず常駐警告へ回す。
         landed, _ = self._shared_prefs_flush.run(
             lambda: add_library_root(target),
             wait_s=_SETTINGS_PERSIST_WAIT_S,
@@ -6962,17 +6889,41 @@ class ViewerWindow(QMainWindow):
     def _manage_libraries(self) -> None:
         """Open the library-management dialog (list / delete / reorder — M02).
 
-        項目#80/#82: ダイアログへ渡す baseline は起動時スナップショット
+        ダイアログへ渡す baseline は起動時スナップショット
         （``self._library_roots``）ではなく**開く瞬間のディスク実データ**、
         OK 時の書き込みは全置換ではなく「baseline との差分 + 提示順」を
         ``apply_library_roots`` で最新ディスクリストへ適用する。これで
         起動時に shared_prefs.json を読めなかったセッション（degraded）でも
         空スタンドイン由来のリストが実データを置換できず、他プロセスが
         途中で足したルートも保存される。
+
+        baseline の**読み取り**も書き込みと同じ ``_shared_prefs_flush`` の
+        有界ワーカーに載せる。data/ が NAS に
+        載る運用では 1 回の I/O が数十秒塞がり得るので、開く側だけ GUI
+        スレッドの同期読みだと「OK 後の書き込みは 5 秒で劣化するのに、
+        ダイアログが出るまで窓全体が固まる」片側欠落になる。予算切れ・
+        例外・読めなかった（degraded の空スタンドイン）・先行書き込みへの
+        合流（値が返らない）のときは in-memory の ``self._library_roots``
+        を baseline に劣化させる — 書き込みは ``apply_library_roots`` の
+        差分適用なので、baseline が古くてもディスク側の未知のルートは
+        消えない。
         """
         from .library_dialog import LibraryDialog
 
-        baseline = self._load_library_roots()
+        def _read_disk_roots() -> list[str] | None:
+            prefs = load_shared_prefs()
+            if prefs._degraded_load:
+                return None
+            return list(prefs.library_roots)
+
+        read_ok, disk_roots = self._shared_prefs_flush.run(
+            _read_disk_roots, wait_s=_SETTINGS_PERSIST_WAIT_S,
+        )
+        baseline = (
+            list(disk_roots)
+            if read_ok and disk_roots is not None
+            else list(self._library_roots)
+        )
         dlg = LibraryDialog(baseline, self)
         if dlg.exec() == QDialog.Accepted:
             result = dlg.result_roots()
@@ -6981,8 +6932,7 @@ class ViewerWindow(QMainWindow):
             added = [r for r in result if r not in base_set]
             removed = [r for r in baseline if r not in result_set]
             # ここは差分適用の**戻り値**（他プロセスの追加を含む最新リスト）を
-            # メニューへ反映するので待つ。待ちは有界（レビュー 2026-09-03
-            # 項目#52）— 死んだ共有で無限に固まる代わりに、5 秒でユーザーの
+            # メニューへ反映するので待つ。待ちは有界 — 死んだ共有で無限に固まる代わりに、5 秒でユーザーの
             # 選んだリストを表示して先へ進む（書き込みはワーカーが続ける）。
             landed, merged = self._shared_prefs_flush.run(
                 lambda: apply_library_roots(
@@ -6996,7 +6946,7 @@ class ViewerWindow(QMainWindow):
             if not landed:
                 # 先行フラッシュが飛行中だと ``run`` は work を呼ばずに落とす
                 # ため、削除・並べ替えがディスクに載っていない。黙って閉じない
-                # （ブックマーク / 保存した検索と同じ N-07 の成否表示契約）。
+                # （ブックマーク / 保存した検索と同じ成否表示契約）。
                 self._notify_persist_failed()
         dlg.deleteLater()
 
@@ -7011,7 +6961,6 @@ class ViewerWindow(QMainWindow):
         """
         menu = self._saved_search_menu
         menu.clear()
-        menu.setToolTipsVisible(True)
         # Keep the ナビレール's 保存した検索 section in step with this submenu
         # (before the early-return branch below so it fires either way).
         self._refresh_nav_rail_saved_searches()
@@ -7047,11 +6996,11 @@ class ViewerWindow(QMainWindow):
             )
             return
         payload = serialize_search_snapshot(snap)
-        # UIレビュー 07-25 #141: 命名欄が空欄で出るため、「何を保存しようと
-        # しているのか」を思い出しながら名前を考える必要があった。条件チップと
-        # 同じ語彙の要約 (#34 と同じ関数) を既定名として置く — そのまま OK でも
+        # 命名欄が空欄だと「何を保存しようとしているのか」を思い出しながら
+        # 名前を考える必要がある。条件チップと同じ語彙の要約（保存した検索の
+        # ツールチップと同じ関数）を既定名として置く — そのまま OK でも
         # 意味の通る名前になり、書き換えても構わない。
-        # 静的 getText ではなく dialogs.prompt_text（N-01）— OK/キャンセルが
+        # 静的 getText ではなく dialogs.prompt_text — OK/キャンセルが
         # 他のダイアログと同じカタログ文言になる。
         name, ok = prompt_text(
             self,
@@ -7073,19 +7022,18 @@ class ViewerWindow(QMainWindow):
         ]
         searches.append(entry)
         # 再追加はこのセッションの削除記録を打ち消す（ブックマークの
-        # discard と同型 — 項目#32）。
+        # discard と同型）。
         self._session_removed_saved_searches.discard(name)
-        # 即時 flush + ディスク側とのマージ（persist_bookmarks と同型 —
-        # 項目#32）: デバウンス保存の全フィールド上書きに任せると、並行
+        # 即時 flush + ディスク側とのマージ（persist_bookmarks と同型）:
+        # デバウンス保存の全フィールド上書きに任せると、並行
         # インスタンスが保存した検索を 5 秒差で消し得る。in-memory 更新と
-        # メニュー再構築は先、書き込みは有界ワーカー（項目#48）。
+        # メニュー再構築は先、書き込みは有界ワーカー。
         if not self._persist_saved_searches_now(searches):
-            # N-07: ディスクに載らなかった保存を「保存しました」と言わない
+            # ディスクに載らなかった保存を「保存しました」と言わない
             # （常駐警告は ``_persist_saved_searches_now`` が出している）。
             return
-        # UIレビュー 07-25 #116: 保存の成功だけがステータスバー 4 秒表示で、
-        # 他の成功通知（ブックマーク追加・設定適用…）はトーストという不統一
-        # だった。同じ「操作が通った」を同じ面で返す。
+        # 他の成功通知（ブックマーク追加・設定適用…）と同じくトーストで返す
+        # — 同じ「操作が通った」を同じ面で返す。
         self._show_toast(t("viewer.main_window.save_search_done"), "success")
 
     def _apply_saved_search(self, index: int) -> None:
@@ -7096,14 +7044,16 @@ class ViewerWindow(QMainWindow):
         try:
             snap = deserialize_search_snapshot(searches[index])
         except Exception as exc:  # pragma: no cover (defensive)
-            # UIレビュー 07-25 #116: 従来はログだけで、利用者から見ると
-            # 「押したのに何も起きない」— 失敗はトーストで必ず可視化する。
+            # ログだけだと利用者から見て「押したのに何も起きない」—
+            # 失敗はトーストで必ず可視化する。
             logger.warning("could not apply saved search: {}", exc)
             self._show_toast(
                 t("viewer.main_window.saved_search_apply_failed"), "error"
             )
             return
-        self._post_grid.restore_search_state(snap)
+        # 履歴復元用の restore_search_state ではなく、占有一覧を先に出る口
+        # （保存検索は「現在のフォルダを起点に適用」する約束）。
+        self._post_grid.apply_saved_search(snap)
 
     def _manage_saved_searches(self) -> None:
         """Open the saved-search management dialog (rename / delete — M03)."""
@@ -7118,29 +7068,25 @@ class ViewerWindow(QMainWindow):
             result = dlg.result_searches()
             after = {str(e.get("name") or "").strip() for e in result}
             # 削除・改名で消えた旧名を記録し、残った名前は記録から外す
-            # （_manage_bookmarks と同型 — 項目#32）。
+            # （_manage_bookmarks と同型）。
             self._session_removed_saved_searches |= before - after
             self._session_removed_saved_searches -= after
-            # 即時 flush + ディスク側とのマージ（項目#32）。書き込みは
-            # 有界ワーカー・常駐警告は共通ヘルパ側（項目#48）。
+            # 即時 flush + ディスク側とのマージ。書き込みは
+            # 有界ワーカー・常駐警告は共通ヘルパ側。
             self._persist_saved_searches_now(result)
         dlg.deleteLater()
 
     def _rebuild_bookmarks_menu(self) -> None:
         menu = self._bookmarks_menu
         menu.clear()
-        menu.setToolTipsVisible(True)
         # Keep the ナビレール's ブックマーク section in step with this menu
         # (before the early-return branch below so it fires either way).
         self._refresh_nav_rail_bookmarks()
-        # UIレビュー 2026-08-28 N-70: 横断キュレーション一覧 (H01) の入口はここ
-        # （ブックマークメニューの先頭）にもあり、レールでは別の見出しの下に
-        # 出るという二重表記になっていた。入口はレール常設 (07-25 #57) +
-        # 「編集 ▸ キュレーション」に一本化し、ブックマークメニューは
-        # ブックマークだけを持つ。
-        # UIレビュー 07-25 #53: 旧「現在のフォルダを削除」はディスクからの削除
-        # （破壊的操作）に読めたうえ、未登録でも押せて無言だった。対の動詞を
-        # 「ブックマークに追加 / ブックマークから外す」に改め、登録状態で
+        # 横断キュレーション一覧の入口はレール常設 +「編集 ▸ キュレーション」
+        # に一本化し（ここにも置くとレールとの二重表記になる）、ブックマーク
+        # メニューはブックマークだけを持つ。
+        # 対の動詞は「ブックマークに追加 / ブックマークから外す」（「削除」は
+        # ディスクからの削除＝破壊的操作に読める）で、登録状態で
         # 活性を切り替える（``_sync_bookmark_actions`` / aboutToShow）。
         act_add = QAction(t("viewer.main_window.bookmark_add_current"), self)
         act_add.triggered.connect(self._add_current_bookmark)
@@ -7169,7 +7115,7 @@ class ViewerWindow(QMainWindow):
             menu.addAction(act)
 
     def _sync_bookmark_actions(self) -> None:
-        """現在ルートの登録状態に合わせて追加/解除の活性を切り替える (#53).
+        """現在ルートの登録状態に合わせて追加/解除の活性を切り替える.
 
         登録済みなら「ブックマークに追加」を、未登録なら「ブックマークから
         外す」を無効化する — 「押せるのに何も起きない」を無くす（追加側は
@@ -7182,13 +7128,19 @@ class ViewerWindow(QMainWindow):
             return
         root = getattr(self, "_root", None)
         registered = root is not None and str(root) in self._state.bookmarks
-        add.setEnabled(root is not None and not registered)
+        # ZIP 展開先は閉じると消える — 登録しても次回は「見つかりません」になる。
+        ephemeral = self._root_is_ephemeral()
+        add.setEnabled(root is not None and not registered and not ephemeral)
         remove.setEnabled(registered)
         # 対象名を項目名に出す（★系トーストが対象名を必須にしているのと同じ
-        # 規律 — N-54）。ここは aboutToShow でも走るので、ルートが変わった
+        # 規律）。ここは aboutToShow でも走るので、ルートが変わった
         # 後の 1 回目の表示から追随する。名前が取れないドライブ直下は素の
         # 文言へ落とす。
-        name = bookmark_label(str(root), {}) if root is not None else ""
+        name = (
+            bookmark_label(str(root), {})
+            if root is not None and not ephemeral
+            else ""
+        )
         add.setText(
             t("viewer.main_window.bookmark_add_current_named", name=name)
             if name and name != str(root)
@@ -7208,16 +7160,16 @@ class ViewerWindow(QMainWindow):
         result back into our own state — and rebuild the menu if disk
         additions changed the list — so memory stays consistent with disk.
 
-        **書き込みはワーカーで走る（レビュー 2026-09-03 項目#48）**。ここは
+        **書き込みはワーカーで走る**。ここは
         フル保存（:meth:`_persist_state_snapshot`）と同じ 2 段構え: GUI
         スレッドで書く値を確定（呼び出し元が ``self._state`` を更新し、
         メニュー / レールを再構築済み）→ ``persist_bookmarks`` の read+write
         は :class:`~snappix.viewer.state_flush.BoundedFlusher` のワーカーで
         行い、待つのは ``_SETTINGS_PERSIST_WAIT_S`` 秒まで。到達不能な共有で
-        「ブックマークを 1 個足す」と GUI が数十秒（実測 15〜195 秒）固まって
-        いたのが、5 秒で「保存できませんでした」へ劣化する。
+        「ブックマークを 1 個足す」と GUI が数十秒（実測 15〜195 秒）固まる
+        代わりに、5 秒で「保存できませんでした」へ劣化する。
 
-        Returns **False** when the write did not land (N-07) so the caller can
+        Returns **False** when the write did not land so the caller can
         skip its 「保存しました」 toast; the resident warning itself is raised
         here so every mutation route reports the loss the same way.
         """
@@ -7249,13 +7201,12 @@ class ViewerWindow(QMainWindow):
     def _persist_saved_searches_now(self, searches: list[dict]) -> bool:
         """保存済み検索を *searches* へ差し替え、即時フラッシュする.
 
-        :meth:`_persist_bookmarks_now` と同型（レビュー 2026-09-03 項目#48
-        第2段）: in-memory を先に更新してメニューを再構築し、
+        :meth:`_persist_bookmarks_now` と同型: in-memory を先に更新してメニューを再構築し、
         ``persist_saved_searches`` の read+write はワーカーで有界に走らせる。
         マージ結果（並行インスタンスがディスクへ足した検索）は戻ってきたら
         採り込む。
 
-        戻り値は **ディスクに載ったか**（N-07 — 呼び出し元は偽なら
+        戻り値は **ディスクに載ったか**（呼び出し元は偽なら
         「保存しました」と名乗らない。常駐警告はここで 1 回出す）。
         """
         self._state.saved_searches = searches
@@ -7283,13 +7234,13 @@ class ViewerWindow(QMainWindow):
         # として登録されてしまう）。同ファイル内で ``_root`` を None 込みで
         # 扱う述語（``_can_go_up`` / ``_sync_bookmark_actions``）と前提を揃える。
         root = getattr(self, "_root", None)
-        if root is None:
+        if root is None or self._refuse_ephemeral_root():
             return
         target = str(root)
-        # 対象名はトーストに必ず添える（★系と同じ規律 — N-54）。
+        # 対象名はトーストに必ず添える（★系と同じ規律）。
         name = bookmark_label(target, self._state.bookmark_names)
         if target in self._state.bookmarks:
-            # I05: adding an already-registered folder used to be a silent
+            # Adding an already-registered folder must not be a silent
             # no-op — tell the user it's already there instead.
             self._show_toast(
                 t("viewer.main_window.bookmark_already", name=name), "info"
@@ -7303,7 +7254,7 @@ class ViewerWindow(QMainWindow):
         # discard と同型）。別インスタンスが付けた名前はそのまま採る。
         self._session_cleared_bookmark_names.discard(target)
         self._rebuild_bookmarks_menu()
-        # N-07: 書き込みが落ちたときは「追加しました」と言わない
+        # 書き込みが落ちたときは「追加しました」と言わない
         # （``_persist_bookmarks_now`` が常駐警告トーストを既に出している）。
         if self._persist_bookmarks_now():
             self._show_toast(
@@ -7317,7 +7268,7 @@ class ViewerWindow(QMainWindow):
         """*target*（生パス文字列）のブックマーク登録を外す。
 
         メニューの「ブックマークから外す」と、死んだブックマークを踏んだとき
-        の「このブックマークを削除」(UIレビュー 07-25 #69) の共通実装。
+        の「このブックマークを削除」の共通実装。
         """
         if target in self._state.bookmarks:
             self._state.bookmarks.remove(target)
@@ -7325,7 +7276,7 @@ class ViewerWindow(QMainWindow):
             self._session_removed_bookmarks.add(target)
             self._session_cleared_bookmark_names.add(target)
             self._rebuild_bookmarks_menu()
-            if self._persist_bookmarks_now():  # N-07
+            if self._persist_bookmarks_now():  # 失敗時は成功トーストを出さない
                 self._show_toast(
                     t("viewer.main_window.bookmark_removed"), "success"
                 )
@@ -7352,27 +7303,25 @@ class ViewerWindow(QMainWindow):
             self._session_cleared_bookmark_names -= after_names
             self._rebuild_bookmarks_menu()
             self._persist_bookmarks_now()
-        # (#14) result_bookmarks/result_names were read above; safe to release.
+        # result_bookmarks/result_names were read above; safe to release.
         dlg.deleteLater()
 
     def _jump_to_bookmark(self, raw: str) -> None:
         path = Path(raw)
-        # 項目#109: 6 経路（レビュー 2026-07-31 #7）のうちここだけ GUI
-        # スレッド同期 ``is_dir()`` が残っていた — 切断 / スリープ中の NAS
+        # GUI スレッドで同期 ``is_dir()`` しない — 切断 / スリープ中の NAS
         # 上のブックマークをクリックすると、警告が出るより前に SMB タイム
         # アウト（数十秒）ぶんウィンドウ全体が凍る。起動経路（B05）と同じ
-        # ワーカースレッド + ハードタイムアウト 2s の共通プローブへ置換。
+        # ワーカースレッド + ハードタイムアウト 2s の共通プローブを使う。
         # タイムアウト（= 共有がまさに起きようとしている）は存在扱いで
         # 素通しし、実在確認は非同期スキャン失敗のエラーカードに委ねる。
         kind = probe_path_kind(raw)
         if kind in ("file", "missing"):
-            # UIレビュー 07-25 #69: 生パス 1 行の警告ではなく共通応答へ。
+            # 生パス 1 行の警告ではなく共通応答へ。
             # ブックマーク経路だけは「このブックマークを削除」も出す — 死んだ
             # 登録をその場で片付けられないと、押すたび同じ警告に当たり続ける。
-            if not self._handle_missing_folder(path, bookmark=raw):
+            if self._handle_missing_folder(path, bookmark=raw) != "retry":
                 return
-        # プローブ済み（または存在扱い）なので GUI スレッドで stat し直さない
-        # （UIレビュー 07-25 #70 と同じ規約）。
+        # プローブ済み（または存在扱い）なので GUI スレッドで stat し直さない。
         self._on_root_change_requested(path, assume_exists=True)
 
     def _focus_filter_box(self) -> None:
@@ -7387,7 +7336,7 @@ class ViewerWindow(QMainWindow):
         # SettingsDialog writes directly into self._state on OK, so after
         # ``exec`` returns Accepted we just push the new numbers into the
         # live views.  Rejecting leaves state untouched.  The cache-management
-        # group is backed by the CacheBuildController (#96).
+        # group is backed by the CacheBuildController.
         prev_theme = self._state.theme
         dlg = SettingsDialog(self._state, self, cache_controller=self._cache_ctrl)
         if dlg.exec() == SettingsDialog.Accepted:
@@ -7398,10 +7347,10 @@ class ViewerWindow(QMainWindow):
                 self._apply_theme_choice(self._state.theme)
             # I05: confirm the settings landed (non-modal; the tunables are
             # applied live above so there is nothing else to acknowledge).
-            # N-07: 「適用しました」を名乗る前に実際にディスクへ書く — 従来は
-            # 終了時のフル保存任せで、書き込み不可な媒体では成功表示の裏で
-            # 設定が丸ごと消えていた。失敗時は常駐警告トーストのみ。
-            # #132 F2: 保存自体はワーカーで走るので、ここだけが完了を待つ
+            # 「適用しました」を名乗る前に実際にディスクへ書く — 終了時の
+            # フル保存任せだと、書き込み不可な媒体では成功表示の裏で
+            # 設定が丸ごと消える。失敗時は常駐警告トーストのみ。
+            # 保存自体はワーカーで走るので、ここだけが完了を待つ
             # （待たないと成否を名乗れない）。待ちは有界 — 5 秒応答しない
             # 保存先で「適用しました」と言う方が嘘になる。
             if self._persist_state_snapshot(wait_s=_SETTINGS_PERSIST_WAIT_S):
@@ -7410,7 +7359,7 @@ class ViewerWindow(QMainWindow):
                 )
             else:
                 self._notify_persist_failed()
-        dlg.deleteLater()  # (#14) results already committed into self._state
+        dlg.deleteLater()  # results already committed into self._state
 
     def _apply_settings_live(self) -> None:
         """Fan out the current ``ViewerState`` to every live subsystem.
@@ -7424,8 +7373,7 @@ class ViewerWindow(QMainWindow):
         self._content.apply_cache_settings(state)
         self._post_grid.apply_settings(state)
         self._file_list.apply_settings(state)
-        # プール数 / 記憶 LRU 枚数は**本体 2 本だけ**（レビュー 2026-09-03
-        # 項目#49）。専用ローダー 3 本（フォルダプレビュー / フィルム
+        # プール数 / 記憶 LRU 枚数は**本体 2 本だけ**。専用ローダー 3 本（フォルダプレビュー / フィルム
         # ストリップ / ライトボックス）は「小プール固定（128 枚 / 2 本）」
         # という設計判断で作られているので、ここは意図して配らない。
         # 一方 ``cache_edge``（下の ``set_disk_cache``）はプールサイズと
@@ -7443,8 +7391,7 @@ class ViewerWindow(QMainWindow):
         # 踏むと ``sqlite3.DatabaseError`` が出る。ここは設定ダイアログの適用
         # スロットから同期で走る経路なので、素通しだと Qt のスロットを貫通して
         # しまい、「設定を反映しました」の代わりにアプリごと落ちる（起動時は
-        # ``_open_cache`` が同じ失敗を握って ``None`` 劣化起動する — 項目#52
-        # 追修正）。1 本ごとにログして続行し、他のキャッシュと以降の設定反映は
+        # ``_open_cache`` が同じ失敗を握って ``None`` 劣化起動する）。1 本ごとにログして続行し、他のキャッシュと以降の設定反映は
         # 巻き添えにしない。
         if self._disk_cache is not None:
             try:
@@ -7458,8 +7405,7 @@ class ViewerWindow(QMainWindow):
                 # paints.  ThumbDiskCache.prune defers the blob unlink to a
                 # daemon thread, so this call is GUI-safe.
                 self._disk_cache.prune()
-                # ``cache_edge`` は**全ローダー**へ配る（レビュー 2026-09-03
-                # 項目#49）。ディスクキャッシュは 5 本で共有していて、
+                # ``cache_edge`` は**全ローダー**へ配る。ディスクキャッシュは 5 本で共有していて、
                 # ``cache_edge`` は「この長辺を超える要求ではディスク
                 # キャッシュを丸ごとバイパスする / 保存マスターの長辺」を
                 # 決める純粋なユーザー設定なので、2 本だけに配ると設定変更後
@@ -7517,14 +7463,14 @@ class ViewerWindow(QMainWindow):
         # apply_media_settings so calling it here covers the media path too.
         self._content.apply_view_settings(state)
         # 閲覧モード: slideshow interval + media (loop/autoplay/volume) apply
-        # live to an open lightbox (item 8 — mirror the centre pane so a
+        # live to an open lightbox (mirror the centre pane so a
         # settings change reaches the lightbox MediaView without reopening).
         if self._lightbox is not None:
             self._lightbox.set_slideshow_interval(state.slideshow_interval_sec)
             self._lightbox.set_chrome_hide_ms(state.lightbox_chrome_hide_ms)
             self._lightbox.apply_media_settings(state)
             # ImageView 系設定（キャッシュ / 先読み / ズーム維持 / ミニマップ）
-            # も同じく生きたまま反映する（項目#29 = #21/#34）。
+            # も同じく生きたまま反映する。
             self._lightbox.apply_view_state(state)
 
     # ------------------------------------------- 走査ライフサイクル（委譲）
@@ -7532,14 +7478,13 @@ class ViewerWindow(QMainWindow):
     # 実装はウィンドウ部品 ``window_status.WindowStatus``（``self._status``）。
     # 状態ラベルの素材（``load_status`` ほか）と走査着地で消費する one-shot 2 本
     # （``startup_focus_pending`` / ``stage_settle_pending``）はすべて部品が所有
-    # し、ここに残すのはシグナル接続先とテスト / UI レビューハーネスが名指しする
+    # し、ここに残すのはシグナル接続先とテスト / UI 撮影ハーネスが名指しする
     # 口だけ。同名の ``_`` 付き属性は下の透過プロパティで部品の状態へ抜ける。
 
     def _settle_startup_focus(self) -> None:
         """初回スキャン着地の一手 — 実体は ``window_status.WindowStatus``.
 
-        窓側に口を残すのは、UI レビューの撮影ハーネス
-        （``tools/ui_review/shoot.py``）がこの名前を差し替えて「初回着地の
+        窓側に口を残すのは、UI の撮影ハーネスがこの名前を差し替えて「初回着地の
         1 枚」を撮るため（部品側もこの口を経由して呼ぶ）。
         """
         self._status.settle_startup_focus()
@@ -7572,18 +7517,19 @@ class ViewerWindow(QMainWindow):
         # so long values clipped by the status bar are still readable.
         # With no selection, fall back to the current browse location so the
         # status bar always answers "where am I" even while the breadcrumb is
-        # collapsed at narrow pane widths (UIレビュー #2).
+        # collapsed at narrow pane widths.
         if path is None:
             path = self._current_folder or self._root
         text = str(path) if path is not None else ""
         # The default library shows the Japanese 「ライブラリ」 label rather than
-        # its raw English folder name as the current location (UIレビュー #6);
+        # its raw English folder name as the current location;
         # the tooltip still carries the real path.
-        display = (
-            t("viewer.main_window.library_menu")
-            if path is not None and path == self._default_library
-            else text
+        label = (
+            base_label(path, self._compute_library_bases())
+            if path is not None
+            else None
         )
+        display = label if label is not None else text
         self._path_label.setText(display)
         # setText scrolls a long value to its end; show it from the start.
         self._path_label.setCursorPosition(0)
@@ -7591,31 +7537,31 @@ class ViewerWindow(QMainWindow):
         # Status bar: selected file's name + size (one os.stat, best-effort —
         # failures / directories just clear the segment).  *representative* は
         # 呼び出し側（代表画像の自動選択を知っている経路）から素通しする —
-        # 「代表:」接頭の出し分けをこの funnel 1 本に揃えるため（N-104）。
+        # 「代表:」接頭の出し分けをこの funnel 1 本に揃えるため。
         self._update_file_info_label(path, representative=representative)
         # This is the single funnel every selection/preview passes through, so
         # it's where we keep the detail window in sync with the current item.
         self._current_preview_path = path
-        # …and where the「ウィンドウが選んだ代表画像」マークを落とす (#84):
+        # …and where the「ウィンドウが選んだ代表画像」マークを落とす:
         # 別の物が選ばれた時点でフォールバック対象ではなくなる。代表画像の
         # 自動選択（pending-select 解決）は同じパスなのでマークが残る。
         # getattr ガード: この funnel はテストハーネスが `__init__` を通さずに
         # （`ViewerWindow.__new__`）呼ぶため、素の属性アクセスだと
         # AttributeError になる（plugin_events emit と同じ既存規約）。
         #
-        # **代表画像プローブの世代バンプも同じ分岐で落とす**（レビュー
-        # 2026-09-03 項目#51）。マーク (#84) と世代 (#6) は「いま中央が映して
-        # いるのは、もうプローブが選ぼうとしていた物ではない」という**同じ
-        # 事実**を表す 2 機構なのに、前者だけがこの funnel にあり、後者は
-        # 選択ハンドラ側の手書きの世代バンプだった — 経路を 1 つ足すたび同じ
-        # 取りこぼしが起き（#6 で 1 回、項目#47 で 2 回目）ていた。
+        # **代表画像プローブの世代バンプも同じ分岐で落とす**。マークと世代は
+        # 「いま中央が映しているのは、もうプローブが選ぼうとしていた物では
+        # ない」という**同じ事実**を表す 2 機構なので、後者を選択ハンドラ側の
+        # 手書きにすると経路を 1 つ足すたび同じ取りこぼしが起きる。
         # ``_preview_probe_folder`` との比較は二重の降ろしを避けるためだけの
         # もの（``_on_folder_selected`` の直後に ``_start_first_image_probe``
         # 自身の投入＝追い越しが続く）。代表画像の**自動**選択は
-        # ``path == _preview_shown_representative`` が成立するのでここへ入らず、
+        # ``path == _preview_fallback.shown`` が成立するのでここへ入らず、
         # ``#thumb#`` 暫定表示から非マーカー画像への非同期差し替えは生きる。
-        if path != getattr(self, "_preview_shown_representative", None):
-            self._preview_shown_representative = None
+        fallback = getattr(self, "_preview_fallback", None)
+        if fallback is None or path != fallback.shown:
+            if fallback is not None:
+                fallback.shown = None
             if path != getattr(self, "_preview_probe_folder", None):
                 stream = getattr(self, "_preview_stream", None)
                 if stream is not None:
@@ -7635,9 +7581,9 @@ class ViewerWindow(QMainWindow):
         label).
 
         *representative* を立てると「代表:」の接頭を付けて表示する
-        （UIレビュー 2026-08-28 N-104 — フォルダ選択中の代表画像プレビューでは
-        選択がディレクトリなのでこのセグメントが空になり、隣に W×H だけが出て
-        「どのファイルを見ているのか」が画面のどこにも無かった）。接頭は省略
+        （フォルダ選択中の代表画像プレビューでは選択がディレクトリなので、
+        付けなければこのセグメントが空になり、隣に W×H だけが出て
+        「どのファイルを見ているのか」が画面のどこにも無くなる）。接頭は省略
         不可: 無いと「このファイルが選択中」と誤読され、実際の選択が
         フォルダであるという事実と衝突する。
         """
@@ -7661,10 +7607,10 @@ class ViewerWindow(QMainWindow):
                 "viewer.main_window.file_info_representative_tooltip",
                 path=self._relative_display_path(self._file_info_path),
             )
-        # 上限幅を超える長大ファイル名は中央省略 (レビュー 2026-07-31 #15) —
+        # 上限幅を超える長大ファイル名は中央省略 —
         # permanent widget は sizeHint 分の幅を確保するため、素の setText では
         # 255 バイト級の正当な境界入力でステータスバーの他セグメント
-        # （現在パス表示・サイズ表記）が圧殺・クリップされていた。
+        # （現在パス表示・サイズ表記）が圧殺・クリップされる。
         elided = self._file_info_label.fontMetrics().elidedText(
             full, Qt.ElideMiddle, _FILE_INFO_LABEL_MAX_PX
         )
@@ -7743,7 +7689,7 @@ class ViewerWindow(QMainWindow):
         self._state.media_volume = vol
 
     def _on_media_playback_rate_changed(self, rate: float) -> None:
-        # N-136: 速度だけが loop / volume の 3 経路から漏れていた。
+        # 速度も loop / volume と同じく永続化する。
         self._state.media_playback_rate = float(rate)
 
     # ------------------------------------------------------- detail window
@@ -7753,7 +7699,7 @@ class ViewerWindow(QMainWindow):
             self._detail_window = DetailWindow(
                 self._tag_index, self,
                 similar_available=self._vector_index is not None,
-                # ★ / あとで見る / ユーザータグ の 3 行 (UIレビュー 07-25 #94)。
+                # ★ / あとで見る / ユーザータグ の 3 行。
                 user_meta=self._user_meta,
             )
             self._detail_window.destroyed.connect(self._on_detail_window_destroyed)
@@ -7773,11 +7719,11 @@ class ViewerWindow(QMainWindow):
         self._detail_window.activateWindow()
 
     def _on_detail_tag_search(self, tag: str) -> None:
-        """詳細情報ウィンドウの「このタグで検索」 (UIレビュー N-62).
+        """詳細情報ウィンドウの「このタグで検索」.
 
         効果（条件チップバーの更新）は**背後の本窓にしか出ない**ので、
         モードレスな詳細情報ウィンドウが重なっているとその場に何の
-        反応も無かった。本窓の共通トーストファンネルへ 1 本流して、
+        反応も無いように見える。本窓の共通トーストファンネルへ 1 本流して、
         隣の「この画像で類似検索」と同じ扱いに揃える。
         """
         self._post_grid.add_search_tag(tag)
@@ -7792,7 +7738,7 @@ class ViewerWindow(QMainWindow):
         # then anyway).
         if isinstance(path, Path):
             self._post_grid.set_similar_seed(path)
-            # N-62: タグ検索と同じく、効果が出る面（本窓）で受理を告げる。
+            # タグ検索と同じく、効果が出る面（本窓）で受理を告げる。
             self._show_toast(
                 t(
                     "viewer.main_window.detail_similar_search_toast",
@@ -7825,7 +7771,7 @@ class ViewerWindow(QMainWindow):
         # ``viewer_state.json`` write (on close) stays for round-trip compat.
         # A write failure is logged only and must not break the UI.
         #
-        # 書き込みは**背景で・待たない**（レビュー 2026-09-03 項目#52）。
+        # 書き込みは**背景で・待たない**。
         # ``update_shared_prefs`` は ``load_shared_prefs`` の read →
         # ``save_shared_prefs`` の tmp 書き込み + ``os.replace`` という
         # 同期 read-modify-write で、``data/`` がチーム共有の NAS に載る
@@ -7833,7 +7779,7 @@ class ViewerWindow(QMainWindow):
         # ブロックする（VM 実測 — ``_CLOSE_PERSIST_BUDGET_S`` の docstring）。
         # テーマ切替は最も頻繁な操作で、in-memory と ``apply_theme`` で
         # 見た目は既に反映済み。失敗しても実害は「次回起動時に他ツールへ
-        # 伝播しない」だけなので、成否を待つ理由が無い（N-07 のような
+        # 伝播しない」だけなので、成否を待つ理由が無い（設定ダイアログのような
         # 成否表示契約はこの経路には無い）。
         self._shared_prefs_flush.run(
             lambda: self._write_theme_pref(key), wait_s=0.0,
@@ -7965,7 +7911,7 @@ class ViewerWindow(QMainWindow):
     # ----------------------------------------------------------- diagnostics
     #
     # 実装はウィンドウ部品 ``window_help.WindowHelp``（``self._help``）。ここに
-    # 残すのは、テスト / UI レビューハーネス / 他モジュールが名指ししている
+    # 残すのは、テスト / UI 撮影ハーネス / 他モジュールが名指ししている
     # 委譲の口だけ（それ以外の入口はメニューから部品へ直接つながる）。
 
     def _on_toggle_perf(self, enabled: bool) -> None:
@@ -8011,7 +7957,7 @@ class ViewerWindow(QMainWindow):
         return self._help.shortcuts_dialog
 
     def open_logs_folder(self) -> None:
-        """Public entry for panes that offer 「ログフォルダを開く」 (N-75).
+        """Public entry for panes that offer 「ログフォルダを開く」.
 
         走査失敗カードは自分でファイラを起動せず、ホストの 1 実装を呼ぶ
         （失敗時の通知も含めて経路が 1 本になる）。
@@ -8025,11 +7971,11 @@ class ViewerWindow(QMainWindow):
         self._help.show_terms()
 
     def _open_with_default_app(self, path: Path) -> None:
-        """Hand *path* to the OS default application (L07).
+        """Hand *path* to the OS default application.
 
         Used when a file has no dedicated in-app preview: double-click / Enter
         should "open" it the way Explorer would.  実装は共通ヘルパ
-        ``view_prefs.open_with_default``（UIレビュー 07-25 #74 — 右クリック
+        ``view_prefs.open_with_default``（右クリック
         経路・各プレビューのボタンと同じ 1 か所）で、失敗時のステータス通知も
         そこが行う。
         """
@@ -8038,11 +7984,10 @@ class ViewerWindow(QMainWindow):
     def _on_copy_current_image(self) -> None:
         # Menu entry (編集 → 表示中の画像をコピー).  Only the image page can copy;
         # 成功トーストは ``ImageView.copy_image_to_clipboard`` の内側 1 箇所が
-        # 出す（UIレビュー 07-25 #73 — 3 入口で一貫させるため、ここでは重ねて
-        # 出さない）。失敗理由だけを出す。
-        # UIレビュー 2026-08-28 N-94/N-95: 直書きの ``showMessage`` は同じ
-        # 文言が Ctrl+C 経路（``image_view`` のトースト）と別の面に出ていた —
-        # 「開く」失敗と同じ共通ファネルへ寄せて 1 面に揃える。
+        # 出す（3 入口で一貫させるため、ここでは重ねて出さない）。失敗理由
+        # だけを出す。直書きの ``showMessage`` にすると同じ文言が Ctrl+C 経路
+        # （``image_view`` のトースト）と別の面に出るので、「開く」失敗と同じ
+        # 共通ファネルへ寄せて 1 面に揃える。
         if not self._content.copy_current_image():
             notify_failure(self, t("viewer.main_window.no_copyable_image"))
 
@@ -8064,8 +8009,8 @@ class ViewerWindow(QMainWindow):
         alone leaves an off-screen window off-screen — the very symptom
         being guarded against.  判定と復帰導線はどちらも
         ``common/ui/window_geometry.py`` の共有ヘルパ — プラグインの窓も
-        同じ 2 関数を使う（issue #128: 同型のガードを別々に手書きした結果、
-        片側だけが ``resize`` のみの no-op で残っていた）。
+        同じ 2 関数を使う（同型のガードを別々に手書きすると、片側だけが
+        ``resize`` のみの no-op で残りやすい）。
         """
         raw = decode_geometry(self._state.geometry_b64)
         if raw:
@@ -8084,8 +8029,8 @@ class ViewerWindow(QMainWindow):
         ``_strip_loader`` / 全画面 ``_lightbox_loader``）。「全ローダーに
         当てる」処理（closeEvent のドレイン、「サムネイルキャッシュを削除」
         の記憶 LRU フラッシュ）は必ずここを通すこと — 手書きで一部だけ
-        列挙すると、残りのローダーがセッション中ずっと古い絵を返し続ける
-        （レビュー 2026-09-03 項目 #45）。遅延生成の 2 本は未構築なら
+        列挙すると、残りのローダーがセッション中ずっと古い絵を返し続ける。
+        遅延生成の 2 本は未構築なら
         単に含まれない（構築された時点で自動的に対象へ入る）ので、
         呼び出し側は**都度**このメソッドを呼ぶこと（結果を持ち回らない）。
         """
@@ -8109,14 +8054,13 @@ class ViewerWindow(QMainWindow):
         parked in a bounded wait (a broken video otherwise pins its worker
         for up to 8 s — past this drain's timeout, and, if the wait straddles
         interpreter teardown, forever: the non-daemon pool thread then blocks
-        process exit, #69), ``clear_cache()`` drops the pending request
+        process exit), ``clear_cache()`` drops the pending request
         queues, ``wait_for_done(timeout)`` bounds the wait on the (at most a
         few) already-running decodes rather than blocking indefinitely on NAS
         I/O.  Best-effort — a failure only means a slightly less orderly
         teardown, but it is logged so a hung worker is visible post-mortem.
 
-        ``GuardedStream`` の各プールも同じ予算に載せる（レビュー 2026-09-03
-        項目#54）: あれは所有ウィジェットの子なので「ウィジェットと一緒に
+        ``GuardedStream`` の各プールも同じ予算に載せる: あれは所有ウィジェットの子なので「ウィジェットと一緒に
         片付く」が、``QThreadPool`` のデストラクタは in-flight タスクを無制限
         に待つ = 予算の**外側**（closeEvent 後のウィジェット木の破棄）で死んだ
         共有の I/O タイムアウトぶん止まる。列挙は ``findChildren`` なので、
@@ -8127,7 +8071,7 @@ class ViewerWindow(QMainWindow):
         **最後に窓の QObject 木そのものから掃く**: 上の 2 ループは「ローダー」
         「``GuardedStream``」という*種類*の列挙なので、生の ``QThreadPool`` を
         自前で持つ葉（プレビュー各種 / 詳細情報ウィンドウ / 各スキャナ）は
-        どちらにも載らず、破棄時の無制限待ちが残っていた。窓配下のプールは
+        どちらにも載らず、破棄時の無制限待ちが残る。窓配下のプールは
         全て ``QThreadPool(<ウィジェット>)`` = 窓の子孫なので、
         ``findChildren(QThreadPool)`` が母集団の全員に到達する（子トップ
         レベル窓も含む）。ここを通せば新しい葉は**何も配線しなくても**予算内
@@ -8139,26 +8083,36 @@ class ViewerWindow(QMainWindow):
         汎用パスが吸収できるのは「待ち」だけで、キャンセルされていない仕事は
         予算いっぱい待つことになる。
         """
-        for loader in self._all_loaders():
+        # 3 段とも**同じ 1 本の予算**で回す（ローダー / ストリーム / プールの
+        # 本数ぶん ``timeout_ms`` が積算しないように — 段ごとに満額を配ると、
+        # 死んだ共有で 5 本がそれぞれ塞がったとき、ここだけで
+        # 5 × ``timeout_ms`` 止まる）。
+        budget = Deadline(timeout_ms / 1000.0)
+        loaders = self._all_loaders()
+        # 先に**全部の**ローダーへ停止要求と待ち行列の破棄を当ててから待つ:
+        # 1 本目の待ちの間に後続のローダーが未着手の仕事を拾い続けないように。
+        for loader in loaders:
             try:
                 loader.request_shutdown()
                 loader.clear_cache()
-                if not loader.wait_for_done(timeout_ms):
+            except Exception as exc:  # pragma: no cover (defensive)
+                logger.warning("thumbnail pool shutdown request failed: {}", exc)
+        for loader in loaders:
+            try:
+                share = int(budget.remaining * 1000)
+                if not loader.wait_for_done(share):
                     logger.warning(
                         "thumbnail pool did not drain within {}ms "
-                        "(a decode worker is still running)", timeout_ms,
+                        "(a decode worker is still running)", share,
                     )
             except Exception as exc:  # pragma: no cover (defensive)
                 logger.warning("thumbnail pool drain failed: {}", exc)
-        # 2 段目と 3 段目は**同じ 1 本の予算**で回す（ストリームの本数ぶん
-        # ``timeout_ms`` が積算しないように — ストリームは窓の下に十数本ある）。
-        budget = Deadline(timeout_ms / 1000.0)
         for stream in self.findChildren(GuardedStream):
             try:
                 # ログに出すのは**この 1 本に配れた残予算**（`timeout_ms` では
                 # ない）。先頭の 1 本が死んだ共有で予算を食い切ると後続は
                 # 0ms = cancel だけになるので、満額待って落ちたのか 1 ミリ秒も
-                # 待っていないのかが事後解析で読めなくなる（issue #132 系）。
+                # 待っていないのかが事後解析で読めなくなる。
                 share = int(budget.remaining * 1000)
                 if not stream.request_shutdown(share):
                     logger.warning(
@@ -8167,11 +8121,14 @@ class ViewerWindow(QMainWindow):
                     )
             except Exception as exc:  # pragma: no cover (defensive)
                 logger.warning("guarded stream drain failed: {}", exc)
+        # 予算内に空かなかったプールは ``drain_or_strand`` が窓の木から外して
+        # 退避する — 外さないと窓の破棄時にプールのデストラクタが走行中の
+        # タスクを無制限に待ち、待ちが予算の外側へ逃げるだけになる（終了の
+        # 有界化は ``app.main`` の ``exit_if_pools_stranded`` が受け持つ）。
         for pool in self.findChildren(QThreadPool):
             try:
-                pool.clear()
                 share = int(budget.remaining * 1000)
-                if not pool.waitForDone(share):
+                if not drain_or_strand(pool, share):
                     logger.warning(
                         "worker pool did not drain within {}ms "
                         "(a blocking task is still running)", share,
@@ -8183,7 +8140,7 @@ class ViewerWindow(QMainWindow):
         """Fold the live UI state into ``self._state`` (shared by closeEvent
         and the periodic autosave, B03).
 
-        **ここでディスクへ触らないこと（issue #132）**。ウィジェットからの
+        **ここでディスクへ触らないこと**。ウィジェットからの
         収集は GUI スレッドでしかできない一方、ディスク側との突き合わせ
         （:meth:`_merge_disk_state`）は ``viewer_state.json`` の**読み込み**
         なので、到達不能な共有では呼び出しスレッドを数十秒ブロックする。
@@ -8200,8 +8157,8 @@ class ViewerWindow(QMainWindow):
         ) = self._post_grid.current_state()
         self._state.geometry_b64 = encode_geometry(self.saveGeometry())
         sizes = self._splitter.sizes()
-        # 情報パネル (Phase 2-2): persist its visibility (幅 0 までドラッグで
-        # 畳んだ状態はトグル OFF と同一視 — 折り畳み導線 2026-07), and when it
+        # 情報パネル: persist its visibility (幅 0 までドラッグで
+        # 畳んだ状態はトグル OFF と同一視), and when it
         # is hidden/collapsed substitute the remembered width so the persisted
         # right column isn't frozen at 0 (which would re-open the panel
         # collapsed next launch).
@@ -8211,7 +8168,7 @@ class ViewerWindow(QMainWindow):
         )
         if len(sizes) == 3 and (self._info_panel.isHidden() or sizes[2] == 0):
             sizes = [sizes[0], sizes[1], self._info_panel_saved_width]
-        # ナビレール (Phase 2-3): same treatment — persist visibility and
+        # ナビレール: same treatment — persist visibility and
         # substitute the remembered width so column 0 isn't frozen at 0.
         self._state.nav_rail_visible = (
             not self._nav_rail.isHidden()
@@ -8235,6 +8192,13 @@ class ViewerWindow(QMainWindow):
         # トグル OFF もフラグ側 (_set_preview_visible_flag) で同一視済み。
         self._state.preview_visible = self._preview_visible
         self._state.last_root = str(self._root) if self._root else ""
+        # ZIP ドリルインの展開先は閉じると消える — 生の一時パスを ``last_root``
+        # に書くと次回は missing でライブラリへ落ち（開いていた位置を失う）、
+        # 掃除に失敗して残っていればアプリの ``data/tmp`` をルートに起動する。
+        # 展開元 ZIP の親フォルダ + その ZIP の選択として書き、閉じた位置へ戻す。
+        zip_resume = self._zip_resume_position()
+        if zip_resume is not None:
+            self._state.last_root = zip_resume[0]
         # Startup resume (B01/B02): remember the selection / previewed file /
         # scroll offset.  ``current_path`` reads the built tiles only (no I/O).
         # BUT: while the startup restore is still in flight (cold NAS — the
@@ -8247,13 +8211,24 @@ class ViewerWindow(QMainWindow):
             self._pending_restore_preview.armed
             or (self._startup_restore_pending and sel is None)
         )
-        if not restore_in_flight:
+        if zip_resume is not None:
+            # 展開先の中の選択 / プレビュー / スクロールは親フォルダでは
+            # 意味を持たない — 展開元 ZIP を選択として置き直す。
+            self._state.last_selected_path = zip_resume[1]
+            self._state.last_previewed_path = ""
+            self._state.last_grid_scroll = 0
+        elif not restore_in_flight:
             self._state.last_selected_path = str(sel) if sel is not None else ""
             self._state.last_previewed_path = (
                 str(self._last_previewed_file)
                 if self._last_previewed_file is not None else ""
             )
             self._state.last_grid_scroll = self._post_grid.scroll_value()
+            # ZIP を出た直後などで一時パスが残っていても永続しない。
+            if is_zip_temp_path(self._state.last_selected_path):
+                self._state.last_selected_path = ""
+            if is_zip_temp_path(self._state.last_previewed_path):
+                self._state.last_previewed_path = ""
         self._state.sort_mode = sort_mode
         self._state.icon_size = icon_size
         self._state.list_icon_size = self._post_grid.current_list_icon_size()
@@ -8263,7 +8238,7 @@ class ViewerWindow(QMainWindow):
         self._state.file_list_icon_size = self._file_list.current_icon_size()
         self._state.file_list_list_icon_size = self._file_list.current_list_icon_size()
         # ``filter_locked_only`` は書き戻さない（save_state の _VOLATILE_FIELDS
-        # で落ちる揮発フィールド — UIレビュー07-25 追修 #40）。
+        # で落ちる揮発フィールド）。
         self._state.hide_nsfw = self._post_grid.hide_nsfw()
         self._post_grid.save_tag_settings(self._state)
         self._state.exclude_thumb_marker = exclude_thumb_marker
@@ -8272,12 +8247,27 @@ class ViewerWindow(QMainWindow):
             self._file_list.current_thumb_layout()  # type: ignore[assignment]
         )
 
+    def _zip_resume_position(self) -> "tuple[str, str] | None":
+        """ルートが ZIP 展開先なら永続用の ``(last_root, last_selected_path)``.
+
+        展開元 ZIP が分かれば「その親フォルダ + ZIP の選択」、分からない
+        （掃除に失敗して前回から残った展開先で起動した）なら ``("", "")`` =
+        次回は既定ライブラリ。展開先でなければ ``None``。
+        """
+        root = self._root
+        if root is None or not is_zip_temp_path(root):
+            return None
+        for temp_dir, zip_path in self._zip_temp_dirs.items():
+            if root == temp_dir or temp_dir in root.parents:
+                return str(zip_path.parent), str(zip_path)
+        return "", ""
+
     def _merge_disk_state(self, target: ViewerState) -> None:
         """ディスク側の並行インスタンスの追加を *target* へ取り込む.
 
         ``viewer_state.json`` を 1 回読むので **I/O を行う** — 呼び出し口は
         :meth:`_save_merged_state` **だけ**にすること（常に予算付きワーカー
-        側で走り、GUI スレッドからは呼ばれない: #132）。書き込み先を引数で
+        側で走り、GUI スレッドからは呼ばれない）。書き込み先を引数で
         受けるのは、稼働中の保存が GUI スレッドの ``self._state`` を後ろから
         書き換えないようにするため（保存はスナップショットの複製に対して
         行う）。
@@ -8296,7 +8286,7 @@ class ViewerWindow(QMainWindow):
                 self._session_removed_bookmarks,
                 self._session_cleared_bookmark_names,
             )
-            # 保存済み検索も同じ理由で disk とマージ（項目#32）: フル保存は
+            # 保存済み検索も同じ理由で disk とマージ: フル保存は
             # 全フィールド上書きなので、並行インスタンスが保存した検索を
             # 最後に閉じた側の stale リストで消さない。disk はブックマーク
             # merge が読んだ 1 回分を再利用（追加 I/O ゼロ）。
@@ -8318,7 +8308,7 @@ class ViewerWindow(QMainWindow):
         return self._state_snapshot_seq
 
     def _save_merged_state(self, snapshot: ViewerState, generation: int) -> bool:
-        """突き合わせ + 書き込み — **必ずワーカースレッドで走る**（#132）.
+        """突き合わせ + 書き込み — **必ずワーカースレッドで走る**.
 
         ディスク突き合わせ（``load_state``）と書き込み（``save_state``）の
         両方が I/O なので、まとめて予算付きワーカーへ載せる唯一の口。呼ぶ
@@ -8332,7 +8322,7 @@ class ViewerWindow(QMainWindow):
         換えないため。**``_merge_disk_state`` を外さないこと**: 並行
         インスタンスがディスクへ足したブックマーク / 保存済み検索を、この
         窓の stale なリストで上書き消去する（＝「お気に入りが消える」事故。
-        docs/claude/viewer/content.md のブックマーク契約）。
+        ブックマークは並行インスタンス間でマージする契約）。
 
         予算超過で放棄されても壊れないのは ``save_state`` が tmp +
         ``os.replace`` の原子的書き込みだから（既存の ``viewer_state.json``
@@ -8363,7 +8353,7 @@ class ViewerWindow(QMainWindow):
         固まっていた古い保存」はここで捨てられる（tmp は消される）。書き込み
         自体は並行のままなので、詰まった保存が他の保存を待たせることは無い。
         いまは「最終確認 → ``os.replace``」が state.py 側の
-        ``_STATE_FILE_LOCK`` の中で不可分に行われる（issue #140 M-2）ので、
+        ``_STATE_FILE_LOCK`` の中で不可分に行われるので、
         この確認をすり抜けた 2 本が着地順を入れ替えることも無い。同じロックは
         ``load_state`` の読み取りも囲う — Windows では読み取り用に開かれた
         ファイルへの ``os.replace`` が失敗するため（＝保存の喪失 + 事実で
@@ -8413,14 +8403,13 @@ class ViewerWindow(QMainWindow):
         loses at most one autosave interval of tweaks instead of the whole
         session (geometry, last root, MRU, sort, caption flags…).
 
-        **書き込みは常にワーカースレッド（issue #132 差し戻し F2）**。従来は
-        ``load_state`` + ``save_state`` を GUI スレッドで無制限に実行して
-        いたため、死んだ共有では「何も操作していないのに 60 秒ごとに 52 秒
-        フリーズ」していた（issue #132 の 3 つ目の症状）。
+        **書き込みは常にワーカースレッド**。``load_state`` + ``save_state`` を
+        GUI スレッドで無制限に実行すると、死んだ共有では「何も操作して
+        いないのに 60 秒ごとに 52 秒フリーズ」する。
 
         *wait_s* は**呼び出し元が結果を待つ**上限。既定の 0 秒は「投げっぱ
         なし」= オートセーブ / デバウンス保存（戻り値を使わないので常に
-        ``False``）。設定ダイアログだけが N-07 の契約のために待ち、戻り値で
+        ``False``）。設定ダイアログだけが成否表示の契約のために待ち、戻り値で
         「適用しました」と常駐警告を出し分ける。
 
         前回の保存がまだ返っていないときの扱いは *wait_s* で分かれる
@@ -8496,8 +8485,8 @@ class ViewerWindow(QMainWindow):
             plugin_host.deactivate_all()
         self._autosave_timer.stop()
         self._state_save_debounce.stop()
-        # 窓の下の :class:`GuardedStream` を**1 つ残らず**降ろす（項目#88 /
-        # #160）: リネーム追従のウォーク（最大 20,000 フォルダの NAS
+        # 窓の下の :class:`GuardedStream` を**1 つ残らず**降ろす:
+        # リネーム追従のウォーク（最大 20,000 フォルダの NAS
         # ``os.scandir``）も代表画像の BFS も、止めないと閉じた後まで走り続け、
         # 前者はその間 ``resolve_moved_entries`` が close 済みストアへ書きに
         # 行き得る。有界ドレイン（``_drain_loader_pools``）が吸収できるのは
@@ -8511,7 +8500,7 @@ class ViewerWindow(QMainWindow):
         self._rename_follow_pending = False
         for stream in self.findChildren(GuardedStream):
             stream.cancel()
-        # issue #94 のメタ再読込予約も破棄 — close 後に off-thread read を
+        # post.md メタの再読込予約も破棄 — close 後に off-thread read を
         # 蒔く意味はない（着地しても bridge の teardown ガードで握られるが、
         # 無駄な I/O を出さない）。
         self._info_meta_retry_timer.stop()
@@ -8522,7 +8511,7 @@ class ViewerWindow(QMainWindow):
         monitor = getattr(self, "_main_thread_monitor", None)
         if monitor is not None:
             monitor._timer.stop()
-        # tags.db 監視も止める（issue #107）: 閉じかけのウィンドウで再読込
+        # tags.db 監視も止める: 閉じかけのウィンドウで再読込
         # （sqlite の開き直し + detail window の show_path）を走らせる意味は
         # ない。in-flight の probe は上の一括 ``cancel`` が既に無効化している
         # （ワーカー自体は止められないが、着地は ``bind`` の選別で捨てられる）。
@@ -8530,7 +8519,7 @@ class ViewerWindow(QMainWindow):
         tags_timer = getattr(self, "_tags_reload_timer", None)
         if tags_timer is not None:
             tags_timer.stop()
-        # 「自走タイマーを止める」は**再武装の経路も断つ**こと（項目#223）:
+        # 「自走タイマーを止める」は**再武装の経路も断つ**こと:
         # このあと closeEvent 後半は data/ へ書く（viewer_state.json / WAL
         # チェックポイント）ので、watcher を生かしたままだと自分の書き込みで
         # ``directoryChanged`` が飛び、止めたばかりのデバウンスが再び回り出す。
@@ -8544,12 +8533,12 @@ class ViewerWindow(QMainWindow):
                     signal.disconnect(self._on_tags_db_changed)
                 except (RuntimeError, TypeError, SystemError):  # pragma: no cover
                     pass
-        # ---- 予算付き teardown (issue #132) --------------------------------
+        # ---- 予算付き teardown ---------------------------------------------
         # ここから下の永続化（state 書き込み + 全 sqlite ストアの close）は
         # **フェーズごとに独立した絶対期限**を持つ。到達不能な SMB 共有では
-        # 1 回の同期 I/O が数十〜数百秒ブロックし、GUI スレッドで待つ従来の形では
+        # 1 回の同期 I/O が数十〜数百秒ブロックし、GUI スレッドで待つ形では
         # 「× を押しても 200 秒経っても閉じない・共有を復旧しても回復しない」
-        # （VM 実測 2/2）になっていた。「閉じる」はユーザーが決めた後の
+        # （VM 実測 2/2）になる。「閉じる」はユーザーが決めた後の
         # 後始末なので、死んだストレージのために無限に待つ理由が無い。
         #
         # ``path_probe`` を「data/ に触れる前のゲート」へ引き上げる案は採らな
@@ -8558,20 +8547,20 @@ class ViewerWindow(QMainWindow):
         # 中に落ちる共有は救えない）。予算は実際の操作そのものを縛るので、
         # 状態も増えず取りこぼしも無い。
         #
-        # **予算はフェーズごとに切り直す**（issue #140）。以前は 1 本の
-        # ``Deadline`` を両フェーズで共有していたが、**その間に予算を持たない
-        # ドレイン群（`_zip_drill` 5s + `_cache_ctrl` 5s + ローダープール 2s =
-        # 最大 12 秒）が挟まる**ので、共有では「健全な保存先でキャッシュ
-        # ビルド中に閉じた」だけで第 2 フェーズが常に ``join(0)`` になり、
-        # user_meta.db の WAL チェックポイントが毎回落ちていた（死んだ共有
-        # だけの degradation のつもりが、正常系の既定挙動になっていた）。
+        # **予算はフェーズごとに切り直す**。1 本の ``Deadline`` を両フェーズで
+        # 共有すると、**その間に予算を持たないドレイン群（`_zip_drill` 5s +
+        # `_cache_ctrl` 5s + ローダープール 2s = 最大 12 秒）が挟まる**ので、
+        # 「健全な保存先でキャッシュビルド中に閉じた」だけで第 2 フェーズが
+        # 常に ``join(0)`` になり、user_meta.db の WAL チェックポイントが毎回
+        # 落ちる（死んだ共有だけの degradation のつもりが、正常系の既定挙動に
+        # なる）。
         # 予算はあくまで「1 回の同期 I/O が無限に伸びる」ことへの上限なので、
         # ドレインを挟んだ後の別フェーズには新しい上限を配る。
         #
         # 積算の心配（元の症状に戻らないか）: GUI スレッドが待つ上限は
         # フェーズ 1（3 秒）＋ ドレイン（最大 12 秒・従来から自前タイムアウト
-        # 持ち）＋ フェーズ 2（3 秒）= 最悪 18 秒で、共有していた頃の 15 秒
-        # から 3 秒増える。有界であることは変わらず、引き換えに「終了のたびに
+        # 持ち）＋ フェーズ 2（3 秒）= 最悪 18 秒で、共有する形の 15 秒
+        # より 3 秒長い。有界であることは変わらず、引き換えに「終了のたびに
         # WAL チェックポイントを落とす」正常系の劣化が消える。
         state_save_budget = Deadline(_CLOSE_PERSIST_BUDGET_S)
         # 収集はウィジェット読み取りなので GUI スレッド必須。ディスク突き
@@ -8583,20 +8572,22 @@ class ViewerWindow(QMainWindow):
         # 意味が無いため。**だから `_persist_state_snapshot` は通さない**
         # （在庫待ちと自前 ``Deadline`` の両方を迂回する必要がある）。共通化
         # されているのは「収集 = ``_collect_state`` / 突き合わせ + 書き込み =
-        # ``_save_merged_state``」の 2 本で、docs もそう書くこと（再指摘 L-3）。
+        # ``_save_merged_state``」の 2 本。
         #
-        # 両者が同時に飛んでも**内容**が壊れない（再指摘 M-2 R4）:
+        # 両者が同時に飛んでも**内容**が壊れない:
         # スナップショットには世代番号が付き、``_save_merged_state`` が
         # ``os.replace`` の直前（``state.py::save_state`` の ``should_land``）
         # まで世代を再確認するので、後から着地しようとした古いオートセーブは
         # そこで捨てられる。**I/O は直列化しない** — 書き込みロックが守るのは
         # ``_state_written_gen`` の read-modify-write だけで、詰まった
         # オートセーブがこの保存を待たせることは無い（ロックで I/O ごと
-        # 囲っていた頃は、3 秒の予算をロック待ちで溶かして保存を試みることすら
-        # できなかった）。``_write_json_atomic`` の原子性はファイル整合性しか
+        # 囲うと、3 秒の予算をロック待ちで溶かして保存を試みることすら
+        # できなくなる）。``_write_json_atomic`` の原子性はファイル整合性しか
         # 守らないので、順序はこの世代確認だけが守る。
         self._collect_state()
         close_snapshot = self._state.model_copy(deep=True)
+        # 状態を取った後は先に隠す（無応答の共有で予算いっぱい待つ間も「閉じた」と見える）。
+        self.hide()
         close_generation = self._next_state_generation()
 
         def _save_close_state() -> None:
@@ -8606,7 +8597,7 @@ class ViewerWindow(QMainWindow):
             [
                 ("viewer_state.json", _save_close_state),
                 # 投げっぱなしで出した ``shared_prefs.json`` の書き込み
-                # （テーマ / ライブラリ登録 — レビュー 2026-09-03 項目#52）を
+                # （テーマ / ライブラリ登録）を
                 # 同じ予算の**末尾**で拾う。閉じる直前のテーマ切替が着地
                 # しないまま窓が消えるのを普通のディスクでは防ぎ、死んだ
                 # 共有では予算超過として諦める（ワーカーは daemon なので
@@ -8678,7 +8669,7 @@ class ViewerWindow(QMainWindow):
         # Stop an in-flight ZIP extraction BEFORE the sweep below: a worker
         # still writing members would race the rmtree and re-create the
         # directory it was handed, leaking a ``snappix-viewer-zip-*`` tree
-        # into ``data/tmp`` (レビュー 2026-07-31 #81).  Bounded drain, same
+        # into ``data/tmp``.  Bounded drain, same
         # contract as the cache builder / loader pools further down.
         self._zip_drill.shutdown(5000)
         # Remove every temp directory created by ZIP extraction.  Best-
@@ -8686,8 +8677,8 @@ class ViewerWindow(QMainWindow):
         # still hold a file open, in which case rmtree leaves the lock
         # behind for the OS to reclaim later.
         #
-        # **実行はここではなく下の予算付きフェーズの末尾**（issue #132 の
-        # teardown 契約）: 削除対象は ``data/tmp`` 配下 = 死んだ共有では
+        # **実行はここではなく下の予算付きフェーズの末尾**（予算付き
+        # teardown の契約）: 削除対象は ``data/tmp`` 配下 = 死んだ共有では
         # 1 回の同期 I/O が数十〜数百秒ブロックするボリュームで、木のファイル
         # 数ぶんの ``unlink`` を GUI スレッドで直列に撃つと「× を押しても
         # 閉じない」が予算の外側で復活する（``ignore_errors=True`` は例外を
@@ -8714,22 +8705,22 @@ class ViewerWindow(QMainWindow):
         # ``wait_for_pools`` so no writer survives past the close below.
         # フォルダプレビューのキャンセル（タイマー停止 + トークン回転）は
         # 汎用ドレインより**前**に出す — 汎用パスが吸収できるのは待ちだけで、
-        # キャンセルしていない仕事は予算いっぱい待つことになる（項目#136 が
-        # 足した有界待ち自体はその汎用パスに吸収される）。
+        # キャンセルしていない仕事は予算いっぱい待つことになる（フォルダ
+        # プレビュー自身の有界待ちはその汎用パスに吸収される）。
         self._content.shutdown_folder_preview(2000)
         self._drain_loader_pools(2000)
-        # リネーム追従の専用プール（項目#218）を含む窓配下の全ワーカープールは
+        # リネーム追従の専用プールを含む窓配下の全ワーカープールは
         # ``_drain_loader_pools`` の ``findChildren(QThreadPool)`` が 1 本の予算で
         # 掃く — ここに個別の待ちを並べ直さないこと（新しい葉が増えるたびに
         # 同じ片側欠落が起きる）。走行中のウォークを実際に止めるための
         # ``token.cancel()`` は closeEvent の先頭で済んでいる。
-        # Flush + close the persistent stores (best-effort, 予算付き #132).
+        # Flush + close the persistent stores (best-effort, 予算付き).
         #
         # 順序が「再生成不能 → 再生成可能」なのはフェーズ内の優先順位:
         # 1 本のワーカーが宣言順に閉じるので、諦められるのは**後ろ側 =
         # 作り直せるキャッシュ**になる。user_meta.db（唯一の再生成不能
         # データ）だけは最初に閉じる。
-        # 予算は第 1 フェーズと**別勘定**（issue #140）— 間に挟まる無予算の
+        # 予算は第 1 フェーズと**別勘定** — 間に挟まる無予算の
         # ドレイン（最大 12 秒）に食い潰されると、健全な保存先でも毎回
         # join(0) になって WAL チェックポイントが落ちるため。
         # 書き手のドレイン（_cache_ctrl.shutdown / _drain_loader_pools）は
@@ -8779,13 +8770,13 @@ class ViewerWindow(QMainWindow):
         # （右一覧のスピナー・グリッドの遅延リレイアウト…）が自分で足した
         # タイマーは列挙の外に居た。窓配下のタイマーは全て ``QTimer(<親>)`` =
         # 窓の子孫なので、ここで一括 stop すれば新しい葉も自動で載る。
-        # **位置は closeEvent の末尾**であること（項目#223 の再武装の罠と同型）:
+        # **位置は closeEvent の末尾**であること（tags.db watcher の再武装の罠と同型）:
         # 前半のドレイン / ストア close の中で再武装されるタイマー（ヒント表示
         # 等）があるため、途中に置くと止め切れない。
         for timer in self.findChildren(QTimer):
             timer.stop()
         # 予算超過を検知したときだけログ出口を有界化する（旧
-        # ``limit_exit_flush``）という後始末は**もう無い**（issue #132 R4）。
+        # ``limit_exit_flush``）という後始末は**持たない**。
         # ログ機構そのものが有界になったため: ``common/logging.py`` の
         # ``_BoundedSink`` は呼び出しスレッドを絶対に塞がず、loguru の
         # ``atexit.register(logger.remove)`` が呼ぶ ``stop()`` も 1 秒で

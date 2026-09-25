@@ -93,13 +93,12 @@ def _strip_term_prefix(
 
     Shared by :func:`_parse_query`, :func:`_parse_tag_groups` and
     :func:`_parse_filter_query` so the three parsers of the same tiny
-    ``-``/``~`` grammar can't drift apart. Before item #58 they had: a token
-    carrying **only one** marker stripped correctly, but a token carrying
-    **both** (``-~foo`` — e.g. produced by toggling an existing ``~foo`` OR
-    chip to an exclusion) only had the first marker peeled off in two of the
-    three parsers, leaving a literal ``~foo`` residue — a needle that can
-    never match a real tag/name, so the exclusion silently became a no-op
-    *and* the term vanished from the OR pool it came from.
+    ``-``/``~`` grammar can't drift apart.  A token carrying **both**
+    markers (``-~foo`` — e.g. produced by toggling an existing ``~foo`` OR
+    chip to an exclusion) must have both peeled off: leaving a literal
+    ``~foo`` residue gives a needle that can never match a real tag/name, so
+    the exclusion silently becomes a no-op *and* the term vanishes from the
+    OR pool it came from.
 
     * ``~foo`` → OR-pooled include (``or_group=True``).
     * ``-foo`` → exclusion (``exclude=True``).
@@ -109,7 +108,7 @@ def _strip_term_prefix(
       ``~`` term is never also an exclusion.
     * A residue that is empty, or made up only of leftover ``-``/``~``
       symbols (``--`` → ``-``, ``~~`` → ``~``, ``-~`` → ``~`` → ``""``), is
-      mid-typing noise, not a needle, so ``None`` is returned (item #25).  A
+      mid-typing noise, not a needle, so ``None`` is returned.  A
       residue that starts with a *repeat of the same* marker it was just
       stripped of (``--foo``) is **not** collapsed further — the leftover
       dash stays part of the literal needle, same as any other ``-``-prefixed
@@ -142,7 +141,7 @@ def _strip_term_prefix(
         exclude = True
         token = token[1:]
         # ``-`` already committed to exclusion; a leftover leading ``~`` here
-        # is the OR marker ``-`` just overrode, not literal text (item #58).
+        # is the OR marker ``-`` just overrode, not literal text.
         token = token.lstrip("~")
     elif token == "-":
         return None
@@ -159,10 +158,10 @@ def split_tag_terms(text: str) -> tuple[list[str], list[str], list[str]]:
     The **display** counterpart of :func:`_parse_tag_groups`: same grammar,
     same drop rules, same ``-`` wins over ``~`` verdict — but the residues are
     not casefolded and the OR terms are handed back separately so a caller can
-    render them as one pool (項目#240).  Surfaces that merely echo the query
-    back to the user (the AIタグ一覧's 「現在の検索条件」 strip) used to peel
-    only the first marker off by hand, so ``-~cat`` showed as ``~cat`` while
-    the real query excluded ``cat``.
+    render them as one pool.  Surfaces that merely echo the query back to the
+    user (the AIタグ一覧's 「現在の検索条件」 strip) must not peel markers off
+    by hand: peeling only the first would show ``-~cat`` as ``~cat`` while
+    the real query excludes ``cat``.
     """
     includes: list[str] = []
     or_terms: list[str] = []
@@ -200,10 +199,10 @@ def _parse_query(text: str) -> tuple[list[str], list[str]]:
     * A token whose residue after the prefix is itself only ``-`` / ``~``
       symbols (``--`` → ``-``, ``~~`` → ``~``) is likewise mid-typing noise,
       not a needle, so it is dropped rather than becoming a literal ``-`` /
-      ``~`` term that would silently exclude/include a huge slice (item #25).
+      ``~`` term that would silently exclude/include a huge slice.
     * A token carrying **both** markers (``-~foo`` / ``~-foo``) has both
       stripped — ``-`` wins — rather than leaving a dangling, unmatchable
-      ``~foo`` exclusion (item #58); see :func:`_strip_term_prefix`.
+      ``~foo`` exclusion; see :func:`_strip_term_prefix`.
 
     All returned terms are casefolded so callers can compare against a
     pre-casefolded haystack without re-folding per term.
@@ -249,21 +248,20 @@ def _parse_tag_groups(text: str) -> tuple[list[list[str]], list[str]]:
     an existing ``~foo`` OR chip to an exclusion) has both stripped and ``-``
     wins: the tag is excluded and also removed from the OR pool, rather than
     becoming a dangling ``~foo`` exclusion that can never match a real tag
-    while silently vanishing from the pool (item #58); see
+    while silently vanishing from the pool; see
     :func:`_strip_term_prefix`.
 
-    **Cross-group duplicates are normalised here (item E03)** as a query
-    simplification (since review item #36 the engine also counts a duplicated
-    tag toward every group it belongs to, so this fold is no longer
-    load-bearing for correctness).  By the absorption law, an OR group
+    **Cross-group duplicates are normalised here** as a query
+    simplification (the engine also counts a duplicated tag toward every
+    group it belongs to, so this fold is not load-bearing for correctness).  By the absorption law, an OR group
     containing a tag that already appears as a **mandatory plain singleton**
     is unconditionally satisfied (``cat AND (cat OR dog)`` ≡ ``cat`` — an
     image with ``cat`` always clears the OR arm), so the **whole OR group is
     discarded** (``cat ~cat`` ⇒ ``[[cat]]``, ``cat ~cat ~dog`` ⇒ ``[[cat]]``).
-    Stripping only the duplicated member — the pre-#20 behaviour — would
+    Stripping only the duplicated member would
     promote the surviving alternatives into a new mandatory AND group
     (``cat AND dog``), silently narrowing the query relative to the filter
-    box's OR-pool evaluation of the same ``~`` syntax (review #20).
+    box's OR-pool evaluation of the same ``~`` syntax.
     """
     plain: list[str] = []
     or_terms: list[str] = []
@@ -289,7 +287,7 @@ def _parse_tag_groups(text: str) -> tuple[list[list[str]], list[str]]:
         seen_plain.add(term)
         groups.append([term])
     if or_terms:
-        # Absorption (review #20): an OR group containing a tag already
+        # Absorption: an OR group containing a tag already
         # required as a plain singleton is unconditionally satisfied
         # (``cat AND (cat OR dog)`` ≡ ``cat``), so the WHOLE group is dropped.
         # Stripping only that member would promote the remaining alternatives
@@ -304,7 +302,7 @@ def _parse_tag_groups(text: str) -> tuple[list[list[str]], list[str]]:
 #: ``str(md_path)`` and validated by mtime, so an edited post is re-parsed.
 #: Holding the *whole* parse — not just the body string — means the ``body:``
 #: filter and any other post.md-derived read (posted_at / tags) share a single
-#: parse per file instead of each re-reading + re-parsing it (#108).  Only
+#: parse per file instead of each re-reading + re-parsing it.  Only
 #: populated lazily (first ``body:`` match / first :func:`parsed_post_cached`
 #: call), so most sessions never touch it; a bounded LRU caps memory on huge
 #: libraries.  The stored casefolded body rides alongside the parse so the hot
@@ -321,8 +319,8 @@ _BODY_CACHE_MAX = 4096
 #: long text) could pin gigabytes in a portable viewer that otherwise budgets its
 #: caches in bytes (``FolderPreviewCache`` / ``SearchIndex`` take ``max_bytes``).
 #: Ordinary libraries — a few KB per post — are still bounded by the entry count
-#: (4,096 × ~8 KB ≒ this budget), so this only bites the pathological case
-#: (#160).  An entry whose own content exceeds the budget is simply not retained.
+#: (4,096 × ~8 KB ≒ this budget), so this only bites the pathological case.
+#: An entry whose own content exceeds the budget is simply not retained.
 _BODY_CACHE_MAX_CHARS = 32 * 1024 * 1024
 #: Running sum of the cached entries' ``cost`` (kept in step by
 #: :func:`_body_cache_store`, the only writer).
@@ -359,8 +357,8 @@ def parsed_post_cached(md_path, *, mtime: float | None = None):
     check the cache without re-casefolding, and passing that value through
     keeps the cold path from stat-ing the very same file a second time.  A
     ``body:`` term is evaluated against **every** entry of the current view, so
-    on a cold NAS folder with 1,200 children the doubled round-trips were
-    directly visible (#161).
+    on a cold NAS folder with 1,200 children doubled round-trips are
+    directly visible.
     """
     key = str(md_path)
     if mtime is None:
@@ -388,7 +386,7 @@ def _entry_body_text(entry: FolderEntry) -> str:
     :func:`parse_post_md`) backs the ``body:`` filter field.  Reads happen
     lazily — only the first time a folder is matched against a ``body:`` term —
     and share the mtime-keyed :func:`parsed_post_cached` cache so a body read and
-    any other post.md field read of the same file parse it only once (#108).
+    any other post.md field read of the same file parse it only once.
     Returns ``""`` for entries with no readable post.md.
     """
     if not entry.is_dir or not entry.has_post_md:
@@ -406,7 +404,7 @@ def _entry_body_text(entry: FolderEntry) -> str:
         _BODY_CACHE.move_to_end(key)
         return cached[2]
     # Hand the mtime we just read to the cold path so it doesn't stat the same
-    # post.md again (#161) — this runs once per entry of the current view.
+    # post.md again — this runs once per entry of the current view.
     parsed = parsed_post_cached(md, mtime=mtime)
     if parsed is None:
         return ""
@@ -722,7 +720,7 @@ def parse_control_tokens(text: str) -> ControlTokens:
     control tokens (``-type:video``) are ignored — negating a control makes no
     sense; clear it instead.  ``~`` OR members are ignored for the same reason:
     a control is a single value, so applying ``~type:video`` as a plain
-    ``type:video`` would silently drop the OR the user asked for (review #100).
+    ``type:video`` would silently drop the OR the user asked for.
     Both stay visible in the 絞り込み chip (:func:`strip_control_tokens` keeps
     prefixed tokens) rather than vanishing without a trace.
     """
@@ -783,13 +781,13 @@ def strip_control_tokens(text: str, fields=_CONTROL_FIELDS) -> str:
       them, so stripping them too made ``-type:video`` an input that is neither
       applied, nor matched (``_match_filter_terms`` skips control fields), nor
       visible anywhere — asymmetric with the other inert tokens
-      (``favorites:abc``) which stay in the chip (review #100).  This also
+      (``favorites:abc``) which stay in the chip.  This also
       matches the curation-token contract, where ``-``/``~`` members stay
       ordinary text terms.
     * Tokens with an unrecognised value (``type:foo``, ``rating:xyz``,
       ``score:<0.1``) and the half-typed ``type:`` — same reasoning, the value
       simply never reaches a control, so the token owns no dimension chip and
-      must stay visible in the 絞り込み chip instead of vanishing (#162).
+      must stay visible in the 絞り込み chip instead of vanishing.
     """
     kept: list[str] = []
     for raw in text.split():
@@ -849,7 +847,7 @@ def strip_owned_control_tokens(
     (``type:image type:video``) is applied last-wins, so the losing token
     reaches no control at all — dropping it from the label too made it an
     input that is neither applied, nor matched (``_match_filter_terms`` skips
-    control fields), nor visible anywhere (#162).  It stays in the chip for
+    control fields), nor visible anywhere.  It stays in the chip for
     exactly the reason ``type:foo`` / ``-type:video`` do.
     """
     raws = text.split()
@@ -938,10 +936,10 @@ def _parse_filter_query(text: str) -> list[_FilterTerm]:
     the whole token stays a plain term, so an ordinary needle that happens to
     contain a colon keeps matching as before.  Empty values, a lone ``-`` and a
     residue that is only ``-`` / ``~`` symbols (``--`` → ``-``, ``~~`` → ``~``)
-    are dropped (mid-typing tolerance — item #25).  A token carrying **both**
+    are dropped (mid-typing tolerance).  A token carrying **both**
     markers (``-~foo`` / ``~-foo``) has both stripped, with ``-`` winning
     either way round, rather than leaving a dangling ``~foo`` exclusion that
-    can never match a real field value (item #58); see
+    can never match a real field value; see
     :func:`_strip_term_prefix`.
     """
     terms: list[_FilterTerm] = []
@@ -1035,7 +1033,7 @@ def _match_filter_terms(
             present = _curation_present(term, cur[0], cur[1], cur[2])
         elif term.field in _NUMERIC_FIELDS:
             # Numeric fields (favorites) compare by value / range, not substring
-            # — so ``favorites:5`` is exactly 5, not "contains 5" (#107).
+            # — so ``favorites:5`` is exactly 5, not "contains 5".
             present = _match_numeric_field(
                 entry, term.field, term.value, term.num
             )

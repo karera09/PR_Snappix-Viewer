@@ -1,6 +1,6 @@
 """Explorer shell integration — the 「Snappix Viewer で開く」 right-click verb.
 
-Portable-first policy (see CLAUDE.md): the viewer NEVER writes to the registry
+Portable-first policy: the viewer NEVER writes to the registry
 on its own.  The *only* registry writes in the product are the ones a user
 explicitly triggers here — from the in-app 「エクスプローラ統合…」 dialog
 (``main_window``) or the shipped ``シェル統合を登録.bat`` / ``…を解除.bat``
@@ -16,7 +16,7 @@ The ``Directory`` verb appears on a folder's right-click menu and Windows
 passes the folder as ``%1``; the ``Directory\\Background`` verb appears when
 right-clicking the empty area *inside* a folder and passes the open folder as
 ``%V``.  Both invoke ``"<exe>" "%1"`` / ``"<exe>" "%V"``, received by the
-viewer's positional-argument handling (:mod:`snappix._dispatch`, L02).
+viewer's positional-argument handling (:mod:`snappix._dispatch`).
 
 This module is intentionally **Qt-free and import-light**: ``winreg`` (Windows
 only) is imported lazily inside the functions that touch the registry, so the
@@ -174,7 +174,7 @@ def same_exe_path(a: str | None, b: str | None) -> bool:
 
     Used by the integration dialog to spot a **stale registration** — the
     portable product is routinely moved as a folder, and the registered verb
-    then points at a location that no longer exists (UIレビュー 08-28 N-37).
+    then points at a location that no longer exists.
     Comparison is path-only and read-only: normalised (``abspath`` folds
     ``..`` / separators) and case-folded, because the registered string comes
     from an earlier run's ``sys.executable`` and Windows paths are

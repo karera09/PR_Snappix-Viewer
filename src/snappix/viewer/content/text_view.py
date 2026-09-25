@@ -28,6 +28,7 @@ from ..context_menus import (
     curation_hooks_from_ancestors,
 )
 from ..edge_nav import navigate_at_edge, navigate_on_wheel
+from ..text_decode import decode_text
 from ..focus_target import SEAT_PREVIEW
 from ..view_prefs import _format_bytes, _reveal_in_explorer, open_with_default
 from ._shared import _popup_entry_menu
@@ -42,108 +43,6 @@ TEXT_SUFFIXES: frozenset[str] = frozenset({
     ".toml",
     ".ini", ".cfg", ".conf",
 })
-
-
-def _trim_incomplete_utf8_tail(raw: bytes) -> bytes:
-    """Drop a partial UTF-8 sequence at the *end* of *raw*.
-
-    When a file is truncated at an arbitrary byte offset (the preview cap),
-    the cut almost always lands in the middle of a multi-byte character —
-    for Japanese UTF-8 (3 bytes/char) the odds a cut hits a char boundary
-    are only ~1/3.  A single dangling lead/continuation byte would make the
-    strict UTF-8 decode in :func:`_decode_text` fail, and the bytes then
-    decode "successfully" as Shift-JIS / Latin-1 — turning the *entire* body
-    into mojibake.  Trim up to 3 trailing bytes so the last complete
-    character survives and the UTF-8 branch keeps working.
-
-    Only the tail is inspected (max 3 bytes); a genuinely non-UTF-8 file is
-    unaffected because its earlier bytes still fail the UTF-8 decode and the
-    Shift-JIS / Latin-1 fallback in :func:`_decode_text` handles it.
-
-    **UTF-16 (BOM 付き) は別勘定**: BOM で符号が
-    確定しているのに UTF-8 前提のトリムを当てると、コードユニット上位バイトが
-    0xC0–0xFF（全角記号・ハングル等）に当たったとき 1 バイトだけ削られて
-    奇数長になり、:func:`_decode_text` の strict ``utf-16`` が失敗して
-    Latin-1 へ落ちる = **本文全体**が文字化けする。UTF-16 は 2 バイト境界
-    （＋末尾に取り残されたサロゲート上位）で切る。
-    """
-    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return _trim_incomplete_utf16_tail(raw)
-    # A UTF-8 char is at most 4 bytes, so at most the last 3 bytes can be an
-    # incomplete sequence.  Walk back to the last lead byte (0xxxxxxx ASCII
-    # or 11xxxxxx start) and check whether the sequence starting there is
-    # complete; if not, cut it.
-    for back in range(1, min(4, len(raw)) + 1):
-        b = raw[-back]
-        if b < 0x80 or b >= 0xC0:
-            # Found the start of the last character (ASCII or a lead byte).
-            if b < 0x80:
-                expected = 1
-            elif b < 0xE0:
-                expected = 2
-            elif b < 0xF0:
-                expected = 3
-            else:
-                expected = 4
-            if back < expected:
-                return raw[:-back]  # incomplete trailing char — drop it
-            return raw
-    return raw
-
-
-def _trim_incomplete_utf16_tail(raw: bytes) -> bytes:
-    """Drop a partial UTF-16 code unit / surrogate pair at the end of *raw*.
-
-    *raw* must start with a UTF-16 BOM (the caller checks).  Two cuts can
-    leave the strict ``utf-16`` decode in :func:`_decode_text` failing:
-
-    * an odd length — half a code unit ("truncated data");
-    * a trailing *high* surrogate whose partner was cut off
-      ("unexpected end of data").
-
-    Both would fall through to Latin-1 and turn the whole body into
-    mojibake, so trim them here.
-    """
-    raw = raw[: len(raw) - (len(raw) % 2)]
-    if len(raw) >= 4:
-        little = raw.startswith(b"\xff\xfe")
-        high_byte = raw[-1] if little else raw[-2]
-        if 0xD8 <= high_byte <= 0xDB:  # lone leading surrogate at the cut
-            raw = raw[:-2]
-    return raw
-
-
-def _decode_text(raw: bytes) -> str:
-    """Best-effort decode for the text preview.
-
-    Order is chosen so an earlier success is trustworthy:
-
-    1. **BOM sniffing** (unambiguous): a UTF-16 LE/BE or UTF-8 BOM pins the
-       codec outright.  ``utf-16`` consumes the BOM and reads the endianness
-       from it; ``utf-8-sig`` strips the UTF-8 BOM.
-    2. **Strict UTF-8** without a BOM — a genuinely non-UTF-8 file almost
-       always fails here, so a success is reliable (the dominant case).
-    3. **Japanese legacy encodings** ``cp932`` (Shift_JIS superset) then
-       ``euc_jp``.  cp932 first because the two overlap and Windows-authored
-       Japanese text is far more common than EUC-JP.
-    4. **Latin-1** — never raises, so it's the lossless last resort.
-    """
-    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-        try:
-            return raw.decode("utf-16")
-        except (UnicodeDecodeError, LookupError):
-            pass
-    if raw.startswith(b"\xef\xbb\xbf"):
-        try:
-            return raw.decode("utf-8-sig")
-        except (UnicodeDecodeError, LookupError):
-            pass
-    for enc in ("utf-8", "cp932", "euc_jp"):
-        try:
-            return raw.decode(enc)
-        except (UnicodeDecodeError, LookupError):
-            pass
-    return raw.decode("latin-1")
 
 
 def _read_text_preview(path: Path, limit: int) -> tuple[str, str]:
@@ -167,10 +66,10 @@ def _read_text_preview(path: Path, limit: int) -> tuple[str, str]:
             raw = fh.read(limit + 1)
         truncated = len(raw) > limit
         if truncated:
-            # Cut at the cap, then drop any partial UTF-8 char left at
-            # the boundary so a Japanese file doesn't decode as mojibake.
-            raw = _trim_incomplete_utf8_tail(raw[:limit])
-        text = _decode_text(raw)
+            # 上限で切ると末尾がほぼ必ず多バイト文字の途中になる — 半端な
+            # 1 文字の扱いは ``decode_text(truncated=True)`` が符号ごとに持つ。
+            raw = raw[:limit]
+        text = decode_text(raw, truncated=truncated)
         if truncated:
             limit_mib = limit / (1024 * 1024)
             text += t("viewer.content_view.text_truncated", mib=limit_mib)
@@ -182,7 +81,7 @@ def _read_text_preview(path: Path, limit: int) -> tuple[str, str]:
 class TextView(QWidget):
     """Plain-text file viewer backed by a read-only QPlainTextEdit.
 
-    Encoding detection: UTF-8 → Shift-JIS → Latin-1 fallback.
+    Encoding detection: :func:`~snappix.viewer.text_decode.decode_text`.
     Files larger than ``_TEXT_MAX_BYTES`` are truncated with a notice.
     Wheel gestures at the top/bottom edge emit ``navigate_requested``
     consistent with the other preview sub-views.

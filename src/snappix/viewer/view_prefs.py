@@ -16,20 +16,22 @@ globals at runtime via the ``set_*`` functions below.
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 
 from loguru import logger
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QWidget
 
 from ..common.format import format_bytes
+from ..common.ui import show_toast
 from ._runnable import GuardedSignals, run_detached
 
 
 # Pixels scrolled per mouse-wheel notch in the preview pane (MarkdownView /
 # ImageView).  Qt's default for QAbstractScrollArea is "wheelScrollLines × line
 # height" (~60 px), which feels slow on tall posts and large images.  Settable
-# at runtime from 設定ダイアログ ▸ 表示 → 「プレビューのスクロール量」
-# (UIレビュー 07-25 #128 — 旧「表示メニューの項目」という記述は移設で陳腐化)。
+# at runtime from 設定ダイアログ ▸ 表示 → 「プレビューのスクロール量」.
 _PREVIEW_SCROLL_PIXELS = 120
 
 
@@ -83,7 +85,7 @@ def get_wheel_nav_grace_ms() -> int:
     return int(round(_WHEEL_NAV_GRACE_SEC * 1000.0))
 
 
-# Image preview wheel assignment (F01).  Default OFF keeps the historical
+# Image preview wheel assignment.  Default OFF keeps the standard
 # mapping: a plain wheel steps to the previous / next sibling file and
 # Ctrl+wheel zooms.  When ON the two swap — a plain wheel zooms and the
 # file-stepping moves to Ctrl+wheel — for users who treat the preview like a
@@ -101,7 +103,7 @@ def get_image_wheel_zoom() -> bool:
     return _IMAGE_WHEEL_ZOOM
 
 
-# Fit-to-window 100% ceiling (F03).  Default ON: an image smaller than the
+# Fit-to-window 100% ceiling.  Default ON: an image smaller than the
 # viewport is shown at its natural size (centered) instead of being stretched
 # past 100% and going soft.  OFF restores the historical "always fill the
 # viewport" behaviour.  Read *live* by ``ImageView``'s fit calculations.
@@ -148,7 +150,7 @@ def get_zip_preview_size_limit() -> int:
 # to open it.  Over the cap the reader skips the read entirely and the view
 # says so (「既定アプリで開く」 still works).  Mutable at runtime via
 # ``set_pdf_preview_size_limit`` so the settings dialog can change it
-# without restart (レビュー 2026-09-03 項目#69).
+# without restart.
 _PDF_PREVIEW_SIZE_LIMIT = 100 * 1024 * 1024  # 100 MiB
 
 
@@ -210,8 +212,8 @@ def _classify_edge(scrollbar, delta: int) -> tuple[bool, bool]:
       wheel's direction.  Only when true should the caller emit a
       navigation request.
 
-    **2026-08-28 ユーザー裁定で維持**（UIレビュー N-27「フィット時にホイールが
-    猶予なく即ファイル送りになる」は見送り）: フィット表示ではスクロールという
+    **フィット時にホイールが猶予なく即ファイル送りになるのは意図した挙動**:
+    フィット表示ではスクロールという
     機能が被っていないためホイール＝ファイル送りが明示的で、猶予を挟むと
     もっさり感が出る。``immediate`` の意味づけと ``edge_nav`` 側の
     ``WheelNavGate`` 迂回はこのまま変更しないこと。
@@ -247,22 +249,19 @@ def notify_failure(
 ) -> None:
     """*window* の属するトップレベルへ失敗を通知する（ベストエフォート）.
 
-    「押したのに何も起きない」を残さないための共通ファネル (UIレビュー 07-25
-    #74)。呼び出し側はウィジェットなら何でも渡せる（``None`` も可）。
+    「押したのに何も起きない」を残さないための共通ファネル。呼び出し側はウィジェットなら何でも渡せる（``None`` も可）。
 
-    **着地面はトースト** (UIレビュー 2026-08-28 N-94): 成功側は 07-25 #122 で
-    「``showMessage`` はステータスバー左端の現在パス表示（常設の『今どこに
-    いるか』）を 3 秒間まるごと潰す。現在地を犠牲にする理由は無い」として
-    トーストへ寄せてあり、同じ理由が失敗側にもそのまま当てはまる。片側だけ
-    ステータスバーに残っていたのを揃える。
+    **着地面はトースト**: ``showMessage`` はステータスバー左端の現在パス表示
+    （常設の『今どこにいるか』）を 3 秒間まるごと潰し、現在地を犠牲にする
+    理由は無い。成功側と同じ理由で失敗側もトーストへ寄せる。
 
     ただし本関数は「ファネルを持たないホストでも動く」ことを約束している
-    ので、段は 3 つに落とす: ``_show_toast`` → ``_show_status_message`` /
+    ので、段は 3 つに落とす: ``_show_toast``（無ければ QWidget の窓へ ``show_toast``）→ ``_show_status_message`` /
     ステータスバー → ログ。ホストを持たない小部品からの呼び出しでも約束は
     破れない。
 
     *action_text* / *on_action* を渡すと、トースト段に限り追随ボタンを 1 つ
-    出す（N-40 で入った共通 API）。落ちた段では文言だけが出る — ボタンは
+    出す（トーストの共通 API）。落ちた段では文言だけが出る — ボタンは
     近道であって唯一の入口ではない、という同 API の規約どおり。
     """
     host = None
@@ -272,6 +271,9 @@ def notify_failure(
         host = None
     if host is not None:
         toast = getattr(host, "_show_toast", None)
+        if not callable(toast) and isinstance(host, QWidget):
+            # ファネルを持たない窓（全画面・ダイアログ）も共通トーストで出す。
+            toast = partial(show_toast, host)
         if callable(toast):
             try:
                 if action_text and on_action is not None:
@@ -322,7 +324,7 @@ def _open_default_worker(path: Path) -> bool:
     関連付けの解決結果は変わらない — 変わるのは「QtGui の API をワーカー
     スレッドから呼ばない」という一点だけ。
 
-    失敗通知の契約 (UIレビュー 07-25 #74) は保つ: 不在は存在確認で落とし、
+    失敗通知の契約は保つ: 不在は存在確認で落とし、
     起動そのものの失敗は ``OSError`` で拾う（Windows の「関連付けが無い」も
     ``os.startfile`` からは ``OSError`` として上がる）。
 
@@ -351,18 +353,17 @@ def _open_default_worker(path: Path) -> bool:
 # The relay QObjects have no natural parent (both shell verbs are plain
 # functions called from menus / buttons), so hold a strong reference
 # until the worker's queued ``done`` lands — a garbage-collected relay
-# mid-``emit`` crashes the process (same hazard as image_view/markdown_view #8).
+# mid-``emit`` crashes the process (same hazard as image_view/markdown_view).
 _shell_relays: set[GuardedSignals] = set()
 
 
 def open_with_default(path: Path, window=None) -> None:
     """*path* を OS の既定アプリで開く。失敗したら *window* へ通知する。
 
-    「既定アプリで開く」の**唯一の実装** (UIレビュー 07-25 #74)。以前は
-    右クリックメニュー・各プレビューのボタン・ダブルクリック経路がそれぞれ
-    ``QDesktopServices.openUrl`` を直接呼んでおり、右クリック経路だけが戻り値を
-    捨てて失敗を握りつぶしていた（関連付けの無い拡張子で完全に無反応）。
-    ここに集約して、どの入口でも失敗が必ず可視化されるようにする。
+    「既定アプリで開く」の**唯一の実装**。右クリックメニュー・各プレビューの
+    ボタン・ダブルクリック経路がそれぞれ ``QDesktopServices.openUrl`` を直接
+    呼ぶと、戻り値を捨てた経路で失敗が握りつぶされる（関連付けの無い拡張子で
+    完全に無反応）。ここに集約して、どの入口でも失敗が必ず可視化されるようにする。
 
     **起動を GUI スレッドで行わない**: 到達不能な共有の上のファイルに対して
     GUI スレッドで ``QDesktopServices.openUrl`` を撃つと、開発機の実測で
@@ -383,7 +384,7 @@ def open_with_default(path: Path, window=None) -> None:
             return
         # 失敗の主因は「その拡張子に関連付けが無い」— 次の一手はフォルダを
         # 開いて自分でアプリを選ぶこと。同じモジュールの既存導線をトーストの
-        # 追随ボタンから 1 クリックで出す（UIレビュー 2026-08-28 N-94。
+        # 追随ボタンから 1 クリックで出す（
         # メニューの「エクスプローラで開く」も残るので、これは近道であって
         # 唯一の入口ではない）。
         notify_failure(
@@ -408,7 +409,7 @@ def _reveal_worker(path: Path) -> bool:
     ``bookmark_dialog`` runs its ``is_dir()`` in a worker), and spawning the
     file manager is a process launch.  Running them off-thread keeps
     「エクスプローラで開く」from freezing the window while preserving the
-    failure notice added by UIレビュー 07-25 #74 (レビュー 2026-07-31 #61).
+    failure notice.
 
     Returns ``True`` when the file manager was launched.
     """
@@ -434,20 +435,20 @@ def _reveal_worker(path: Path) -> bool:
 def _reveal_in_explorer(path: Path, window=None) -> None:
     """Best-effort: open the OS file manager with *path* selected.
 
-    *window* を渡すと失敗をステータスへ通知する（UIレビュー 07-25 #74 —
+    *window* を渡すと失敗をステータスへ通知する（
     「既定アプリで開く」と同じく、押したのに無反応を残さない）。
 
-    **追修 (UIレビュー07-25 #74)**: Windows の ``explorer /select,`` は
+    Windows の ``explorer /select,`` は
     存在しないパスを渡しても起動自体は成功する（``Popen`` は OSError を
-    投げず、エクスプローラは既定の場所を開くか無反応）。つまり削除・改名済み
-    のファイルに対してだけは「押したのに無反応」が残っていた。プロセスを
+    投げず、エクスプローラは既定の場所を開くか無反応）ので、削除・改名済み
+    のファイルでは「押したのに無反応」になる。プロセスを
     起こす前に存在を確認し、無ければ ``open_with_default`` と同じ失敗通知へ
     落とす（OSError の捕捉は他 OS / 起動失敗のためそのまま残す）。
 
-    **その存在確認は GUI スレッドで行わない (レビュー 2026-07-31 #61)**:
+    **その存在確認は GUI スレッドで行わない**:
     全ペインの右クリックメニューと各プレビューのボタンがここへ合流するため、
-    切断中の NAS 上のエントリで押すと SMB タイムアウトまでウィンドウが凍って
-    いた。確認と起動は ``_reveal_worker`` がワーカーで行い、失敗通知だけを
+    GUI スレッドで確認すると切断中の NAS 上のエントリで押したとき SMB
+    タイムアウトまでウィンドウが凍る。確認と起動は ``_reveal_worker`` がワーカーで行い、失敗通知だけを
     GUI スレッドへ戻す（この関数自体は即座に戻る非同期 API）。
 
     ワーカーは :func:`~snappix.viewer._runnable.run_detached` の**デーモン

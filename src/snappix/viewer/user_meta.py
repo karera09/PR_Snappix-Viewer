@@ -31,10 +31,10 @@ without a ``QApplication``).
 **Key design (the load-bearing part).**  A row is addressed by a **normalised
 lookup key** (``path_key``, :func:`normalize_entry_key`) while the spelling the
 user actually browsed with is kept beside it in ``path`` for display / ``stat``.
-The historical schema used the raw ``str(Path)`` as the primary key, which is a
+A raw ``str(Path)`` primary key would be a
 BINARY (byte-exact) comparison in sqlite: opening the same library merely with
-different letter case produced a key that matched nothing and every star
-silently disappeared (#133 (c)).
+different letter case would produce a key that matched nothing and every star
+would silently disappear.
 
 The invariant that governs this key: **it is a pure function of the spelling**
 — the same string always yields the same key, with no filesystem probe, no
@@ -68,7 +68,7 @@ blank while the info panel still showed the star.
 
 The invariant is only as good as the enumeration of **who writes that column**,
 and there are exactly five writers — miss one and the split above comes back
-on that path alone (it did: the third was missed until the 2026-08-30 review):
+on that path alone:
 
 1. :meth:`UserMetaStore._merge` — every user curation write,
 2. :meth:`UserMetaStore._fold_legacy_rows` — the one-shot v1 → v2 upgrade,
@@ -77,7 +77,7 @@ on that path alone (it did: the third was missed until the 2026-08-30 review):
    comes from a caller-side ``os.scandir`` walk of the library root and is
    therefore relative whenever the root is,
 4. :meth:`UserMetaStore.rebind_path` — the user-driven 「現在の場所を指定…」
-   repair (#133 item 3, ``viewer/curation_recovery.py``), whose new spelling
+   repair (``viewer/curation_recovery.py``), whose new spelling
    comes from a file dialog and goes through the same
    :func:`absolute_spelling` / :func:`normalize_entry_key` pair,
 5. :meth:`UserMetaStore.rebind_prefix` — the same repair applied to a whole
@@ -93,28 +93,28 @@ The same rule governs the **v1 → v2 upgrade** (:meth:`UserMetaStore._migrate`)
 it runs inside ``ViewerWindow.__init__`` holding ``BEGIN IMMEDIATE``, so it too
 performs no filesystem probe of any kind — a fold that ``stat``-ed candidate
 spellings would turn window construction into a stat storm on a half-mounted
-share and block a second launch out of its own upgrade (2026-08-30 review).
+share and block a second launch out of its own upgrade.
 
 ``Path.resolve()`` is deliberately not used: it is non-strict since 3.6, so it
 silently does *not* normalise a path that no longer exists (a star would change
 key the moment its folder went missing); it is a filesystem round-trip per tile
-on the paint path; and on a dead share it blocks for exactly as long as #132
-was about.  ``os.path.abspath`` is the only syscall left (``GetFullPathNameW``,
+on the paint path; and on a dead share it blocks until the SMB timeout.
+``os.path.abspath`` is the only syscall left (``GetFullPathNameW``,
 ~2 µs — it resolves against the process cwd and never touches the named entry),
 so key computation can neither block nor fail on an offline volume.
 
-**Deliberately NOT folded: a mapped drive letter vs. its UNC target** (#133
-(a), ``Z:\\lib`` vs ``\\\\nas\\lib``).  That equivalence is not a property of
+**Deliberately NOT folded: a mapped drive letter vs. its UNC target**
+(``Z:\\lib`` vs ``\\\\nas\\lib``).  That equivalence is not a property of
 the two strings, it is a property of the machine's current ``net use`` /
-``subst`` table — so a key that folded it would break the invariant above, and
-did (see the 2026-08-30 review of the first attempt: a 1 s probe timeout during
-an SMB reconnect produced ``('\\\\nas\\share\\lib', …)`` and ``('z:\\lib', …)``
+``subst`` table — so a key that folded it would break the invariant above
+(a 1 s probe timeout during
+an SMB reconnect can produce ``('\\\\nas\\share\\lib', …)`` and ``('z:\\lib', …)``
 as two live rows for one folder).  Opening the same library through both
 spellings therefore still yields two independent sets of curation — exactly the
 v1 behaviour for that axis, self-consistent and unchanged, rather than a new
 failure mode.  Folding it *automatically* would need an identity that survives
 re-mounting (a persisted alias table); what exists instead is the **manual**
-repair of #133 item 3: the cross-library list shows unreachable rows as
+repair: the cross-library list shows unreachable rows as
 placeholder tiles (``viewer/curation_recovery.py``) and 「現在の場所を指定…」
 lets the user re-point one via :meth:`UserMetaStore.rebind_path` — an explicit
 per-row action, so the key itself stays pure.
@@ -139,7 +139,7 @@ folder**.  :func:`UserMetaStore.resolve_moved_entries` re-points rows whose
 ``path`` no longer exists onto the current folder that carries the same
 postref — so curation survives a rename without the user re-doing anything.
 (A folder with no ``post.md`` has no postref and is still not followed across a
-rename — #133 (b), deliberately out of scope here.)
+rename — deliberately out of scope here.)
 
 **User tags storage.**  A single ``user_tags`` TEXT column holds a
 comma-separated list, mirroring the ``post.md`` ``- tags:`` convention
@@ -157,7 +157,7 @@ failure NEVER deletes, truncates, quarantines, or recreates the file — a
 corrupt ``user_meta.db`` is left on disk untouched so the user (or a later
 successful open) can recover it.  Callers that need to *tell* the user why
 curation is unavailable use :meth:`open_or_report`, which surfaces the reason
-:meth:`open_or_none` drops on the floor (#51).
+:meth:`open_or_none` drops on the floor.
 
 **このファイルに残るもの / 出たもの.**  ストア :class:`UserMetaStore` と、行の
 同一性を決めるキー計算（:func:`absolute_spelling` / :func:`normalize_entry_key`
@@ -208,25 +208,14 @@ from .user_meta_parts.resolve import (
 
 DB_NAME = "user_meta.db"
 
-#: ``PRAGMA user_version`` of the current schema.  1 = the historical
-#: ``path TEXT PRIMARY KEY`` table; 2 = normalised ``path_key`` + display
-#: ``path`` (#133).
+#: ``PRAGMA user_version`` of the current schema.  1 = a raw ``str(path)``
+#: primary key; 2 = normalised ``path_key`` + display ``path``.
 #:
-#: **Deliberately still 2** although the reverted first attempt (bf13d9d, keys
-#: built through ``realpath``) also stamped 2, so a DB migrated by *that* build
-#: would not be re-keyed by this one.  The reason is not a trade-off — it is
-#: that **no such DB exists** (checked 2026-08-30): the VM verification that
-#: found #133 ran a frozen build of ``main`` (4fa40a3), and bf13d9d was written
-#: *after* it, so nothing on the VM ever ran the reverted keys; the only other
-#: machine that could hold one is this dev box, whose ``data/user_meta.db`` was
-#: inspected and is ``user_version=2`` with zero rows.  bf13d9d was never
-#: tagged, built or released.
-#:
-#: (A v3 would be cheap and safe if one ever did turn up — re-key only the rows
-#: where ``path_key != normalize_entry_key(path)``, which touches no
-#: filesystem, is deterministic and idempotent, and is a complete no-op on a
-#: correct DB.  It is simply repair work with nothing to repair, so it would
-#: only make every future user re-read their whole curation table once.)
+#: (A v3 re-key would be cheap and safe if keys ever needed repair — re-key
+#: only the rows where ``path_key != normalize_entry_key(path)``, which touches
+#: no filesystem, is deterministic and idempotent, and is a complete no-op on a
+#: correct DB.  With nothing to repair it would only make every user re-read
+#: their whole curation table once, so the version stays 2.)
 SCHEMA_VERSION = 2
 
 #: Valid star range.  0 means "no star" (the row may still carry tags / later).
@@ -241,10 +230,10 @@ _MIGRATE_ATTEMPTS = 2
 #: lock, this only lets the winner's commit settle.
 _MIGRATE_RETRY_DELAY = 0.2
 #: Wall-clock ceiling (seconds) on **everything** the upgrade may spend waiting
-#: for the write lock, retry and pause included.  Without it the retry simply
-#: doubled the worst case: ``busy_timeout`` (5 s, pinned by ``SqliteStoreBase``)
+#: for the write lock, retry and pause included.  Without it the retry would
+#: double the worst case: ``busy_timeout`` (5 s, pinned by ``SqliteStoreBase``)
 #: per attempt plus the pause = 11.2 s of a frozen ``ViewerWindow.__init__``
-#: (measured, 2026-08-30 review) — the exact failure #132 is about.  5 s keeps
+#: (measured) — a startup freeze this store must never cause.  5 s keeps
 #: the pre-retry worst case while leaving the retry its real job: a genuine
 #: contended launch loses the lock only for as long as the *winner's own*
 #: upgrade takes (milliseconds on a normal store), never for seconds.
@@ -284,12 +273,12 @@ def clamp_star(value: int) -> int:
     return max(MIN_STAR, min(MAX_STAR, int(value)))
 
 
-#: The characters :func:`split_user_tags` treats as separators (comma +
-#: whitespace), exposed as a regex so the edit dialog's per-token autocomplete
-#: (``post_grid._UserTagCompleter``, UIレビュー 2026-08-28 N-69) can decide
+#: The characters :func:`split_user_tags` treats as separators (comma incl.
+#: the Japanese IME forms 「、」「，」 + whitespace), exposed as a regex so the
+#: edit dialog's per-token autocomplete (``post_grid._UserTagCompleter``) can decide
 #: "where does the token under the cursor start" by the **same** rule instead of
 #: growing a second, quietly-diverging copy of the delimiter contract.
-USER_TAG_SEPARATOR_RE = re.compile(r"[\s,]")
+USER_TAG_SEPARATOR_RE = re.compile(r"[\s,、，]")
 
 
 def split_user_tags(text: str) -> list[str]:
@@ -324,7 +313,7 @@ def join_user_tags(tags: list[str]) -> str:
 
 
 def absolute_spelling(path: "Path | str") -> str:
-    """*path* made absolute — the **display** half of the key contract (#133).
+    """*path* made absolute — the **display** half of the key contract.
 
     :func:`normalize_entry_key` is exactly ``normcase(absolute_spelling(p))``,
     so every spelling the store *stores* (the ``path`` column, and therefore
@@ -364,7 +353,7 @@ def absolute_spelling(path: "Path | str") -> str:
 
 
 def normalize_entry_key(path: "Path | str") -> str:
-    """The store's lookup key for *path* — see the module docstring (#133).
+    """The store's lookup key for *path* — see the module docstring.
 
     **Deterministic by contract**: the returned key depends on *nothing but*
     the spelling handed in.  It performs no filesystem access, starts no
@@ -488,7 +477,7 @@ class CurationMap(dict[str, UserMeta]):
     cross-library 「スター付き一覧」 pool.  Those two uses want *different* keys:
     the pool wants the real on-disk spelling (it is ``stat``-ed and shown), the
     paint lookup wants the normalised one (the tile's path may be spelled
-    differently from the session that set the star — #133).
+    differently from the session that set the star).
 
     So the dict keeps the display spelling as its key — iteration / ``items``
     are unchanged — and carries a side index from
@@ -503,7 +492,7 @@ class CurationMap(dict[str, UserMeta]):
     ``update`` / ``setdefault`` (a second key for one entry) and ``copy`` /
     ``__or__`` (a plain dict, index silently gone, byte-exact lookups back) —
     raise :class:`NotImplementedError` instead of being half-maintained: this
-    class exists because a silent fall back to byte-exact keys is the #133 bug.
+    class exists because a silent fall back to byte-exact keys loses stars.
     ``dict(m)`` / ``{**m}`` cannot be intercepted and are the remaining hole;
     they are a plain snapshot and must not be fed back to the viewer as a
     curation map.
@@ -547,7 +536,7 @@ class CurationMap(dict[str, UserMeta]):
         self._by_key.clear()
         dict.clear(self)
 
-    # -- routes around the index: refuse rather than half-maintain (#133) --
+    # -- routes around the index: refuse rather than half-maintain --
 
     def _unsupported(self, name: str) -> "NotImplementedError":
         return NotImplementedError(
@@ -645,7 +634,7 @@ class WriteOutcome:
     ``ok`` still shows the true persisted state (the historical behaviour of
     :meth:`UserMetaStore.set_star` & friends is preserved).  A caller that
     inspects ``ok`` can warn the user that the star/tag did not stick instead
-    of the silent "★★★" success toast the plain setters cannot avoid (#53).
+    of the silent "★★★" success toast the plain setters cannot avoid.
     """
 
     meta: UserMeta
@@ -702,20 +691,37 @@ class UserMetaStore(SqliteStoreBase):
         recover it.  Instead the reason (``str(exc)``) is returned so the caller
         can surface a one-line "キュレーションデータを開けませんでした（…）" notice
         rather than silently presenting an empty curation surface that looks
-        like every star was lost (#51).
+        like every star was lost.
 
         Both ``sqlite3.Error`` (corrupt / locked DB) and ``OSError`` (a
         read-only volume that fails the ``data/`` ``mkdir``, an odd volume) route
         through the same degradation seam.
+
+        **The open is verified by reading every row once** (:meth:`load_all`).
+        Connecting, the PRAGMAs and :meth:`_migrate` only touch the header /
+        ``sqlite_master``, so a file whose ``entries`` pages alone are damaged
+        used to open "successfully": the grid's ``load_all`` then failed, came
+        back empty, and the curation UI stayed *enabled* over an empty map —
+        exactly the "every star vanished" surface this method exists to avoid,
+        while writes through the intact PK index kept appending to the damaged
+        file.  The table is small (one row per curated entry), and the full scan
+        is what the grid does right after anyway.
         """
         try:
-            return cls(data_dir / DB_NAME), None
+            store = cls(data_dir / DB_NAME)
         except (sqlite3.Error, OSError) as exc:
             logger.warning("user_meta.db unavailable ({}); curation off", exc)
             return None, str(exc)
+        try:
+            store.load_all()
+        except sqlite3.Error as exc:
+            store.close()
+            logger.warning("user_meta.db unreadable ({}); curation off", exc)
+            return None, str(exc)
+        return store, None
 
     def _migrate(self) -> None:
-        """Create / upgrade the schema to :data:`SCHEMA_VERSION` (#133).
+        """Create / upgrade the schema to :data:`SCHEMA_VERSION`.
 
         v1 keyed rows by the raw ``str(path)``; v2 keys them by
         :func:`normalize_entry_key` and keeps the written spelling in ``path``
@@ -849,7 +855,7 @@ class UserMetaStore(SqliteStoreBase):
     def _fold_legacy_rows(self) -> None:
         """Copy ``entries_v1`` into the v2 table, folding re-spelled duplicates.
 
-        Two v1 rows can normalise to the same key (the very bug this migration
+        Two v1 rows can normalise to the same key (the very case this migration
         exists for: ``Z:\\lib\\p`` and ``\\\\nas\\lib\\P`` were two rows, each
         holding half the user's curation).  Neither may win outright — both are
         non-regenerable — so they merge, field by field, in a way that can only
@@ -867,19 +873,19 @@ class UserMetaStore(SqliteStoreBase):
         * ``path`` (the display spelling) — **the first row in insertion
           order, unconditionally.  No filesystem probe decides this.**
 
-        That last rule was briefly a ``stat`` per candidate spelling ("prefer
-        the spelling that still answers", 656c8d3) and is deliberately gone
-        again (2026-08-30 review).  The probe cost what the key's own purity
+        That last rule deliberately takes no ``stat`` per candidate spelling
+        ("prefer the spelling that still answers").
+        Such a probe costs what the key's own purity
         rule exists to forbid, one layer up: this fold runs inside
         ``ViewerWindow.__init__`` while holding ``BEGIN IMMEDIATE``, and
-        ``os.stat`` on a dead share has no timeout — #132 measured a single
-        one at 15.75 s, and the reviewer's harness turned a 200-group store
-        into 32 s of frozen window construction plus a second launch that
-        died on the held write lock and lost its whole session's curation.
-        A capped *call count* (the old ``_FOLD_STAT_BUDGET``) bounds neither.
+        ``os.stat`` on a dead share has no timeout — a single one can take
+        15 s or more, so a 200-group store turns
+        into 30 s or more of frozen window construction plus a second launch that
+        dies on the held write lock and loses its whole session's curation.
+        A capped *call count* bounds neither.
 
-        And it bought **nothing**: within one fold group the probe could never
-        have changed the answer, because *there is no dead spelling to avoid*.
+        And it would buy **nothing**: within one fold group the probe could never
+        change the answer, because *there is no dead spelling to avoid*.
         The key folds precisely ``abspath`` + ``normcase``, and on Windows that
         is exactly the normalisation Win32 applies to a path **before** it
         reaches the filesystem, so every absolute spelling in one group names
@@ -1026,20 +1032,36 @@ class UserMetaStore(SqliteStoreBase):
         (so iterating it still yields real, ``stat``-able paths) but resolves
         lookups through the normalised key, so a tile whose path is spelled
         differently from the session that starred it still finds its record
-        (#133) without the caller having to know about normalisation.
+        without the caller having to know about normalisation.
+
+        **Raises** ``sqlite3.Error`` when the table cannot be read — a failed
+        read must never be reported as an empty curation (that is
+        indistinguishable from "every star was lost").  :meth:`open_or_report`
+        turns an unreadable table into the "curation unavailable (reason)"
+        seam; callers that reload mid-session use :meth:`try_load_all`.
         """
-        try:
-            with self._lock:
-                rows = self._conn.execute(
-                    "SELECT path, star, user_tags, later FROM entries"
-                ).fetchall()
-        except sqlite3.Error as exc:  # pragma: no cover (defensive)
-            logger.debug("user_meta load_all failed: {}", exc)
-            return CurationMap()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT path, star, user_tags, later FROM entries"
+            ).fetchall()
         return CurationMap(
             (str(path), _row_to_meta((star, tags, later)))
             for path, star, tags, later in rows
         )
+
+    def try_load_all(self) -> CurationMap | None:
+        """:meth:`load_all`, or ``None`` when the read fails (logged).
+
+        For reloads over an already-populated in-memory map (rename-following,
+        bulk rebind): the caller keeps its current map on ``None`` instead of
+        replacing it with an empty one — a transient sqlite error must not
+        blank every badge for the rest of the session.
+        """
+        try:
+            return self.load_all()
+        except sqlite3.Error as exc:
+            logger.warning("user_meta load_all failed: {}", exc)
+            return None
 
     def all_tags(self) -> list[str]:
         """Distinct user tags across every entry (for edit-dialog autocomplete).
@@ -1082,7 +1104,7 @@ class UserMetaStore(SqliteStoreBase):
 
         Returns only the record (the on-disk value on failure); use
         :meth:`set_star_checked` when the caller must also learn whether the
-        write actually persisted (#53).
+        write actually persisted.
         """
         return self.set_star_checked(
             path, star,
@@ -1102,7 +1124,7 @@ class UserMetaStore(SqliteStoreBase):
 
         ``outcome.ok`` is ``False`` when the star could not be committed; the UI
         can then warn instead of showing a success toast for a write that did
-        not stick (#53).  ``outcome.meta`` is the persisted (pre-change) record
+        not stick.  ``outcome.meta`` is the persisted (pre-change) record
         in that case, matching the plain setter's return.
         """
         star = clamp_star(star)
@@ -1123,7 +1145,7 @@ class UserMetaStore(SqliteStoreBase):
     ) -> UserMeta:
         """Set the "watch later" flag for *path*, returning the merged record.
 
-        See :meth:`set_later_checked` to also learn whether it persisted (#53).
+        See :meth:`set_later_checked` to also learn whether it persisted.
         """
         return self.set_later_checked(
             path, later,
@@ -1157,7 +1179,7 @@ class UserMetaStore(SqliteStoreBase):
     ) -> UserMeta:
         """Replace the user tags for *path*, returning the merged record.
 
-        See :meth:`set_tags_checked` to also learn whether it persisted (#53).
+        See :meth:`set_tags_checked` to also learn whether it persisted.
         """
         return self.set_tags_checked(
             path, tags,
@@ -1306,12 +1328,12 @@ class UserMetaStore(SqliteStoreBase):
         except sqlite3.Error:  # pragma: no cover (defensive)
             pass
 
-    # ------------------------------------------------- 手動の張り替え (#133-3)
+    # ------------------------------------------------- 手動の張り替え
 
     def rebind_path(
         self, old_path: "Path | str", new_path: "Path | str",
     ) -> "UserMeta | None":
-        """*old_path* の行を *new_path* へ張り替える（#133 項目 3 の復旧導線）。
+        """*old_path* の行を *new_path* へ張り替える（到達不能になった行の復旧導線）。
 
         ドライブレター⇄UNC の付け替え (a) や post.md を持たないフォルダの
         リネーム (b) で到達不能になった行を救う唯一の手段。
@@ -1345,7 +1367,7 @@ class UserMetaStore(SqliteStoreBase):
         new_key = normalize_entry_key(new_display)
         with self._lock:
             # path_key ごと張り替える経路 — postref の穴の台帳（キーで持つ）は
-            # 次の読み込みで取り直す（#130）。
+            # 次の読み込みで取り直す。
             self._gap_keys = None
             try:
                 src = self._conn.execute(
@@ -1541,11 +1563,11 @@ class UserMetaStore(SqliteStoreBase):
         :func:`_merge_curation_fields` folds the two rows (star = max, later =
         OR, tags = union, postref as a group), exactly as :meth:`rebind_path`
         and :meth:`_fold_legacy_rows` fold the same "one object, two rows"
-        collision.  This branch used to ``DELETE`` the source row outright on
-        the grounds that "the user's newer curation wins" — but nothing in the
+        collision.  It must not ``DELETE`` the source row outright on
+        the grounds that "the user's newer curation wins" — nothing in the
         schema can tell which row is newer (there is no ``used_at`` column, and
         the destination may well be an older duplicate in another library), so
-        a star 5 plus its tags could be erased by a star 1 (2026-09-03 review).
+        a star 5 plus its tags could be erased by a star 1.
         The store's rule is the one the other two paths already follow: only
         what the user never expressed may be lost.
 
@@ -1557,7 +1579,7 @@ class UserMetaStore(SqliteStoreBase):
         for nothing.  Both kinds count because both change what
         :meth:`load_all` returns.
 
-        "No longer exists" is deliberately strict (#151): only a provable
+        "No longer exists" is deliberately strict: only a provable
         absence counts (:func:`_is_definitely_gone`) **and** only while the
         entry's own drive / share still answers (:func:`_anchor_reachable`).
         An unreachable volume otherwise looks exactly like a deleted folder and
@@ -1569,7 +1591,7 @@ class UserMetaStore(SqliteStoreBase):
         that can block for seconds on a half-mounted share — run WITHOUT the
         store lock, so a concurrent GUI curation write (set_star/set_tags,
         which share this lock) is never stalled behind them.  Only the snapshot
-        read and the final repoint statements briefly hold the lock (#10).
+        read and the final repoint statements briefly hold the lock.
 
         *should_cancel* is polled before every candidate row of step 2 — the
         same cooperative contract :func:`build_moved_resolver` and
@@ -1602,15 +1624,13 @@ class UserMetaStore(SqliteStoreBase):
                 continue  # still where we left it (or we can't tell)
             if not _anchor_reachable(old, anchor_ok):
                 # The whole volume is offline — "missing" here means "invisible",
-                # not "renamed" (#151).
+                # not "renamed".
                 continue
             new_folder = resolver.folder_for(str(service), str(post_id))
             if new_folder is None:
                 continue  # postref not found in the current library
             new_path = new_folder / rel_name if rel_name else new_folder
-            # The **third** writer of the ``path`` column, and the one that was
-            # missed when the display half of the key contract was introduced
-            # (2026-08-30 review, H-2): *resolver* is built by
+            # The **third** writer of the ``path`` column: *resolver* is built by
             # :func:`build_moved_resolver` walking ``root`` with ``os.scandir``,
             # so with a relative ``--root`` every folder it hands back is spelled
             # relatively and this row would store a relative ``path`` next to an
@@ -1621,7 +1641,7 @@ class UserMetaStore(SqliteStoreBase):
             old_key = normalize_entry_key(old_path)
             if new_key == old_key:
                 # Same entry, merely re-spelled — nothing moved.  **This guard
-                # is load-bearing, not an optimisation** (2026-08-30 review):
+                # is load-bearing, not an optimisation**:
                 # delete a starred *file* while leaving its post folder (and
                 # post.md) in place and the row qualifies as "gone", yet the
                 # resolver hands back that same folder, so ``new_path`` is the
@@ -1644,7 +1664,7 @@ class UserMetaStore(SqliteStoreBase):
         with self._lock:
             if repoints:
                 # path_key ごと張り替える経路 — postref の穴の台帳（キーで
-                # 持つ）は次の読み込みで取り直す（#130）。
+                # 持つ）は次の読み込みで取り直す。
                 self._gap_keys = None
             for old_key, new_display, new_key in repoints:
                 # Each repoint gets its own SAVEPOINT so a failure undoes that
@@ -1751,7 +1771,7 @@ class UserMetaStore(SqliteStoreBase):
             return []
         return [(str(s), str(p)) for s, p in rows]
 
-    # ------------------------------------------- postref のバックフィル (#130)
+    # ------------------------------------------- postref のバックフィル
 
     #: postref 列が空の行の ``path_key``。``None`` = 未読み込み（初回の
     #: :meth:`_postref_gap_keys` が 1 回だけ SELECT する）。以後は書き込みが

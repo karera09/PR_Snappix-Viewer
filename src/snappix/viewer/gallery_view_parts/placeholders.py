@@ -142,7 +142,7 @@ def placeholder_glyph(
         # Folders use the design-system muted folder glyph (common/ui/
         # icons.py SVG) instead of QStyle's blue 3-D ``SP_DirIcon``, which
         # clashed with the flat token palette and read as an OS chrome
-        # element in the grid (ui-review 2026-07-19 #18).  It retints on
+        # element in the grid.  It retints on
         # theme switch because the view clears its ``placeholder_cache``
         # on Palette/Style/Theme changes.  QSvgRenderer (not QImageReader)
         # backs it, so the factory-lock contention that guards the QStyle
@@ -154,7 +154,7 @@ def placeholder_glyph(
         # ``setDevicePixelRatio(dpr)`` below then shrank to ``target/dpr``
         # logical: on a 200% display the folder glyph came out half the
         # size of the file glyph (QStyle branch, which asks in physical
-        # px) (#117).
+        # px).
         pm = icon("folder", role="muted", size=target).pixmap(
             QSize(target, target), dpr,
         )

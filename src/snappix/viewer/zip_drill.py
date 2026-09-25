@@ -4,8 +4,7 @@ Double-clicking a ZIP extracts it into a temp directory **under the
 portable base** (``data/tmp`` — see :func:`_zip_temp_base`) on a background
 thread (window-modal progress dialog, cooperative cancel) and re-roots the
 viewer into the extracted tree; oversized archives fall back to the
-central-directory preview.  Split out of ``main_window.py`` (#96) —
-behaviour, dialog texts and the temp-dir cleanup contract are unchanged.
+central-directory preview.
 
 The window keeps ownership of the ``temp_dirs`` mapping (extracted dir →
 original ZIP path): it needs it for window-title / history-entry labels and
@@ -26,18 +25,18 @@ from PySide6.QtWidgets import QMessageBox, QProgressDialog, QWidget
 
 from ..common.archive import extract_zip_to_dir
 from ..common.i18n import t
-from ..common.paths import get_paths
 from ..common.ui import show_toast
 from ._runnable import GuardedStream, StreamJob, StreamOutcome
 from .cancel_token import CancelToken
+from .locations import ZIP_TEMP_PREFIX, zip_temp_parent
 from .view_prefs import get_zip_preview_size_limit
 
 # The ZIP extraction worker uses the viewer's shared cooperative-cancel flag
 # (same contract as the scan workers): the main thread flips it on cancel, the
-# worker polls it between members.  Previously re-implemented here as a private
-# ``_ZipCancelToken`` (#131); now unified on ``cancel_token.CancelToken``.
+# worker polls it between members (``cancel_token.CancelToken``, not a private
+# copy of it).
 
-# Zip-bomb guard (#6): the drill-in gate checks only the *compressed* archive
+# Zip-bomb guard: the drill-in gate checks only the *compressed* archive
 # size against the preview limit, but a crafted ZIP can decompress to vastly
 # more.  Cap the cumulative *extracted* bytes at a generous multiple of that
 # limit — legitimate image/media archives compress to a small fraction of
@@ -48,7 +47,7 @@ _EXTRACT_SIZE_RATIO = 100
 # ZIP のサイズ probe 中に受理表示（進捗ダイアログ）を出すまでの遅延（ms）。
 # 速い probe で一瞬ダイアログが点滅するのを避けつつ、「押したのに無反応」に
 # 感じ始める前に受理を返す — グリッドの 「読み込み中…」 ヒント
-# (``children_grid``, 450ms) と同種の閾値（UIレビュー 2026-08-28 N-96）。
+# (``children_grid``, 450ms) と同種の閾値。
 _PROBE_ACK_DELAY_MS = 200
 
 
@@ -60,7 +59,7 @@ _ExtractKind = Literal["finished", "failed"]
 
 
 def _stat_zip_size(zip_path: Path) -> StreamOutcome:
-    """Size-probe the archive off the GUI thread (レビュー 2026-07-31 #62).
+    """Size-probe the archive off the GUI thread.
 
     The size gate below needs ``st_size`` before it can decide between
     drill-in and the central-directory preview, but a cold NAS ``stat()``
@@ -108,7 +107,7 @@ def _extract_zip(
     except Exception as exc:
         return StreamOutcome("failed", (generation, str(exc)))
     # ``skipped`` (zip-slip 等で展開されなかったエントリ数) も転送する —
-    # 欠落を「全件成功」に見せないため受信側が警告を出す（項目#181）。
+    # 欠落を「全件成功」に見せないため受信側が警告を出す。
     return StreamOutcome(
         "finished", (generation, not result.completed, result.skipped),
     )
@@ -118,10 +117,9 @@ def _zip_temp_base() -> str:
     """ZIP 展開先の親ディレクトリ（ポータブルベース配下）を返す.
 
     ``tempfile.mkdtemp()`` を ``dir=`` 無しで呼ぶと Windows では ``%TEMP%``
-    ＝ ``%LOCALAPPDATA%\\Temp`` ＝ **ユーザーホーム配下**になる。CLAUDE.md の
+    ＝ ``%LOCALAPPDATA%\\Temp`` ＝ **ユーザーホーム配下**になり、
     ポータビリティ要件（「実行時に %APPDATA% / レジストリ / ユーザーホームへ
-    の書き込みは一切行いません」）に対する唯一の反例だった
-    （レビュー 2026-09-03 項目#11）。``state._write_json_atomic`` の
+    の書き込みは一切行いません」）に反する。``state._write_json_atomic`` の
     ``mkstemp(dir=str(path.parent), ...)`` と同じく、明示的にベース配下へ
     スコープする。
 
@@ -129,7 +127,7 @@ def _zip_temp_base() -> str:
     電源断では残るので専用の ``data/tmp`` に集める（``data`` 直下に混ぜない
     ＝ 残骸をユーザーがフォルダごと消せる）。
     """
-    base = get_paths().data / "tmp"
+    base = zip_temp_parent()
     base.mkdir(parents=True, exist_ok=True)
     return str(base)
 
@@ -211,7 +209,7 @@ class ZipDrillController(QObject):
         # のタスクまで待つことになる。
         self._inflight: dict[int, _ExtractInFlight] = {}
         self._tearing_down = False
-        # 受理表示のダイアログ（サイズ probe 中 — UIレビュー 2026-08-28 N-96）。
+        # 受理表示のダイアログ（サイズ probe 中）。
         # 1 枚を使い回す（作り捨てにしない — :meth:`_show_probe_dialog`）。
         self._probe_dialog: QProgressDialog | None = None
         #: 表示予約が生きている probe の世代（``None`` = 予約なし / 着地済み）。
@@ -232,8 +230,8 @@ class ZipDrillController(QObject):
     def open_zip_as_folder(self, zip_path: Path) -> None:
         """Extract a ZIP to a temp directory and treat it as the new root.
 
-        The archive size is probed off the GUI thread (:func:`_stat_zip_size`,
-        レビュー 2026-07-31 #62) and the flow continues in
+        The archive size is probed off the GUI thread (:func:`_stat_zip_size`)
+        and the flow continues in
         :meth:`_on_stat_done`; a cold / disconnected NAS would otherwise
         freeze the window on the ``stat()`` for the whole round-trip.
 
@@ -258,15 +256,15 @@ class ZipDrillController(QObject):
         # 後で 1 本目の展開が着地すると ``generation == self._generation`` が
         # 成立し、捨てるはずの展開がルートを差し替えて履歴を積む。
         self._generation += 1
-        # 新しい要求が来た時点で先行の展開を止める（レビュー 09-03
-        # #194。``main_window._kick_rename_follow`` と同じ形）。追い越された
+        # 新しい要求が来た時点で先行の展開を止める
+        # （``main_window._kick_rename_follow`` と同じ形）。追い越された
         # 展開は表に残したまま協調停止させる — 着地でダイアログを畳み
         # temp を捨てるのはその展開自身のレコードなので、取りこぼしが出ない。
         for record in self._inflight.values():
             record.token.cancel()
-        # UIレビュー 2026-08-28 N-96: probe 投入から着地までは UI への通知が
-        # 一切なく、cold / 切断中の NAS では数秒〜数十秒まるごと無反応だった
-        # （:func:`_stat_zip_size` の docstring 自身がその所要時間を認めている）。
+        # probe 投入から着地までは UI への通知が無いと、cold / 切断中の NAS
+        # では数秒〜数十秒まるごと無反応になる（:func:`_stat_zip_size` の
+        # docstring が所要時間を述べている）。
         # 受理表示を先に予約する（速い probe では一度も現れない）。
         self._stat_path = zip_path
         # **プールに載せない**（``submit_detached``）: 切断中の共有では 1 回の
@@ -283,7 +281,7 @@ class ZipDrillController(QObject):
     # ----------------------------------------------------- probe acknowledge
 
     def _arm_probe_dialog(self, zip_path: Path, generation: int) -> None:
-        """受理ダイアログを ``_PROBE_ACK_DELAY_MS`` 後に出す予約を入れる (N-96).
+        """受理ダイアログを ``_PROBE_ACK_DELAY_MS`` 後に出す予約を入れる.
 
         グリッド側の 「読み込み中…」 ヒント（``children_grid`` の 450ms 単発
         タイマー）と同じ作法: 速く終わる probe では何も見せず、体感的に
@@ -359,7 +357,7 @@ class ZipDrillController(QObject):
         if not isinstance(payload, StreamOutcome):
             return  # the worker raised
         # 受理ダイアログは全分岐で必ず引っ込める（サイズ超過の案内モーダル /
-        # ``mkdtemp`` 失敗の警告より前 — N-96 の実装注意 ①②）。
+        # ``mkdtemp`` 失敗の警告より前）。
         self._dismiss_probe_dialog()
         zip_path = self._stat_path
         if zip_path is None:  # pragma: no cover (defensive)
@@ -391,7 +389,7 @@ class ZipDrillController(QObject):
             return
 
         try:
-            temp_dir = Path(tempfile.mkdtemp(prefix="snappix-viewer-zip-", dir=_zip_temp_base()))
+            temp_dir = Path(tempfile.mkdtemp(prefix=ZIP_TEMP_PREFIX, dir=_zip_temp_base()))
         except OSError as exc:
             QMessageBox.warning(
                 self._window, t("viewer.zip_drill.cannot_create_temp"), str(exc)
@@ -455,9 +453,8 @@ class ZipDrillController(QObject):
     # ダイアログは ``WA_DeleteOnClose`` で窓の子なので、窓が壊れた後に着地する
     # と死んだ C++ オブジェクトへ ``close()`` を撃つ。その選別は ``bind`` が
     # 担う: :meth:`shutdown` がストリームを降ろした時点で ``accepts`` が偽に
-    # なり、遅れて着地した展開はここへ来ない（レビュー 2026-07-31 #81 が
-    # ``_tearing_down`` で手当てしていた穴 — 世代タグでは塞げない、teardown が
-    # 止めようとしているタスク自身の世代は一致してしまうため）。
+    # なり、遅れて着地した展開はここへ来ない（世代タグでは塞げない — teardown
+    # が止めようとしているタスク自身の世代は一致してしまうため）。
 
     def _on_extract_stream_stopped(self) -> None:
         """展開ストリームが降りた（窓じまい）— 実行中レコードの表を空にする。
@@ -522,7 +519,7 @@ class ZipDrillController(QObject):
         if skipped > 0:
             # 展開されなかったエントリがある（zip-slip / 不正な名前 /
             # 親パスがファイル）— 欠けたフォルダを「全件成功」として
-            # 提示しない（項目#181。設計原則: 打ち切りを「全件」に
+            # 提示しない（設計原則: 打ち切りを「全件」に
             # 見せない）。詳細はログに warning 済み。
             show_toast(
                 self._window,
@@ -552,14 +549,13 @@ class ZipDrillController(QObject):
     def shutdown(self, timeout_ms: int = 5000) -> None:
         """Stop an in-flight extraction — call BEFORE sweeping the temp dirs.
 
-        ``ViewerWindow.closeEvent`` rmtree's every registered temp dir, but
-        the extraction worker used to survive that sweep: it kept writing
-        members into (and re-creating) the directory it was just handed,
-        leaving a ``snappix-viewer-zip-*`` tree behind in ``data/tmp`` and
-        breaking content.md's "temp is always rmtree'd on closeEvent"
-        invariant.  Cancelling cooperatively and draining the
-        controller-owned pool means the worker has provably stopped writing
-        by the time the sweep runs (レビュー 2026-07-31 #81).
+        ``ViewerWindow.closeEvent`` rmtree's every registered temp dir, but a
+        surviving extraction worker would keep writing members into (and
+        re-creating) the directory it was just handed, leaving a
+        ``snappix-viewer-zip-*`` tree behind in ``data/tmp`` and breaking the
+        "temp is always rmtree'd on closeEvent" invariant.  Cancelling
+        cooperatively and draining the controller-owned pool means the worker
+        has provably stopped writing by the time the sweep runs.
 
         The wait is bounded: a member being written to a stalled NAS share
         must not hang the close.  In that (rare) case the sweep still runs

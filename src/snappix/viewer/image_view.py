@@ -96,6 +96,7 @@ from .image_view_parts.geometry import (
     clamp_pixel_budget as _clamp_pixel_budget,
 )
 from .image_view_parts.minimap import _MinimapOverlay
+from .image_view_parts.movie import MoviePlayback, open_movie, orient_frame, oriented_size, render_frame
 from .image_view_parts.prefetch_ledger import PrefetchLedger
 from .image_view_parts.workers import (
     _is_animated_bytes,
@@ -106,6 +107,7 @@ from .image_view_parts.workers import (
     _pil_sizeof,
     _prefetch_decode,
     _ScaleKind,
+    PrefetchMiss,
 )
 from .pending import MARK, OneShot, Pending, always
 from .qimage_decode import read_file_bytes
@@ -158,8 +160,8 @@ class ImageView(QScrollArea):
     # clears it via the (0, 0) emit.
     image_info_changed = Signal(int, int)
     # Digit 0–5 pressed with no modifier while this view has focus — the star
-    # rating for the shown image (UIレビュー #11: the stage must accept the
-    # same star keys as the grid / lightbox).  The host persists it; the view
+    # rating for the shown image (the stage must accept the same star keys
+    # as the grid / lightbox).  The host persists it; the view
     # itself stays user_meta-agnostic.  In the lightbox this signal is simply
     # left unconnected (its own key filter already handles digits first).
     star_key_requested = Signal(int)
@@ -182,7 +184,7 @@ class ImageView(QScrollArea):
     # Hosts that picked the path *for* the user (the centre pane's folder
     # representative image) use it to fall back to the next candidate
     # instead of leaving an error card on a folder that has readable
-    # images (レビュー 2026-07-31 #84).  Purely informational — the error
+    # images.  Purely informational — the error
     # card is already up when this fires.
     load_failed = Signal(Path)
 
@@ -199,20 +201,12 @@ class ImageView(QScrollArea):
         # routes events through this filter while ``_movie`` would still
         # be uninitialised if we set it later in ``__init__``.
         self._movie: QMovie | None = None
-        # QMovie decodes from an in-memory QBuffer (see ``_try_show_gif``);
-        # the buffer and its backing bytes must outlive the QMovie, so both
-        # are pinned here and released together in ``_clear_movie``.
+        # QMovie が読む QBuffer とバイト列（QMovie より長生きさせる — 解放は
+        # ``_clear_movie``。理由は ``image_view_parts.movie.open_movie``）。
         self._movie_buffer: QBuffer | None = None
         self._movie_bytes: QByteArray | None = None
-        # QMovie の**原寸**（スケール適用前）のピン留め。``frameRect`` /
-        # ``currentImage`` は ``setScaledSize`` 後はスケール済みサイズを返す
-        # ため、都度読みでは「原寸」がズーム操作のたびにドリフトする
-        # （フィット後の GIF を 2x にすると原寸ではなくフィット寸の 2 倍に
-        # なる等）。``_try_show_gif`` がスケール前に 1 回だけ読んで保持し、
-        # ``_natural_size`` / ``_apply_gif_scale`` はこちらを使う（項目#18）。
-        self._movie_natural = QSize()
         self._is_gif: bool = False
-        # 可視領域パッチ描画に対応したラベル（項目#18 C案）。通常は素の
+        # 可視領域パッチ描画に対応したラベル。通常は素の
         # QLabel として振る舞い、非フィットの巨大ズーム時のみ canvas モード。
         self._label = _ImageCanvasLabel()
         self._label.setAlignment(Qt.AlignCenter)
@@ -252,14 +246,14 @@ class ImageView(QScrollArea):
         self._known_static: set[str] = set()
 
         # LANCZOS リサンプル（全体レンダ）と可視領域パッチレンダの**共有**
-        # ストリーム（項目#18 C案）。1 本に載せるのはモード切替を跨いだ相互
+        # ストリーム。1 本に載せるのはモード切替を跨いだ相互
         # 無効化のため — どちらの再レンダでも先行が追い越され、切替前の結果は
         # 必ず落ちる。1 スレッド・superseding なので、ズーム連打では最新の
         # ターゲットだけが実際に計算される。
         self._scale_stream = GuardedStream(self)
         self._scale_stream.bind(self._on_scale_landed)
 
-        # --- 可視領域パッチレンダの状態（項目#18 C案） -----------------
+        # --- 可視領域パッチレンダの状態 ------------------------------
         # ここで持つのは「最後にレンダを発行したパッチの論理矩形と DPR」だけ
         # — スクロール / リサイズ時に可視域がパッチから食み出したかの判定
         # （``_patch_stale``）に使う。下敷きピクスマップは画像ごとに 1 回だけ
@@ -289,7 +283,7 @@ class ImageView(QScrollArea):
         )
         # 現在の件数上限のローカル写し（``reconfigure_cache`` で更新）。
         # ``_schedule_prefetch`` が「構造上キャッシュに載り得ないターゲット」
-        # を発行前にふるうのに使う（項目#17 — キャッシュ側の内部値を掘らない）。
+        # を発行前にふるうのに使う（キャッシュ側の内部値を掘らない）。
         self._cache_max_entries = IMAGEVIEW_CACHE_MAX_ENTRIES
         # Provider returns (image_siblings, index_of_anchor) for the given
         # path.  Injected by :class:`ViewerWindow` so ImageView stays free
@@ -305,8 +299,9 @@ class ImageView(QScrollArea):
         self._thumbnail_provider: Callable[[Path], QPixmap | None] | None = None
         # 近傍の先読み。投入は**加算的**（``submit_batch``）— 1 つの近傍集合
         # は複数件をまとめて積むので、後続の投入が先行を捨ててはならない。
-        # 集合ごと入れ替えるのは :meth:`_schedule_prefetch` の ``cancel`` で、
-        # そこが唯一のバッチ境界。1 スレッド: 先読みは best-effort の背景
+        # 近傍集合の入れ替えでもストリームは畳まない（台帳の ``wanted`` と
+        # ``inflight`` で振るう — :meth:`_schedule_prefetch`）。畳むのは
+        # フォルダ切替 / クリアだけ。1 スレッド: 先読みは best-effort の背景
         # 埋めなので、表示中の画像のデコードと競らせない。
         self._prefetch_stream = GuardedStream(self)
         self._prefetch_stream.bind(self._on_prefetch_landed)
@@ -317,15 +312,13 @@ class ImageView(QScrollArea):
         # （``PrefetchLedger.wanted``）を引くので、片側だけずれない。
         self._prefetch = PrefetchLedger()
 
-        # Every ImageView shortcut is scoped to this widget subtree.  The
-        # Ctrl+0 / Ctrl+1 / Ctrl+C trio used to register with the default
-        # ``WindowShortcut`` context, so they fired from anywhere in the
-        # window whenever the image page happened to be visible — Ctrl+C in
-        # the grid or nav rail silently overwrote the clipboard with the
-        # preview image, and a future grid-side Ctrl+C would collide into an
-        # ambiguous-shortcut deadlock.  ``main_window`` already documents the
-        # intent ("Ctrl+C is already an ImageView-focus QShortcut"), so match
-        # it (レビュー 2026-07-31 #75).  The bare "+" / "-" / "R" / "F" keys
+        # Every ImageView shortcut is scoped to this widget subtree.  With
+        # the default ``WindowShortcut`` context the Ctrl+0 / Ctrl+1 / Ctrl+C
+        # trio would fire from anywhere in the window whenever the image page
+        # happens to be visible — Ctrl+C in the grid or nav rail would
+        # silently overwrite the clipboard with the preview image, and a
+        # grid-side Ctrl+C would collide into an ambiguous-shortcut deadlock
+        # (``main_window`` treats Ctrl+C as an ImageView-focus QShortcut).  The bare "+" / "-" / "R" / "F" keys
         # need the same scope so they never fire while the user is typing in
         # the left-pane filter box and never collide with the grid's digit
         # star shortcuts (those are handled in GalleryView.keyPressEvent).
@@ -372,7 +365,7 @@ class ImageView(QScrollArea):
         # one-shot（当てた時点で降ろす）。
         self._pending_restore: OneShot = Pending()
 
-        # --- デコード失敗カード (UIレビュー 07-25 #113) -------------------
+        # --- デコード失敗カード ----------------------------------------
         # ビューポートを覆う EmptyStateCard。失敗時だけ現れ、次の表示要求 /
         # 成功で消える。中央プレビューでも閲覧モードでも同じ面が出る。
         self._error_card = _DecodeErrorCard(self.viewport())
@@ -402,12 +395,11 @@ class ImageView(QScrollArea):
         # ImageView but supplies its own chrome — see set_control_bar_enabled).
         self._control_bar_enabled = True
         self._control_bar = _ControlBar(self.viewport())
-        # ツールチップは軸を名指す専用文言（N-47）— ラベル「前へ / 次へ」は
+        # ツールチップは軸を名指す専用文言 — ラベル「前へ / 次へ」は
         # ステージヘッダーのボタンラベルと共有されているため、そのまま
         # ツールチップに流用すると「同形・同文言で別の軸」になる。
         # キーの併記は表（``shortcuts_dialog.SHORTCUTS``）から引く — 手書きで
-        # 併記するとステージヘッダーと同じ「表とずれる」事故になる（UIレビュー
-        # 2026-09-11 N-68 / D1）。
+        # 併記すると表とずれる。
         from .shortcuts_dialog import with_key_hint
 
         step = "viewer.shortcuts_dialog.desc_stage_step_image"
@@ -432,8 +424,7 @@ class ImageView(QScrollArea):
 
         # --- Non-destructive orientation (要件 F11) -----------------------
         # 注: この「F11」は要件番号であって**キーの F11（閲覧モード）とは
-        # 無関係** — 紛らわしいので以降は「要件 F11」と書く
-        # (UIレビュー 07-25 #128)。
+        # 無関係** — 紛らわしいので以降は「要件 F11」と書く。
         # Display-only rotation (0/90/180/270, clockwise) + horizontal flip.
         # Applied to a pristine ``_base_original`` to rebuild ``_original`` /
         # ``_original_pixmap``; never written to disk.  Reset on every image.
@@ -454,10 +445,10 @@ class ImageView(QScrollArea):
         # Whether the 「全画面で表示 (F11)」 context-menu item is offered
         # (see ``fullscreen_requested``).  Default False.
         self._fullscreen_available = False
-        # 全画面（ライトボックス）の中の ImageView か (UIレビュー 09-11 N-142)。
+        # 全画面（ライトボックス）の中の ImageView か。
         # 真なら右クリックに「入口」ではなく**出口**を出す。
         self._fullscreen_exit_mode = False
-        # ホバーカプセルの全画面ボタンを出すか (UIレビュー 07-25 #104) —
+        # ホバーカプセルの全画面ボタンを出すか —
         # 最大化中はヘッダーの [⛶ 全画面 (F11)] と重複するのでホストが畳む。
         # メニュー側の可否 (``_fullscreen_available``) とは独立。
         self._fullscreen_button_visible = True
@@ -466,6 +457,9 @@ class ImageView(QScrollArea):
         # ``set_double_click_maximize``).  Default False (zoom toggle) so
         # the lightbox's internal ImageView keeps its behaviour.
         self._double_click_maximize = False
+        # QMovie の再生 / 一時停止と「誰が決めたか」の印（退避の復路・
+        # ダブルクリック最大化の打ち消し — ``MoviePlayback`` の docstring）。
+        self._playback = MoviePlayback()
 
     # ------------------------------------------------------------------ API
 
@@ -516,18 +510,18 @@ class ImageView(QScrollArea):
         return self._minimap_enabled
 
     def refresh_fit(self) -> None:
-        """フィット表示中なら現在の設定でフィットを描き直す（N-77）.
+        """フィット表示中なら現在の設定でフィットを描き直す.
 
         F03「フィット表示: 等倍以上に拡大しない」（``view_prefs`` の
         ``image_fit_no_upscale``）はフィット計算時にしか読まれないモジュール
-        変数なので、設定ダイアログで切り替えても**表示中の画像は次の
-        リサイズ / 画像切替まで古いまま**だった（同じ設定グループに並ぶ
-        ミニマップは ``apply_state`` 経由で即時反映されるため、隣り合う行で
-        挙動が割れていた）。``apply_state`` がこれを呼ぶことで、両 ImageView
+        変数なので、明示的に描き直さないと設定ダイアログで切り替えても
+        **表示中の画像は次のリサイズ / 画像切替まで古いまま**になる（同じ
+        設定グループに並ぶミニマップは ``apply_state`` 経由で即時反映される
+        ので、隣り合う行で挙動が割れる）。``apply_state`` がこれを呼ぶことで、両 ImageView
         インスタンスへ自動的に届く。
 
         非フィット時・画像未ロード時は何もしない（ユーザーが決めた倍率を
-        設定適用が勝手に動かさないため）。GIF/WebP は ``_apply_gif_scale``
+        設定適用が勝手に動かさないため）。GIF/WebP は ``_apply_movie_scale``
         を通す ``_refresh`` 経路に乗る。
         """
         if not self._fit_mode or not self.has_image():
@@ -557,11 +551,10 @@ class ImageView(QScrollArea):
         )
 
     def set_fullscreen_exit_mode(self, on: bool) -> None:
-        """全画面の中の ImageView として、右クリックに**出口**を出す (N-142).
+        """全画面の中の ImageView として、右クリックに**出口**を出す.
 
-        ライトボックスの画像を右クリックしても、その態から出る項目が 1 つも
-        無かった（出口は Esc / F11 / 上部バーの閉じるだけで、どれも右クリック
-        からは見えない）。``set_fullscreen_available(True)`` を流用しないのは、
+        ライトボックスの出口は Esc / F11 / 上部バーの閉じるだけで、どれも
+        右クリックからは見えないため、メニューにも出口を置く。``set_fullscreen_available(True)`` を流用しないのは、
         あちらがホバーカプセルの全画面**ボタン**まで点けてしまい、
         ``set_control_bar_enabled(False)`` による暗黙の無効化に依存する形に
         なるため。行き先は同じ :attr:`fullscreen_requested`（ホストが閉じる）。
@@ -569,7 +562,7 @@ class ImageView(QScrollArea):
         self._fullscreen_exit_mode = bool(on)
 
     def set_fullscreen_button_visible(self, visible: bool) -> None:
-        """ホバーカプセルの全画面ボタンだけを出し入れする (UIレビュー 07-25 #104).
+        """ホバーカプセルの全画面ボタンだけを出し入れする.
 
         プレビュー最大化中はヘッダー右端に ``[⛶ 全画面 (F11)]`` が常設される
         ため、カプセル側の同機能ボタンは重複（隣り合うフィットボタンとの
@@ -609,7 +602,7 @@ class ImageView(QScrollArea):
     def enable_stage_background(self) -> None:
         """Paint the surround + hairline-frame the image with ``bg_stage``.
 
-        ステージモード (redesign 2026-07 Phase 3-1): the centre preview shows
+        ステージモード: the centre preview shows
         the image on a dedicated backdrop deeper than any chrome surface so it
         reads as *exhibited*.  Tags **this scroll area** and the image label
         with the object names the ``QAbstractScrollArea#stageImageArea`` /
@@ -617,13 +610,12 @@ class ImageView(QScrollArea):
         window's central ImageView opts in; the fullscreen lightbox reuses
         ImageView with its own fixed dark chrome and leaves this off.
 
-        The surround is tagged on the scroll area, not on its viewport
-        (UIレビュー 07-25 #1): a viewport-targeted ``QWidget#id`` rule does
-        NOT paint a QScrollArea viewport even with ``WA_StyledBackground``,
-        so the previous wiring left every theme showing ``bg_window`` behind
-        the image.  The viewport keeps its own name + ``WA_StyledBackground``
-        purely as a "this view is staged" marker; the paint now comes from
-        the scroll-area rule, which Qt routes to the viewport.
+        The surround is tagged on the scroll area, not on its viewport: a
+        viewport-targeted ``QWidget#id`` rule does NOT paint a QScrollArea
+        viewport even with ``WA_StyledBackground``, which would leave every
+        theme showing ``bg_window`` behind the image.  The viewport keeps its
+        own name + ``WA_StyledBackground`` purely as a "this view is staged"
+        marker; the paint comes from the scroll-area rule, which Qt routes to the viewport.
         """
         self.setObjectName("stageImageArea")
         viewport = self.viewport()
@@ -641,7 +633,7 @@ class ImageView(QScrollArea):
 
         The capsule (:class:`_ControlBar`) normally fades in on hover and
         auto-hides on idle — neither drivable without a real event loop.
-        Offscreen tests and ``tools/ui_review/shoot.py`` use this to pin it
+        Offscreen tests and screenshot tooling use this to pin it
         on screen.  No-op when the bar is disabled (閲覧モード).
         """
         if self._control_bar_enabled:
@@ -656,17 +648,17 @@ class ImageView(QScrollArea):
         one or the other (e.g. an image editor vs. a file manager/chat
         client) both work from a single Ctrl+C.
 
-        成功トーストは**ここ 1 箇所**で出す (UIレビュー 07-25 #73): クリップ
-        ボードは不可視なので通知が唯一の成功確認手段なのに、以前は 3 入口
-        （メニュー / Ctrl+C / 右クリック）のうちメニュー経由だけが通知して
-        いた。内側に置くことで、将来入口が増えても自動的に一貫する。
+        成功トーストは**ここ 1 箇所**で出す: クリップボードは不可視なので
+        通知が唯一の成功確認手段であり、3 入口（メニュー / Ctrl+C / 右クリック）
+        の全てで揃える必要がある。内側に置くことで、将来入口が増えても
+        自動的に一貫する。
         """
         path = self._current_path
         if path is None:
             return
         # デコード失敗中（失敗カード表示中）は ``_current_path`` だけが残る
-        # ので、画素が無い状態で URL だけを載せて成功トーストを出していた
-        # （レビュー #120）。画素が無いなら何も載せず、``_on_copy_current_image``
+        # ので、画素が無い状態で URL だけを載せて成功トーストを出しかねない。
+        # 画素が無いなら何も載せず、``_on_copy_current_image``
         # と同じ「コピーできる画像がありません」を返す。
         if not self.has_image():
             show_toast(self, t("viewer.main_window.no_copyable_image"), "info")
@@ -674,7 +666,7 @@ class ImageView(QScrollArea):
         image: QImage | None = None
         if self._original is not None:
             try:
-                # QPixmap を挟まない（レビュー #144）: クリップボードに載せる
+                # QPixmap を挟まない: クリップボードに載せる
                 # のは QImage なので、原寸ぶんのプラットフォームサーフェス確保
                 # と 2 回目の全画素コピーは丸ごと無駄になる。
                 image = pil_to_qimage(self._original)
@@ -683,8 +675,8 @@ class ImageView(QScrollArea):
                 image = None
         if image is None and self._original_pixmap is not None:
             image = self._original_pixmap.toImage()
-        if image is None and self._is_gif and self._movie is not None:
-            image = self._movie.currentImage()
+        if image is None:
+            image = self._movie_frame()
         mime = QMimeData()
         if image is not None and not image.isNull():
             mime.setImageData(image)
@@ -697,14 +689,14 @@ class ImageView(QScrollArea):
         return str(path) in self._pil_cache
 
     def is_decode_pending(self, path: Path) -> bool:
-        """True when *path*'s decode is plausibly in flight right now (項目#60).
+        """True when *path*'s decode is plausibly in flight right now.
 
         「LRU に載っているか」(:meth:`is_cached`) との違いが要点: LRU は
         選択中 ± 先読み半径しか保持しないので、それより外の画像は**何も
         起きていない**のに恒久的に「未キャッシュ」になる。右ペインの pending
         スピナーがそれを「読み込み中」として描くと、先読み半径より多い画像を
         持つ普通のフォルダで大半の行が回りっぱなしになり、``_has_spinner_tile``
-        のアイドルガードごと無効化されていた。進行中と言えるのは
+        のアイドルガードごと無効化される。進行中と言えるのは
         「直近の表示要求 / 先読み発行の窓の中で、まだ載っていない」ものだけ。
         """
         key = str(path)
@@ -722,8 +714,8 @@ class ImageView(QScrollArea):
         must track the *pixel data*, not just the requested path.
         ``_apply_failed`` deliberately keeps ``_current_path`` (失敗カードの
         [再読み込み] が使う) while dropping ``_original``; keying off the path
-        alone reported "コピーしました" for a failed decode that put nothing on
-        the clipboard (レビュー #120).
+        alone would report "コピーしました" for a failed decode that put
+        nothing on the clipboard.
         """
         if self._current_path is None:
             return False
@@ -777,10 +769,10 @@ class ImageView(QScrollArea):
 
     def show_image(self, path: Path) -> None:
         # 新しい表示要求 = 失敗カードは畳む（成功すれば出番なし / 再度失敗
-        # すれば ``_apply_failed`` が出し直す — UIレビュー 07-25 #113）。
+        # すれば ``_apply_failed`` が出し直す）。
         self._error_card.hide()
-        self._label.show()  # 失敗時に隠したラベルを戻す（レビュー #82）
-        # 前画像のパッチモード痕跡（canvas / 下敷き）は持ち越さない（項目#18）。
+        self._label.show()  # 失敗時に隠したラベルを戻す
+        # 前画像のパッチモード痕跡（canvas / 下敷き）は持ち越さない。
         self._reset_patch_state()
         # Snapshot the outgoing image's on-screen state *before* anything
         # below resets ``_fit_mode`` / ``_zoom`` — ``_apply_loaded`` /
@@ -800,8 +792,7 @@ class ImageView(QScrollArea):
         self._scale_stream.cancel()
         self._load_stream.cancel()
         # 先読みは**ここでは畳まない**。新しい近傍集合は着地後の
-        # ``_schedule_prefetch`` が決めるので、バッチ境界もそちらに 1 つだけ
-        # 置く。代わりに台帳を張り替える: 先読みが「まだ要る」と言えるのは
+        # ``_schedule_prefetch`` が決める。代わりに台帳を張り替える: 先読みが「まだ要る」と言えるのは
         # この 1 枚だけ（``_prefetch_protect`` は空 = 前の近傍集合は用済み）で、
         # 走行中のワーカーは ``_prefetch_wanted`` 越しにそれを読んで降りる。
         # 唯一残すのがこのパス — 単一の先読みワーカーがちょうどこのファイルを
@@ -857,10 +848,10 @@ class ImageView(QScrollArea):
             if cached is not None:
                 self._label.setText("")
                 # ``_apply_loaded`` schedules the prefetch itself (its tail) —
-                # a second explicit call here started a second batch, so the
-                # one it had just dispatched went stale and a neighbour the
-                # worker had already started decoding was discarded on arrival
-                # and decoded twice (レビュー 2026-07-31 #76).
+                # a second explicit call here would start a second batch, so
+                # the one just dispatched would go stale and a neighbour the
+                # worker had already started decoding would be discarded on
+                # arrival and decoded twice.
                 self._apply_loaded(cached, from_cache=True)
                 return
         # Stage 0 — instant thumbnail placeholder.  The right pane already
@@ -978,9 +969,9 @@ class ImageView(QScrollArea):
         self._minimap.set_pixmap(None)
 
     def clear_image(self) -> None:
-        self._error_card.hide()      # UIレビュー 07-25 #113
-        self._label.show()           # レビュー #82（失敗表示から復帰）
-        self._reset_patch_state()    # 項目#18: パッチモードの痕跡も破棄
+        self._error_card.hide()
+        self._label.show()           # 失敗表示から復帰
+        self._reset_patch_state()    # パッチモードの痕跡も破棄
         self._image_serial += 1
         # 3 本とも畳む（キュー済みを捨て、走行中のセッションを降ろす）。
         self._scale_stream.cancel()
@@ -1144,10 +1135,9 @@ class ImageView(QScrollArea):
                 j = index + delta
                 if 0 <= j < len(siblings):
                     sibling = siblings[j]
-                    # Provider 契約（「返すのは画像のみ」）の消費側担保（項目#29）:
-                    # 2 つ目の呼び出し元（ライトボックス）で一度この暗黙契約が
-                    # 破れ、隣接**動画**を decode_pil が丸読みしては捨てていた。
-                    # provider 側のフィルタ（FileListView.image_siblings /
+                    # Provider 契約（「返すのは画像のみ」）の消費側担保:
+                    # 暗黙契約が破れると隣接**動画**を decode_pil が丸読みしては
+                    # 捨てることになる。provider 側のフィルタ（FileListView.image_siblings /
                     # LightboxWindow._sibling_provider）は残した上で、どの
                     # provider を挿しても非画像を読まない二重防御にする。
                     # 注: 非画像が混ざる provider では「半径 N 枚」が「半径 N の
@@ -1161,19 +1151,22 @@ class ImageView(QScrollArea):
         ]
         # 挿入ガードとデコード窓を組み直す（台帳 1 本）。
         self._prefetch.plan(current, targets)
-        # ここが**唯一のバッチ境界**: 前の近傍集合をまとめて畳んでから、この
-        # 集合を ``submit_batch`` で積む。``show_image`` は畳まない — 単一の
-        # 先読みワーカーが「いま表示しようとしているファイル」をデコード中
-        # なら、それが全解像度表示への最短経路なので殺せないため。
-        self._prefetch_stream.cancel()
+        # 前の近傍集合は**畳まない**: 走行中のデコードが新しい集合でも要るなら
+        # （5→6 と送ったときの 7 など）捨てずにそのまま着地させる。要らなく
+        # なった残りは ``plan`` が張り替えた ``wanted`` を走り出した直後に見て
+        # 降りる。積むのは「キャッシュに無く、まだ投げていない」ものだけ。
         for path in targets:
-            if str(path) in self._pil_cache:
-                continue
-            self._prefetch_stream.submit_batch(
-                lambda job, p=path: _prefetch_decode(
-                    job, p, self._prefetch_wanted
-                )
-            )
+            self._submit_prefetch(path)
+
+    def _submit_prefetch(self, path: Path) -> None:
+        """近傍 *path* の先読みを（要るなら）1 件積む。"""
+        key = str(path)
+        if key in self._pil_cache or not self._prefetch.needs_submit(key):
+            return
+        self._prefetch.mark_inflight(key)
+        self._prefetch_stream.submit_batch(
+            lambda job, p=path: _prefetch_decode(job, p, self._prefetch_wanted)
+        )
 
     def _prefetch_wanted(self, path: Path) -> bool:
         """この先読みの答えがまだ要るか（台帳 :meth:`PrefetchLedger.wanted`）。
@@ -1187,15 +1180,29 @@ class ImageView(QScrollArea):
     def _on_prefetch_landed(self, payload: object) -> None:
         # Background fill, plus one display path (adoption, below).
         #
-        # ストリームの ``bind`` が世代（フォルダ切替 / 近傍集合の入れ替え）で
-        # 落とした残りを、台帳（:meth:`_prefetch_wanted`）でもう一度振るう:
-        # ``show_image`` はセッションを畳まない代わりに台帳を張り替えるので、
-        # 前の近傍集合の着地はここで捨てる。捨てないと、直前のフォルダ /
-        # 位置の画像が LRU へ入り直し、近い隣接を押し出す。
+        # ストリームの ``bind`` が世代（フォルダ切替 / クリア）で落とした
+        # 残りを、台帳（:meth:`_prefetch_wanted`）でもう一度振るう:
+        # 表示要求も近傍集合の入れ替えもセッションを畳まない代わりに台帳を
+        # 張り替えるので、前の近傍集合の着地はここで捨てる。捨てないと、
+        # 直前の位置の画像が LRU へ入り直し、近い隣接を押し出す。
+        if isinstance(payload, PrefetchMiss):
+            key = str(payload.path)
+            self._prefetch.landed(key)
+            if not payload.declined:
+                # 読めなかった近傍もデコードは終わっている — 窓から外さないと
+                # 右ペインのそのタイルが「読み込み中」のまま 80ms 再描画が続く。
+                self._settle_decode(payload.path)
+            else:
+                # 降りた後で近傍集合が戻ってきた（5→6→5 など）なら投げ直す。
+                # 投げた時点では走行中だったので ``_schedule_prefetch`` は
+                # 積まなかった。
+                self._submit_prefetch(payload.path)
+            return
         if not isinstance(payload, tuple):
             return
         path, image = cast("tuple[Path, Image.Image]", payload)
         key = str(path)
+        self._prefetch.landed(key)
         if not self._prefetch_wanted(path):
             return
         # 採用 = 「いま表示しようとしているファイルそのもの」の着地。
@@ -1226,22 +1233,21 @@ class ImageView(QScrollArea):
         self._apply_loaded(image, from_cache=True)
 
     def _on_error_card_reload(self) -> None:
-        """失敗カードの [再読み込み] — 同じパスをもう一度デコードする (#113)."""
+        """失敗カードの [再読み込み] — 同じパスをもう一度デコードする."""
         path = self._current_path
         if path is not None:
             self.show_image(path)
 
     def _on_error_card_open_default(self) -> None:
-        """失敗カードの [既定アプリで開く] — 本体で開けないファイルの逃げ道 (#113)."""
+        """失敗カードの [既定アプリで開く] — 本体で開けないファイルの逃げ道."""
         path = self._current_path
         if path is not None:
             view_prefs.open_with_default(path, self)
 
     def _apply_failed(self, message: str) -> None:
         self._original = None
-        self._reset_patch_state()  # 項目#18: canvas モードのまま失敗面に入らない
-        # ズーム維持のスナップショットはここで捨てる（``clear_image`` と対称
-        # — レビュー 2026-07-31 #77）。残したままだと ``_apply_loaded`` /
+        self._reset_patch_state()  # canvas モードのまま失敗面に入らない
+        # ズーム維持のスナップショットはここで捨てる（``clear_image`` と対称）。残したままだと ``_apply_loaded`` /
         # ``_try_show_gif`` に消費されるまで生き続け、失敗を挟んだあとに
         # ユーザーがズーム維持を OFF にしても、次に成功した画像へ失敗前の
         # 倍率・スクロール位置が復元されてしまう。
@@ -1249,13 +1255,13 @@ class ImageView(QScrollArea):
         self._label.setPixmap(QPixmap())
         self.image_info_changed.emit(0, 0)
         # 素テキスト 1 行ではなく EmptyStateCard 規格の失敗カード +
-        # [再読み込み][既定アプリで開く] (UIレビュー 07-25 #113)。ラベル側の
+        # [再読み込み][既定アプリで開く]。ラベル側の
         # テキストは重複するので消す（カードがビューポートを覆う）。
         self._label.setText("")
         # 中身を空にするだけではラベル自体が残り、qss の
         # ``QLabel#stageImageLabel``（ステージ地色 + 1px ヘアライン枠）が
         # 直前サイズの「空の枠付き矩形」として失敗カード越しに透けて見える
-        # （壊れた入力欄のような見た目 — レビュー 2026-07-31 #82）。
+        # （壊れた入力欄のような見た目）。
         # ラベルごと隠し、``show_image`` / ``clear_image`` で出し直す。
         self._label.hide()
         self._error_card.show_error(message)
@@ -1306,7 +1312,7 @@ class ImageView(QScrollArea):
         in real time.  No LANCZOS work — that's a separate pass.
         """
         if self._is_gif and self._movie is not None:
-            self._apply_gif_scale()
+            self._apply_movie_scale()
             return
         if self._ensure_original_pixmap() is None:
             return
@@ -1353,17 +1359,18 @@ class ImageView(QScrollArea):
         bumped; the queue is cleared so pending jobs never start, and
         an already-running job's result is dropped on token mismatch.
 
-        項目#18: 全体レンダの物理ターゲットがピクセル予算を超えるズーム域
+        全体レンダの物理ターゲットがピクセル予算を超えるズーム域
         （静止画・非フィットのみ）は可視領域パッチ描画へ切り替える
         （``_apply_patch_mode`` — 同じ 2 段構成: 同期 Qt スケール → 非同期
-        高品位リサンプル）。それ以外は従来の全体レンダ経路で、
+        高品位リサンプル）。それ以外は全体レンダ経路で、
         ``_clamp_pixel_budget`` の予算契約もそのまま生きている。
         """
         self._refresh_timer.stop()
         if self._patch_mode_wanted():
             self._apply_patch_mode()
         else:
-            if self._label.canvas_active():
+            # アニメーションは常に canvas で描く（``_apply_movie_scale``）。
+            if self._label.canvas_active() and not self._is_gif:
                 self._label.clear_canvas()
                 self._patch_rect = QRect()
                 self._patch_dpr = 0.0
@@ -1372,7 +1379,7 @@ class ImageView(QScrollArea):
         self._update_pan_cursor()
         self._update_overlays()
 
-    # ------------------------------------- 可視領域パッチレンダ（項目#18）
+    # ------------------------------------------------ 可視領域パッチレンダ
 
     def _full_zoom_size(self) -> QSize:
         """非フィット時の論理レンダ全寸（= ラベル寸）."""
@@ -1383,13 +1390,12 @@ class ImageView(QScrollArea):
     def _patch_mode_wanted(self) -> bool:
         """全体レンダが予算を超える静止画ズームか（= パッチ描画に切り替える）.
 
-        QMovie が対象外なのは、フレームごとの全体スケールしかできないため
-        （``_apply_gif_scale`` のクランプ + ``_zoom_ceiling`` の頭打ちで整合を
-        保つ）。
+        アニメーションは ``_original`` を持たないので常に偽 — 原寸フレームを
+        canvas へ渡して描画時にスケールする（``_apply_movie_scale``）ので、
+        パッチを切り出す必要が無い。
         """
         return geom.patch_mode_wanted(
             fit_mode=self._fit_mode,
-            is_gif=self._is_gif,
             natural=self._original_size(),
             zoom=self._zoom,
             dpr=self.devicePixelRatioF(),
@@ -1502,8 +1508,8 @@ class ImageView(QScrollArea):
 
     def _patch_stale(self) -> bool:
         """可視域が最後にレンダしたパッチの外へ出た（or DPR が変わった）か."""
-        if not self._label.canvas_active():
-            return False
+        if not self._label.canvas_active() or self._is_gif:
+            return False  # アニメーションの canvas は全面が原寸フレーム
         dpr = max(1.0, self.devicePixelRatioF() or 1.0)
         if dpr != self._patch_dpr:
             return True
@@ -1549,7 +1555,7 @@ class ImageView(QScrollArea):
 
     def _apply_scaled(self, dpr: float, pil: Image.Image) -> None:
         if self._label.canvas_active():
-            return  # パッチモードへ切り替わった後に届いた全体レンダ（項目#18）
+            return  # パッチモードへ切り替わった後に届いた全体レンダ
         pix = pil_to_qpixmap(pil)
         # LANCZOS ran with a physical-pixel target (phys_box passed to the
         # task).  Use the DPR captured at schedule time — re-reading
@@ -1562,7 +1568,7 @@ class ImageView(QScrollArea):
         self._update_overlays()
 
     def showEvent(self, event):  # noqa: N802 (Qt API)
-        """再表示時にパン可否依存の表示を測り直す（項目#70）.
+        """再表示時にパン可否依存の表示を測り直す.
 
         非表示のウィジェットに対する ``QLabel.resize`` では ``QScrollArea`` の
         スクロールバー範囲が更新されない（Resize イベントが保留される）ため、
@@ -1582,19 +1588,20 @@ class ImageView(QScrollArea):
         super().resizeEvent(event)
         self._zoom_overlay.reposition()
         self._minimap.reposition()
+        self._sync_overlay_keepout()
         if self._error_card.isVisible():
             self._error_card.setGeometry(self.viewport().rect())
-        # 画像矩形基準の再配置 (UIレビュー 07-25 #121)。
+        # 画像矩形基準の再配置。
         self._control_bar.set_anchor_rect(self._content_anchor_rect())
         self._control_bar.reposition()
         # フィット時の実効倍率はビューポート寸法の関数なので、リサイズの
-        # たびに読み値が陳腐化する（N-16）。非フィット分岐でも早期 return
+        # たびに読み値が陳腐化する。非フィット分岐でも早期 return
         # の前に通す — 表示は不変でも 1 回の同期は無害で、両分岐の対を
         # 揃えておくほうが次の分岐追加で片側だけ漏れる事故を防げる。
         self._sync_zoom_readout()
         if not self._fit_mode:
-            # パッチモード中はビューポート拡大で可視域がパッチ外へ出得る
-            # （項目#18）。デバウンス付きで追従レンダを予約する。
+            # パッチモード中はビューポート拡大で可視域がパッチ外へ出得る。
+            # デバウンス付きで追従レンダを予約する。
             if self._patch_stale():
                 self._schedule_patch_update()
             return
@@ -1613,13 +1620,13 @@ class ImageView(QScrollArea):
     def _natural_size(self) -> QSize | None:
         """現在表示中コンテンツの元寸。無ければ ``None``。"""
         if self._is_gif and self._movie is not None:
-            # ピン留めした原寸を使う（``setScaledSize`` 後の frameRect /
-            # currentImage はスケール済みサイズを返すため）。
-            natural = self._movie_natural
-            if not natural.isValid() or natural.isEmpty():
-                natural = self._movie.frameRect().size()
+            # フレームは常に原寸でデコードされる（``setScaledSize`` を使わない）
+            # ので都度読みでよい。表示用の回転を掛けた寸法を返す（静止画の
+            # ``_original`` が回転済みなのと対）。
+            natural = self._movie.frameRect().size()
             if not natural.isValid() or natural.isEmpty():
                 natural = self._movie.currentImage().size()
+            natural = oriented_size(natural, self._rotation)
         elif self._original is not None:
             natural = QSize(self._original.width, self._original.height)
         else:
@@ -1627,12 +1634,6 @@ class ImageView(QScrollArea):
         if natural.width() <= 0 or natural.height() <= 0:
             return None
         return natural
-
-    def _zoom_ceiling(self) -> float:
-        """ズーム操作（ホイール / ±）の上限倍率（幾何へ委譲）."""
-        return geom.zoom_ceiling(
-            is_gif=self._is_gif, natural=self._natural_size(),
-        )
 
     def _effective_zoom(self) -> float:
         """Current on-screen scale relative to the natural image size.
@@ -1648,7 +1649,6 @@ class ImageView(QScrollArea):
             zoom=self._zoom,
             viewport=self.viewport().size(),
             no_upscale=view_prefs.get_image_fit_no_upscale(),
-            ceiling=self._zoom_ceiling(),
         )
 
     def wheelEvent(self, event):  # noqa: N802 (Qt API)
@@ -1683,9 +1683,7 @@ class ImageView(QScrollArea):
     def _zoom_at(self, vp_pos: QPoint, factor: float) -> bool:
         """カーソル位置を固定して 1 段ズームする。動かなければ ``False``。"""
         base_zoom = self._effective_zoom()
-        new_zoom = geom.step_zoom_value(
-            base_zoom, factor, self._zoom_ceiling(),
-        )
+        new_zoom = geom.step_zoom_value(base_zoom, factor)
         if new_zoom == base_zoom and not self._fit_mode:
             return False
         self._anchor_zoom(vp_pos, new_zoom)
@@ -1755,8 +1753,7 @@ class ImageView(QScrollArea):
         if self._original is None and not (self._is_gif and self._movie is not None):
             return
         base = self._effective_zoom()
-        # ホイールと同じ ``_zoom_ceiling`` でキャップする。
-        new_zoom = geom.step_zoom_value(base, factor, self._zoom_ceiling())
+        new_zoom = geom.step_zoom_value(base, factor)  # ホイールと同じクランプ
         if new_zoom == base and not self._fit_mode:
             return
         self._fit_mode = False
@@ -1792,63 +1789,27 @@ class ImageView(QScrollArea):
         the static-image path so a broken GIF still shows frame 0 via
         ``QImageReader`` rather than a blank label.
 
-        The movie decodes from an in-memory ``QBuffer`` (the bytes are read
-        via ``read_file_bytes``, or reused from *data* when the caller
-        already has them) instead of ``QMovie(str(path))``.  A bare
-        ``QMovie(str)`` uses QFile, which Qt6 fails to open on some SMB/NAS
-        paths with CJK + full-width punctuation — the same bug ``qimage_decode``
-        works around for still images.  The buffer + its backing bytes must
-        outlive the QMovie, so both are pinned on ``self`` until ``_clear_movie``.
+        The movie decodes from the in-memory bytes (read via
+        ``read_file_bytes``, or reused from *data*) — why, and why the buffer
+        + bytes stay pinned on ``self`` until ``_clear_movie``: see
+        :func:`~.image_view_parts.movie.open_movie`.
         """
         if data is None:
             data = read_file_bytes(path)
         if data is None:
             return False
-        qbytes = QByteArray(data)
-        # Parent the movie to the view and the buffer to the movie so Qt
-        # controls teardown order (buffer destroyed as part of the movie's
-        # destruction, never before it) even if the widget is torn down
-        # without an explicit _clear_movie — a dangling QBuffer under a live
-        # QMovie is an access violation at process exit otherwise.
-        movie = QMovie(self)
-        buffer = QBuffer(movie)
-        buffer.setData(qbytes)
-        if not buffer.open(QBuffer.ReadOnly):
-            buffer.deleteLater()
-            movie.deleteLater()
+        opened = open_movie(self, data)
+        if opened is None:
             return False
-        movie.setDevice(buffer)
-        if not movie.isValid():
-            movie.deleteLater()
-            return False
-        # CacheAll pre-decodes every frame for smooth looping but consumes
-        # memory proportional to file size.  Cap it at 20 MiB; larger files
-        # stream with CacheNone to avoid OOM on long animations.  ``data`` is
-        # already in memory so its length is the on-disk size (no extra stat).
-        file_size = len(data)
-        movie.setCacheMode(
-            QMovie.CacheMode.CacheAll
-            if file_size < 20 * 1024 * 1024
-            else QMovie.CacheMode.CacheNone
-        )
-        # ``frameRect`` is only populated once a frame is actually loaded;
-        # jumping to frame 0 makes the natural size queryable immediately
-        # so the initial fit-to-window scale matches the first paint.
-        if not movie.jumpToFrame(0):
-            movie.deleteLater()
-            return False
+        movie, buffer, qbytes = opened
+        self._playback.forget()
         self._movie = movie
         # Keep references so the pair isn't GC'd from the Python side; Qt's
         # parent/child chain (buffer→movie→self) owns the teardown order.
         self._movie_buffer = buffer
         self._movie_bytes = qbytes
         self._is_gif = True
-        natural = movie.frameRect().size()
-        if not natural.isValid() or natural.isEmpty():
-            natural = movie.currentImage().size()
-        # スケール適用前の原寸をピン留め（以後の frameRect はスケール済みに
-        # なるため — ``_movie_natural`` のコメント参照）。
-        self._movie_natural = QSize(natural)
+        natural = self._natural_size() or QSize()
         self.image_info_changed.emit(natural.width(), natural.height())
         if self._pending_restore.armed:
             self._fit_mode = self._saved_fit_mode
@@ -1857,60 +1818,77 @@ class ImageView(QScrollArea):
             self._fit_mode = True
             self._zoom = 1.0
         self._label.setText("")
-        self._label.setMovie(movie)
-        self._apply_gif_scale()
+        # QLabel.setMovie は使わない — フレームは原寸のまま受け取り、canvas
+        # が描画時に拡縮する（``_apply_movie_scale``）。
+        movie.frameChanged.connect(self._on_movie_frame)
+        self._apply_movie_scale()
         movie.start()
         # Visual affordance: clicking the frame toggles play/pause.
         self._label.setCursor(Qt.CursorShape.PointingHandCursor)
         if self._pending_restore.consume(always):
             self._restore_scroll_fraction(self._saved_scroll_fx, self._saved_scroll_fy)
         self._show_zoom_overlay()
-        # アニメ着地も静止画と同じく隣接の先読みを撒く（レビュー 09-03 #208）:
-        # ``_apply_loaded`` だけが ``_schedule_prefetch`` を呼んでいたため、GIF /
-        # アニメ WebP に着地した瞬間だけ先読みが止まり、次の画像が毎回コールド
-        # デコードになっていた。provider 未設定なら黙って no-op。
+        # アニメ着地も静止画と同じく隣接の先読みを撒く: ``_apply_loaded``
+        # だけが ``_schedule_prefetch`` を呼ぶと、GIF / アニメ WebP に着地した
+        # 瞬間だけ先読みが止まり、次の画像が毎回コールドデコードになる。provider 未設定なら黙って no-op。
         if self._current_path is not None:
             self._schedule_prefetch(self._current_path)
         return True
 
-    def _apply_gif_scale(self) -> None:
-        movie = self._movie
-        if movie is None:
-            return
-        # ピン留め原寸基準（``_movie_natural`` のコメント参照）: 都度
-        # frameRect を読むと 2 回目以降は前回スケール済みサイズが基準になり、
-        # フィット → ズームで「フィット寸 × 倍率」へ縮む複利バグになる。
+    def _apply_movie_scale(self) -> None:
+        """ラベルを静止画と同じ計算の寸法へ広げ、現在フレームをその寸で描く.
+
+        拡縮は canvas の描画時なので画素予算の上限は要らない。一時停止中の
+        ズーム / リサイズも次のフレームを待たずにここで新寸になる。
+        """
         natural = self._natural_size()
-        if natural is None:
+        if self._movie is None or natural is None:
             return
-        target = geom.gif_scale_target(
+        size = geom.movie_label_size(
             natural=natural,
             fit_mode=self._fit_mode,
             zoom=self._zoom,
             viewport=self.viewport().size(),
             no_upscale=view_prefs.get_image_fit_no_upscale(),
         )
-        if target is None:
+        if size is None:
             return
-        movie.setScaledSize(target)
-        self._label.resize(target)
+        if self._label.size() != size:
+            self._label.resize(size)
+        self._on_movie_frame()
+
+    def _on_movie_frame(self, _frame: int = -1) -> None:
+        """``frameChanged`` — 現在フレームを表示寸（物理画素）以下にして canvas へ."""
+        movie = self._movie
+        if movie is None:
+            return
+        dpr, label = self.devicePixelRatioF() or 1.0, self._label.size()
+        target = QSize(round(label.width() * dpr), round(label.height() * dpr))
+        pix = render_frame(movie, target=target, rotation=self._rotation, flip_h=self._flip_h)
+        if pix is not None:
+            self._label.set_canvas(pix)
+
+    def _movie_frame(self) -> QImage | None:
+        """表示中の向きを掛けた現在フレーム（アニメーションでなければ ``None``）."""
+        if not self._is_gif or self._movie is None:
+            return None
+        frame = orient_frame(self._movie.currentImage(), self._rotation, self._flip_h)
+        return None if frame.isNull() else frame
 
     def _clear_movie(self) -> None:
+        self._playback.forget()
         if self._movie is None:
             return
         self._movie.stop()
-        # Detach from the label before deleteLater so the label isn't
-        # left holding a dangling pointer between the stop and the
-        # actual deletion on the next event-loop tick.
-        self._label.setMovie(None)  # type: ignore[arg-type]
+        self._movie.frameChanged.disconnect(self._on_movie_frame)
         # deleteLater on the movie also disposes its child QBuffer (parented
         # in _try_show_gif) in the correct order — just drop our Python refs.
         self._movie.deleteLater()
         self._movie = None
         self._movie_buffer = None
         self._movie_bytes = None
-        self._movie_natural = QSize()
         if self._is_gif:
+            self._label.clear_canvas()
             self._label.clear()
             self._label.unsetCursor()
         self._is_gif = False
@@ -1923,23 +1901,22 @@ class ImageView(QScrollArea):
         full rate otherwise, wasting CPU for as long as the user browses
         other content.  Navigating back to an image always goes through
         :meth:`show_image`, which rebuilds and restarts the movie, so no
-        resume counterpart is needed.
+        resume counterpart is needed here.  別ウィンドウへの退避は選択が
+        動かず ``show_image`` を通らないので、そちらは
+        :meth:`suspend_animation` / :meth:`resume_animation` の対を使う。
         """
-        movie = self._movie
-        if movie is not None and movie.state() == QMovie.MovieState.Running:
-            movie.setPaused(True)
+        self._playback.pause(self._movie)
+
+    def suspend_animation(self) -> None:
+        """別ウィンドウ（全画面）へ退避する間だけ再生を止める（:meth:`resume_animation` と対）。"""
+        self._playback.suspend(self._movie)
+
+    def resume_animation(self) -> None:
+        """:meth:`suspend_animation` が止めた再生を再開する（それ以外は no-op）。"""
+        self._playback.resume(self._movie)
 
     def _toggle_movie(self) -> None:
-        movie = self._movie
-        if movie is None:
-            return
-        state = movie.state()
-        if state == QMovie.MovieState.Running:
-            movie.setPaused(True)
-        elif state == QMovie.MovieState.Paused:
-            movie.setPaused(False)
-        else:
-            movie.start()
+        self._playback.toggle(self._movie)
 
     def eventFilter(self, obj, event):  # noqa: N802 (Qt API)
         if obj is not self._label:
@@ -1982,11 +1959,15 @@ class ImageView(QScrollArea):
             # 押下は待機を張るだけ。アニメーションの再生 / 一時停止は
             # ドラッグに発展しなかった Release で決める。
             self._drag_start_pos = event.position().toPoint()
+            self._playback.arm()
         elif isinstance(intent, ivinput.ToggleFitActual):
             self._toggle_fit_actual()
             return True
         elif isinstance(intent, ivinput.Maximize):
             self._drag_start_pos = None
+            # 1 回目の Release が切り替えた再生状態を戻す — 最大化した直後の
+            # GIF が止まったまま出ないように。
+            self._playback.undo_release_toggle(self._movie)
             self.maximize_requested.emit()
             return True
         elif isinstance(intent, ivinput.ToggleZoomAt):
@@ -2013,7 +1994,7 @@ class ImageView(QScrollArea):
             self._update_pan_cursor()
             return True
         elif isinstance(intent, ivinput.ToggleMovie):
-            self._toggle_movie()
+            self._playback.toggle_on_release(self._movie)
             return True
         return super().eventFilter(obj, event)
 
@@ -2021,8 +2002,7 @@ class ImageView(QScrollArea):
         """True when the image overflows the viewport in either axis.
 
         The threshold is exactly "the scroll area has something to scroll" —
-        there is no slop (レビュー #119: a ``_MINIMAP_SLOP_PX`` constant
-        promised one but was never wired up, and could not have helped).
+        there is no slop, and a slop band could not help.
         Scrollbars are ``AsNeeded``: a 1 px overflow makes them appear, which
         shrinks the viewport by the scrollbar extent and pushes ``maximum()``
         straight to ~15 px — measured 0 → 15 → 16 for a source 0/1/2 px larger
@@ -2107,8 +2087,8 @@ class ImageView(QScrollArea):
         一時ピルも出すが、**ビューポートのリサイズ**（分割 ⇄ 最大化・スプリッタ
         ドラッグ・全画面遷移）ではフィット時の実効倍率だけが静かに変わる。
         読み値の同期をこのメソッドへ分離し ``resizeEvent`` の両分岐から呼ぶ
-        ことで、「52% と出ているのに実際は 100%」という陳腐化を防ぐ
-        （UIレビュー 2026-08-28 N-16）。一時オーバーレイは出さない。
+        ことで、「52% と出ているのに実際は 100%」という陳腐化を防ぐ。
+        一時オーバーレイは出さない。
         """
         if percent is None:
             percent = self._effective_zoom() * 100.0
@@ -2128,7 +2108,7 @@ class ImageView(QScrollArea):
         # zoom overlay's "shown only while interacting" behavior.
         self._update_minimap_rect()
         self._minimap.bump_activity()
-        # パン追従（項目#18）: 可視域が高解像度パッチの外へ出たら再レンダを
+        # パン追従: 可視域が高解像度パッチの外へ出たら再レンダを
         # 予約する。マージン内のパンは何もしない（既レンダで覆われている）。
         if self._patch_stale():
             self._schedule_patch_update()
@@ -2136,7 +2116,7 @@ class ImageView(QScrollArea):
     def _content_anchor_rect(self) -> QRect | None:
         """いま画像が描かれている矩形（viewport 座標）。無ければ ``None``.
 
-        ホバーカプセルの配置基準 (UIレビュー 07-25 #121)。``_label`` は
+        ホバーカプセルの配置基準。``_label`` は
         QScrollArea の中身なので viewport 座標系の geometry を持つ — フィット
         表示ではラベル ≒ 画像、拡大時は viewport との交差が可視領域になる。
         """
@@ -2168,14 +2148,23 @@ class ImageView(QScrollArea):
         )
         eligible = self._minimap_enabled and has_content and self._is_pannable()
         self._minimap.set_eligible(eligible)
-        if not eligible:
-            return
-        self._update_minimap_pixmap()
-        self._update_minimap_rect()
-        self._minimap.reposition()
-        # A zoom/fit/resize change that leaves the image pannable counts as
-        # activity — e.g. the user just wheel-zoomed in past the viewport.
-        self._minimap.bump_activity()
+        if eligible:
+            self._update_minimap_pixmap()
+            self._update_minimap_rect()
+            self._minimap.reposition()
+        # 可否・寸法が決まった後で、下端の浮遊部品に避ける枠を渡し直す。
+        self._sync_overlay_keepout()
+        if eligible:
+            # A zoom/fit/resize change that leaves the image pannable counts
+            # as activity — e.g. the user just wheel-zoomed in past the
+            # viewport.
+            self._minimap.bump_activity()
+
+    def _sync_overlay_keepout(self) -> None:
+        """ミニマップの占有枠を唯一の「避ける矩形」としてカプセルとピルへ配る。"""
+        keepout = self._minimap.footprint()
+        self._control_bar.set_keepout_rect(keepout)
+        self._zoom_overlay.set_keepout_rect(keepout)
 
     def _update_minimap_pixmap(self) -> None:
         """(Re)build the minimap's small preview pixmap, once per image.
@@ -2188,10 +2177,8 @@ class ImageView(QScrollArea):
         if self._minimap_pixmap_source == self._image_serial and self._minimap_pixmap is not None:
             return
         source: QPixmap | None = self._ensure_original_pixmap()
-        if source is None and self._is_gif and self._movie is not None:
-            frame = self._movie.currentImage()
-            if not frame.isNull():
-                source = QPixmap.fromImage(frame)
+        if source is None and (frame := self._movie_frame()) is not None:
+            source = QPixmap.fromImage(frame)
         if source is None or source.isNull():
             return
         small = source.scaled(
@@ -2203,10 +2190,10 @@ class ImageView(QScrollArea):
         self._minimap.set_pixmap(small)
 
     def _update_minimap_rect(self) -> None:
-        # 可視かどうかで早抜けしないこと（レビュー #122）: 呼び出し元は
+        # 可視かどうかで早抜けしないこと: 呼び出し元は
         # ``bump_activity()``（= show）より前にここを通るので、オートハイド
         # から復帰する瞬間だけ矩形更新が no-op になり、前回ズームの黄枠のまま
-        # 表示されていた。数回の除算なので隠れていても計算して構わない。
+        # 表示されてしまう。数回の除算なので隠れていても計算して構わない。
         hbar = self.horizontalScrollBar()
         vbar = self.verticalScrollBar()
         rect = geom.minimap_view_rect(
@@ -2232,24 +2219,28 @@ class ImageView(QScrollArea):
 
     def rotate_right(self) -> None:
         """Rotate the displayed image 90° clockwise (display-only, F11)."""
-        if self._base_original is None or self._is_gif:
+        if not self._orientable():
             return
         self._rotation = (self._rotation + 90) % 360
         self._rebuild_oriented()
 
     def rotate_left(self) -> None:
         """Rotate the displayed image 90° counter-clockwise (display-only)."""
-        if self._base_original is None or self._is_gif:
+        if not self._orientable():
             return
         self._rotation = (self._rotation - 90) % 360
         self._rebuild_oriented()
 
     def flip_horizontal(self) -> None:
         """Mirror the displayed image left↔right (display-only, F11)."""
-        if self._base_original is None or self._is_gif:
+        if not self._orientable():
             return
         self._flip_h = not self._flip_h
         self._rebuild_oriented()
+
+    def _orientable(self) -> bool:
+        """回転・反転できるものが載っているか（静止画ソース or アニメーション）."""
+        return self._base_original is not None or self._movie is not None
 
     def _rebuild_oriented(self) -> None:
         """Recompute ``_original`` / ``_original_pixmap`` from the pristine
@@ -2257,28 +2248,34 @@ class ImageView(QScrollArea):
 
         Nothing is ever written to disk — this only affects what the view
         shows.  90° steps use ``transpose`` (lossless, no resampling).
+        アニメーションは原寸フレームを描くたびに向きを掛ける
+        （``render_frame``）ので、ここでは寸法の通知と再描画だけ。
         """
         base = self._base_original
-        if base is None:
+        if self._movie is not None:
+            natural = self._natural_size() or QSize()
+            self.image_info_changed.emit(natural.width(), natural.height())
+        elif base is None:
             return
-        img = base
-        rot = self._rotation % 360
-        if rot == 90:
-            img = img.transpose(Image.ROTATE_270)   # PIL rotates CCW; 90° CW
-        elif rot == 180:
-            img = img.transpose(Image.ROTATE_180)
-        elif rot == 270:
-            img = img.transpose(Image.ROTATE_90)
-        if self._flip_h:
-            img = img.transpose(Image.FLIP_LEFT_RIGHT)
-        self._original = img
-        self._original_pixmap = pil_to_qpixmap(img)
-        self.image_info_changed.emit(img.width, img.height)
+        else:
+            img = base
+            rot = self._rotation % 360
+            if rot == 90:
+                img = img.transpose(Image.ROTATE_270)   # PIL rotates CCW; 90° CW
+            elif rot == 180:
+                img = img.transpose(Image.ROTATE_180)
+            elif rot == 270:
+                img = img.transpose(Image.ROTATE_90)
+            if self._flip_h:
+                img = img.transpose(Image.FLIP_LEFT_RIGHT)
+            self._original = img
+            self._original_pixmap = pil_to_qpixmap(img)
+            self.image_info_changed.emit(img.width, img.height)
         # The cached minimap thumbnail was built from the old orientation.
         self._minimap_pixmap = None
         self._minimap_pixmap_source = -1
         # パッチの下敷きも旧向きのまま — 破棄して次の ``_refresh`` で作り直す
-        # （canvas モード自体は維持: 直後の再レンダが新向きで描く。項目#18）。
+        # （canvas モード自体は維持: 直後の再レンダが新向きで描く）。
         self._patch_base = None
         self._patch_base_source = -1
         self._refresh()
@@ -2304,7 +2301,7 @@ class ImageView(QScrollArea):
         menu.exec(event.globalPos())
         # ``QMenu(self)`` is parented to this view, so exec() only hides it —
         # without this every right-click leaves a menu + its QAction set on the
-        # view until the whole window is destroyed (#57).
+        # view until the whole window is destroyed.
         menu.deleteLater()
 
     def _build_context_menu(self) -> QMenu:
@@ -2312,9 +2309,8 @@ class ImageView(QScrollArea):
 
         席固有の表示系（フィット / 実寸 / 全画面 / ズーム維持 / ミニマップ /
         回転 / 反転 / 画像をコピー）が先、続いて 4 席共通のブロック
-        （:func:`append_entry_verbs` — 開く / コピー / 探す / 印）。類似検索は
-        以前この席だけ先頭にあったが、共通ブロックの「探す」節へ揃えた
-        （UIレビュー 2026-09-11 N-19 / E4 — 「似た配置」の規則）。印の口は祖先
+        （:func:`append_entry_verbs` — 開く / コピー / 探す / 印）。類似検索も
+        共通ブロックの「探す」節に置き、4 席で配置を揃える。印の口は祖先
         （``ContentView`` / ``LightboxWindow``）から取るので、分割 / 最大化 /
         全画面の 3 面が 1 実装で揃う。
         """
@@ -2324,7 +2320,7 @@ class ImageView(QScrollArea):
         actual_act = menu.addAction(t("viewer.image_view.actual_size"))
         actual_act.triggered.connect(self._set_actual_size)
         if self._fullscreen_available or self._fullscreen_exit_mode:
-            # 全画面の中では「入口」ではなく「出口」を名乗る (N-142)。行き先は
+            # 全画面の中では「入口」ではなく「出口」を名乗る。行き先は
             # 同じシグナルで、ホスト（ライトボックス）が閉じる。
             fs_act = menu.addAction(
                 t("viewer.image_view.fullscreen_exit")
@@ -2344,9 +2340,9 @@ class ImageView(QScrollArea):
         minimap_act.setCheckable(True)
         minimap_act.setChecked(self._minimap_enabled)
         minimap_act.toggled.connect(self._on_minimap_menu_toggled)
-        # Display-only rotate / flip (要件 F11) — still images only (a QMovie GIF
-        # can't be reoriented frame-by-frame here).
-        if self._base_original is not None and not self._is_gif:
+        # Display-only rotate / flip (要件 F11) — アニメーションも各フレームを
+        # 描くときに向きを掛けるので同じ項目を出す。
+        if self._orientable():
             menu.addSeparator()
             rot_r_act = menu.addAction(t("viewer.image_view.rotate_right"))
             rot_r_act.triggered.connect(self.rotate_right)
@@ -2356,9 +2352,9 @@ class ImageView(QScrollArea):
             flip_act.triggered.connect(self.flip_horizontal)
         menu.addSeparator()
         copy_act = menu.addAction(t("viewer.image_view.copy_image"))
-        # 画素が載っているかで判定する（項目#120 追修正）。``_apply_failed`` は
+        # 画素が載っているかで判定する。``_apply_failed`` は
         # 失敗カードの [再読み込み] 用に ``_current_path`` を残すので、パスだけ
-        # を見ていると失敗カード表示中も「画像をコピー」が有効に見えたまま
+        # を見ると失敗カード表示中も「画像をコピー」が有効に見えたまま
         # ``copy_image_to_clipboard`` の「コピーできる画像がありません」に
         # 突き当たる。Ctrl+C / 編集メニュー側と同じ述語へ寄せる。
         copy_act.setEnabled(self.has_image())
@@ -2394,10 +2390,8 @@ class ImageView(QScrollArea):
         loaded — the seed-preview row then falls back to a generic icon.
         """
         source: QPixmap | None = self._ensure_original_pixmap()
-        if source is None and self._is_gif and self._movie is not None:
-            frame = self._movie.currentImage()
-            if not frame.isNull():
-                source = QPixmap.fromImage(frame)
+        if source is None and (frame := self._movie_frame()) is not None:
+            source = QPixmap.fromImage(frame)
         if source is None or source.isNull():
             return None
         edge = self._SEED_PIXMAP_MAX_EDGE
@@ -2415,20 +2409,19 @@ class ImageView(QScrollArea):
 
 
 def apply_state(view: ImageView, state: "ViewerState") -> None:
-    """``ViewerState`` の ImageView 設定を *view* へ一括反映する（項目#29）.
+    """``ViewerState`` の ImageView 設定を *view* へ一括反映する.
 
-    ImageView のインスタンスは 2 つある（中央プレビュー ``ContentView._image``
-    と閲覧モード ``LightboxWindow._view``）。「state を ImageView に反映する」
-    コードが呼び出し元ごとに手書きされていた結果、設定が 1 項目増えるたびに
-    片側だけ配線されて取り残される事故が 3 レビュー跨ぎで 4 件起きた
-    （#1055 / #1973 / 07-12 #1116 / 項目#21・#34）。以後、ImageView が state
+    ImageView のインスタンスは 3 つある（中央プレビュー ``ContentView._image``・
+    フォルダプレビューの中央画像・閲覧モード ``LightboxWindow._view``）。「state を ImageView に反映する」
+    コードを呼び出し元ごとに手書きすると、設定が 1 項目増えるたびに
+    片側だけ配線されて取り残される。ImageView が state
     から受け取る設定は**必ずこの関数に足す**こと — 呼び出し元
     （``ContentView.apply_cache_settings`` / ``apply_view_settings`` と
-    ``LightboxWindow.apply_view_state``）は全員ここを通るので、両インスタンス
+    ``LightboxWindow.apply_view_state``）は全員ここを通るので、全インスタンス
     へ自動的に届く。
 
     対象 7 項目: キャッシュ予算 3 種（MiB → バイト換算はここで行う）、
-    先読み半径、ズーム維持、ミニマップ表示、フィットの再適用（N-77 —
+    先読み半径、ズーム維持、ミニマップ表示、フィットの再適用（
     F03「等倍以上に拡大しない」は ``view_prefs`` のモジュール変数で、
     呼び出し元が先にそれを書いてからここへ来る規約）。
     """
@@ -2457,15 +2450,14 @@ def connect_state_writeback(
     """ImageView の「ビュー内トグル → ホストへの書き戻し」を一括配線する.
 
     :func:`apply_state`（state → view の**読み**方向）の**対**にあたる
-    書き戻し方向の集約点。ImageView のインスタンスは 2 つある（中央プレビュー
-    ``ContentView._image`` と全画面 ``LightboxWindow._view``）が、右クリック
-    メニューは両者で共用のため**どちらでも項目は出るし押せる**。にもかかわらず
-    ``zoom_persist_toggled`` / ``minimap_toggled`` は中央ペインにしか配線されて
-    おらず、全画面でのトグルは黙って捨てられ、次に開いたとき :func:`apply_state`
-    が保存値で上書きして変更が消えていた（UIレビュー 2026-08-28 N-78）。
+    書き戻し方向の集約点。ImageView のインスタンスは 3 つある（中央プレビュー
+    ``ContentView._image``・フォルダプレビュー・全画面）が、右クリック
+    メニューは共用のため**どれでも項目は出るし押せる**。
+    ``zoom_persist_toggled`` / ``minimap_toggled`` を一部の面にしか配線しないと、
+    その他の面でのトグルは黙って捨てられ、次に開いたとき :func:`apply_state`
+    が保存値で上書きして変更が消える。
 
-    :func:`apply_state` の docstring が「片側だけ配線されて取り残される事故が
-    3 レビュー跨ぎで 4 件」と記録しているのと**同じ事故の 5 件目**なので、
+    :func:`apply_state` の「片側だけ配線されて取り残される」事故と同じ形なので、
     読み方向だけでなく書き戻し方向にも集約点を置く。以後、ImageView が
     ホストへ返すビュー設定トグルは**必ずこの関数に足す**こと。
     """

@@ -2,7 +2,7 @@
 
 Thin re-export: the actual design system (colour tokens, QPalette, app-wide
 QSS, Windows dark title bar) lives in :mod:`snappix.common.ui` so the
-plugin windows can share it.  See docs/claude/design.md for the policy.
+plugin windows can share it (colours and font sizes come from its tokens, never literals).
 
 This module also owns the viewer's **theme choice tables** — the single
 ``(theme key, i18n label key)`` source both selection UIs (表示メニューの
@@ -38,7 +38,7 @@ THEME_CHOICES_EXTRA: tuple[tuple[str, str], ...] = (
 )
 
 #: key → is_dark for the「その他」テーマ一覧。``ThemeTokens.is_dark`` を単一の
-#: 真実源とし、明暗の情報をここで重複定義しない（UIレビュー 07-25 #84）。
+#: 真実源とし、明暗の情報をここで重複定義しない。
 _EXTRA_THEME_IS_DARK: dict[str, bool] = {
     tok.name: tok.is_dark for tok in EXTRA_THEME_TOKENS
 }
@@ -48,11 +48,9 @@ def extra_theme_label(key: str, label_key: str) -> str:
     """「その他」テーマの表示名 + 明暗サフィックス（両導線の単一情報源）.
 
     10 テーマの中で追加 6 種は名前（「天文台の赤色灯」「書院の和紙」…）だけ
-    では明暗が読めないため、表示名に「（ダーク）」「（ライト）」を付ける
-    (UIレビュー 07-25 #84)。#84 は設定ダイアログのコンボにしか適用されず、
-    表示メニュー ▸ テーマ ▸ その他 は素のラベルのままだった
-    (UIレビュー 2026-08-28 N-107) — 両方がこの 1 関数を呼ぶことで、
-    ラベルの付け方が二度と片側だけになれないようにする。
+    では明暗が読めないため、表示名に「（ダーク）」「（ライト）」を付ける。
+    設定ダイアログのコンボと 表示メニュー ▸ テーマ ▸ その他 の両方が
+    この 1 関数を呼ぶことで、ラベルの付け方が片側だけになれないようにする。
 
     i18n キーは歴史的経緯で ``viewer.settings_dialog.*`` のままにしてある
     （文言そのものは変わっておらず、キー改名は翻訳の互換を無意味に切るだけ）。

@@ -61,15 +61,15 @@ class SavedSearchDialog(QDialog):
         outer = QVBoxLayout(self)
 
         self._table = QTableWidget()
-        # 2 列目「条件」は UIレビュー 07-25 #34: 保存した検索が名前だけで、
-        # 中身も適用範囲も見えなかった（別フォルダで 0 件になった理由も
-        # 説明されない）。条件チップと同じ語彙の要約を常時列に出す。
+        # 2 列目「条件」: 保存した検索が名前だけだと、中身も適用範囲も
+        # 見えない（別フォルダで 0 件になった理由も説明されない）。
+        # 条件チップと同じ語彙の要約を常時列に出す。
         self._table.setColumnCount(2)
         self._table.setHorizontalHeaderLabels([
             t("common.label.name"),
             t("viewer.saved_search_dialog.col_query"),
         ])
-        # 見出しの揃え = 内容の揃え（テキスト = 左）— UIレビュー 07-25 #97。
+        # 見出しの揃え = 内容の揃え（テキスト = 左）。
         align_header(self._table)
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -79,7 +79,7 @@ class SavedSearchDialog(QDialog):
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         self._table.itemSelectionChanged.connect(self._sync_controls)
         # 空のときは大きな空テーブルではなく中央寄せの案内に切り替える
-        # （UIレビュー #15 — detail_window のタグ表と同じ見せ方に統一）。
+        # （detail_window のタグ表と同じ見せ方）。
         self._stack, self._empty_label = empty_state_stack(
             self._table, icon_name="search"
         )
@@ -92,7 +92,7 @@ class SavedSearchDialog(QDialog):
         self._down_btn = QPushButton(t("common.action.move_down"))
         self._down_btn.clicked.connect(lambda: self._move_selected(1))
         btn_row.addWidget(self._down_btn)
-        # 名前セルはダブルクリックで編集できるが手がかりが無い（UIレビュー #5）
+        # 名前セルはダブルクリックで編集できるが手がかりが無い
         # — 選択行の編集をボタンからも明示的に開始できるようにする。
         self._rename_btn = QPushButton(t("common.action.rename"))
         self._rename_btn.clicked.connect(self._rename_selected)
@@ -104,7 +104,7 @@ class SavedSearchDialog(QDialog):
         outer.addLayout(btn_row)
 
         # 追加はメニュー側にしかない — その導線をダイアログ内でも案内し、
-        # 空のときは空である旨も添える（UIレビュー #28）。
+        # 空のときは空である旨も添える。
         self._hint = QLabel("")
         self._hint.setWordWrap(True)
         self._hint.setStyleSheet(hint_style())
@@ -125,12 +125,12 @@ class SavedSearchDialog(QDialog):
         # or a ``pop`` in ``_delete_selected``), while the table still holds the
         # PRE-mutation rows.  Committing now would fold those stale row texts
         # back into the reordered/shrunk ``_entries`` by index, pairing a name
-        # with the wrong query (C11).  Every mutating caller already commits
+        # with the wrong query.  Every mutating caller already commits
         # *before* mutating, and ``accept`` commits directly, so no edit is lost.
         self._table.setRowCount(len(self._entries))
         for row, entry in enumerate(self._entries):
             # 行ツールチップは「<条件サマリ>／現在のフォルダを起点に適用」
-            # （メニュー・ナビレールと同じ 1 本の文面 — UIレビュー 07-25 #34）。
+            # （メニュー・ナビレールと同じ 1 本の文面）。
             tip = saved_search_tooltip(entry)
             item = QTableWidgetItem(str(entry.get("name") or ""))
             item.setFlags(
@@ -148,7 +148,7 @@ class SavedSearchDialog(QDialog):
 
     def _sync_controls(self) -> None:
         # 未選択（や先頭/末尾）で押しても無反応なボタンは無効化して
-        # フィードバック欠如を防ぐ（UIレビュー #14）。
+        # フィードバック欠如を防ぐ。
         row = self._selected_row()
         n = len(self._entries)
         self._up_btn.setEnabled(row > 0)
@@ -160,7 +160,7 @@ class SavedSearchDialog(QDialog):
             else t("viewer.saved_search_dialog.add_hint")
         )
         # 空: 案内は中央のスタックへ昇格し、下端ヒントは隠して二重表示を避ける
-        # （UIレビュー #15）。項目あり: 表を出し下端に追加導線ヒントを残す。
+        # 項目あり: 表を出し下端に追加導線ヒントを残す。
         if n == 0:
             self._empty_label.setText(t("viewer.saved_search_dialog.empty_hint"))
             self._stack.setCurrentWidget(self._empty_label)
@@ -197,7 +197,7 @@ class SavedSearchDialog(QDialog):
         self._table.selectRow(target)
 
     def _rename_selected(self) -> None:
-        """選択行の名前セルの編集を明示的に開始する（UIレビュー #5）。"""
+        """選択行の名前セルの編集を明示的に開始する。"""
         row = self._selected_row()
         if row < 0:
             return

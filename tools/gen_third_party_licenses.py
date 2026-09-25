@@ -385,18 +385,27 @@ def dependency_closure(
     return result
 
 
-def pyproject_main_dependency_roots() -> list[tuple[str, set[str]]]:
-    """The viewer's direct dependencies from pyproject ``[project.dependencies]``.
+def pyproject_dependency_roots(
+    pyproject: Path, extra: str | None = None
+) -> list[tuple[str, set[str]]]:
+    """Direct dependencies declared in *pyproject* as closure roots.
 
-    Extras requested in the requirement string (``httpx[http2]`` style) are
-    carried into the closure; version specifiers are ignored (the closure is
-    computed against the installed venv, whose versions uv.lock pins).
+    ``[project.dependencies]``, or the ``extra`` optional-dependencies group
+    when given.  Extras requested in the requirement string (``httpx[http2]``
+    style) are carried into the closure; version specifiers are ignored (the
+    closure is computed against the installed venv, whose versions uv.lock
+    pins).
     """
     import re
 
-    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
+    reqs = (
+        project.get("optional-dependencies", {}).get(extra, [])
+        if extra
+        else project.get("dependencies", [])
+    )
     roots: list[tuple[str, set[str]]] = []
-    for req in data["project"]["dependencies"]:
+    for req in reqs:
         m = re.match(r"\s*([A-Za-z0-9._-]+)\s*(?:\[([^\]]*)\])?", req)
         if not m:
             continue
@@ -406,6 +415,11 @@ def pyproject_main_dependency_roots() -> list[tuple[str, set[str]]]:
         }
         roots.append((name, extras))
     return roots
+
+
+def pyproject_main_dependency_roots() -> list[tuple[str, set[str]]]:
+    """The viewer's direct dependencies from pyproject ``[project.dependencies]``."""
+    return pyproject_dependency_roots(ROOT / "pyproject.toml")
 
 
 def distributions_by_names(names: list[str]) -> list[im.Distribution]:

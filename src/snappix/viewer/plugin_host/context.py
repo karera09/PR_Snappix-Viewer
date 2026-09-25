@@ -52,7 +52,7 @@ class _PluginEventsProxy(PluginEvents):
     共有インスタンス（``bootstrap`` がセッションに 1 つだけ作る
     :class:`PluginEvents`）を購読し、同じ引数で再 emit する。プラグインは常に
     この proxy へ connect するので、``cleanup()`` の :meth:`detach` 一発で
-    **そのプラグインの購読だけ**を共有側から切り離せる（項目#120）。
+    **そのプラグインの購読だけ**を共有側から切り離せる。
 
     これが無いと、``activate`` が途中で例外を投げたプラグインの
     ``ctx.events`` 購読を誰も解除できない: 失敗プラグインの ``deactivate()``
@@ -65,7 +65,7 @@ class _PluginEventsProxy(PluginEvents):
     転送は **proxy 自身の束縛メソッド slot**（``QObject`` → ``QObject``）で
     つなぐ — ``shared.sig.connect(self.sig.emit)`` と書くと PySide が
     グローバルな受け手経由でつなぎ、proxy を破棄しても接続が残る
-    （CLAUDE.md の Qt 規約）。
+    （ワーカーブリッジ → 公開シグナルの転送と同じ規約）。
     """
 
     def __init__(self, shared: PluginEvents) -> None:
@@ -111,8 +111,8 @@ class PluginContext:
         self._manifest = manifest
         self._window = window
         # プラグインへ渡すのは共有インスタンスではなく専用 proxy。cleanup() で
-        # 購読ごと切れるようにするため（項目#120 — activate 失敗プラグインの
-        # 購読が回収されず全ナビゲーションで走り続けた）。
+        # 購読ごと切れるようにするため（さもないと activate 失敗プラグインの
+        # 購読が回収されず全ナビゲーションで走り続ける）。
         self._events = _PluginEventsProxy(events)
         self._data_root = data_root
         self._app_version = app_version
@@ -255,7 +255,7 @@ class PluginContext:
         ``duration_ms`` は表示時間（既定 3 秒。**0 でクリックまで残す**）。
         「失敗はモーダル」の対象は操作そのものが通らなかったケースで、
         **長時間処理が完走したが一部が失敗した「部分失敗」はここには含まれ
-        ない**（UIレビュー 2026-08-28 N-97）— 数十分のスキャンの失敗件数が
+        ない** — 数十分のスキャンの失敗件数が
         既定 3 秒で消えるのを避けるため、そういう通知は
         ``duration_ms=0`` の常駐トーストにする（本体が ``user_meta`` /
         キャッシュ構築の部分失敗に使っているのと同じ様式）。
@@ -319,8 +319,8 @@ class PluginContext:
         """このコンテキスト経由で追加された寄稿を回収する（host が呼ぶ）。
 
         回収するのは 5 面: メニュー項目 / 独自トップメニュー / ステータス
-        ウィジェット / 右クリック寄稿 / **``ctx.events`` の購読**（項目#120 —
-        proxy を共有 events から切り離す）。プラグイン自身が作ったそれ以外の
+        ウィジェット / 右クリック寄稿 / **``ctx.events`` の購読**（proxy を
+        共有 events から切り離す）。プラグイン自身が作ったそれ以外の
         リソース（タイマー・スレッド・本体シグナルへの直接接続）は
         ``deactivate()`` で自前で片付けること。
         """

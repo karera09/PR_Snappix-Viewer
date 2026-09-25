@@ -19,7 +19,7 @@ from PySide6.QtCore import QPoint, Qt
 
 #: 矢印 / Home / End / PageUp / PageDown — ``ShortcutOverride`` を横取りして
 #: 窓のグローバル ←/→ に盗まれないようにするキー集合。**Escape は入れない**
-#: （#115: Escape は窓の単一 ``QShortcut`` が消費する）。
+#: （Escape は窓の単一 ``QShortcut`` が消費する）。
 NAV_KEYS = frozenset({
     Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down,
     Qt.Key_Home, Qt.Key_End, Qt.Key_PageUp, Qt.Key_PageDown,
@@ -126,7 +126,7 @@ def key_intent(
 ) -> Intent:
     """キー 1 打の意図（順序は従来の分岐と 1 対 1）。
 
-    Escape の枝は**無い**（#115）— 窓の常時 ``QShortcut`` が先に消費するので、
+    Escape の枝は**無い** — 窓の常時 ``QShortcut`` が先に消費するので、
     ここに置くと生きた第 2 実装に読める死にコードになる。
     """
     if key == Qt.Key_Left:

@@ -9,12 +9,12 @@
   付き属性を触らない**という規約はここで担保される。
 * :func:`_install_delegates` — 外から観測される旧名（``grid._tag_results`` /
   ``grid._maybe_start_tag_scan()`` / ``grid.tag_input`` …）を
-  ``grid._ai`` へ委譲する薄いプロパティ / メソッド。テスト・``tools/ui_review``・
+  ``grid._ai`` へ委譲する薄いプロパティ / メソッド。テスト・撮影ツール・
   ウィンドウが従来どおりの名前で叩けるようにするための**互換面**で、新しい
   コードはコントローラを直に呼ぶこと。
 
 どちらも表からの生成にしてあるのは、境界が「1 行足した / 消した」として
-レビューに見えるようにするため（手書きのプロパティが 100 個並ぶと、増えたこと
+差分に見えるようにするため（手書きのプロパティが 100 個並ぶと、増えたこと
 自体が読めなくなる）。
 """
 
@@ -160,16 +160,9 @@ METHODS: tuple[str, ...] = (
     "_refresh_tag_completer",
     "_refresh_tag_examples_hint",
     "_regate_after_vector_load",
-    "_relax_ai_tags",
-    "_relax_coverage",
-    "_relax_date",
     "_relax_excludes",
     "_relax_hide_nsfw",
-    "_relax_locked_only",
-    "_relax_name_filter",
     "_relax_open_ai_popover",
-    "_relax_rating",
-    "_relax_threshold",
     "_relaxation_callbacks",
     "_revalidate_ai_mode",
     "_seed_from_path",
@@ -349,26 +342,17 @@ def _install_host_adapters(cls) -> None:
     def sync_search_mode_chips(self) -> None:
         self._sync_search_mode_chips()
 
-    def strip_filter_control_field(self, field: str) -> None:
-        self._strip_filter_control_field(field)
+    def clear_condition_dimension(self, dim_id: str) -> None:
+        self._clear_condition_dimension(dim_id)
 
     def batched_condition_clear(self):
         return self._batched_condition_clear()
-
-    def clear_filter_text(self) -> None:
-        self.filter_edit.clear()
-
-    def set_locked_only_checked(self, checked: bool) -> None:
-        self.locked_check.setChecked(checked)
 
     def exit_overlay(self) -> None:
         self._exit_overlay()
 
     def maybe_start_recursive_scan(self) -> None:
         self._maybe_start_recursive_scan()
-
-    def on_date_filter_changed(self) -> None:
-        self._on_filterbar_date_changed()
 
     def set_search_indexes(self, tag_index, vector_index) -> None:
         self._tag_index = tag_index
@@ -385,9 +369,8 @@ def _install_host_adapters(cls) -> None:
         breadcrumb_has_trail, breadcrumb_count_text, set_breadcrumb_count_text,
         panel_reset_dimensions, rebuild_grid, preserve_selection_for_rebuild,
         set_search_status, sorted_dir_first, drop_thumb_markers,
-        update_filter_bar, sync_search_mode_chips, strip_filter_control_field,
-        batched_condition_clear, clear_filter_text, set_locked_only_checked,
-        exit_overlay, maybe_start_recursive_scan, on_date_filter_changed,
+        update_filter_bar, sync_search_mode_chips, clear_condition_dimension,
+        batched_condition_clear, exit_overlay, maybe_start_recursive_scan,
         set_search_indexes, request_tag_db_reload,
     ):
         setattr(cls, fn.__name__, fn)

@@ -1,15 +1,15 @@
-"""横断キュレーション一覧の到達不能行の可視化と張り替え導線（#133 項目 3）。
+"""横断キュレーション一覧の到達不能行の可視化と張り替え導線。
 
 ``resolve_curation_paths`` が読めずに落とした行（確実に消えた ``missing`` /
-読めなかった ``unreadable``）は、従来グリッドから黙って消え、件数行の数字が
-ズレることでしか気付けなかった — しかもドライブレター⇄UNC の付け替え (a) や
-post.md を持たないフォルダのリネーム (b) で消えた行は、postref 頼みの
-``resolve_moved_entries`` では救えず、救う手段そのものが UI に存在しなかった。
+読めなかった ``unreadable``）は、黙って消すと件数行の数字がズレることでしか
+気付けない — しかもドライブレター⇄UNC の付け替え (a) や post.md を持たない
+フォルダのリネーム (b) で消えた行は、postref 頼みの ``resolve_moved_entries``
+では救えない。
 
 ここはその行を**プレースホルダタイル**として一覧末尾に出し、右クリックの
 「現在の場所を指定…」→ :meth:`~snappix.viewer.user_meta.UserMetaStore.rebind_path`
 で現在のパスへ張り替えるための部品を提供する。``post_grid.py`` は既に抽出対象
-規模（CLAUDE.md の肥大抑制）なので、新規ロジックはここへ置き、post_grid からは
+規模なので、新規ロジックはここへ置き、post_grid からは
 薄く呼ぶだけにする。
 
 設計上の約束:
@@ -18,7 +18,7 @@ post.md を持たないフォルダのリネーム (b) で消えた行は、post
   プレースホルダは ``thumbnail_resolved=True`` / ``thumbnail_path=None`` /
   ``metadata_loaded=True`` で組むので、サムネイルローダーの遅延 scandir も
   post.md の後追い解決も一切走らない（到達不能なパスに向けた同期 stat を
-  GUI 経路に持ち込まない — #132 / N-09 と同じ規律）。画像拡張子を持つ
+  GUI 経路に持ち込まない）。画像拡張子を持つ
   ファイル由来のゴーストだけは 3 点セットで塞げない経路が残る —
   ``ChildrenGrid._aspect_source`` は「is_dir=False + 画像拡張子」で
   entry.path 自身を返すため、そのままではアスペクトプローブが死んだパスを
@@ -26,9 +26,10 @@ post.md を持たないフォルダのリネーム (b) で消えた行は、post
   ``PostGrid._aspect_source`` のオーバーライド（ゴーストは ``None``）が
   塞ぐ。描画は GalleryView の既存プレースホルダパネル（C03 の確定側）に
   乗るので、専用の描画コードもハードコード色も増えない。
-* ファイル / フォルダの判別は**拡張子だけの純推定**（:func:`looks_like_file`、
-  stat しない）。外れても害は「ファイルダイアログの種類が入れ替わる」だけで、
-  張り替え自体はどちらでも成立する。
+* ファイル / フォルダの判別は**綴りだけの純推定**（:func:`looks_like_file`、
+  stat しない）。外れると張り替えダイアログの種類が逆になり、正しい種類の
+  実体を選ぶ手段が無くなる（ファイル選択ではフォルダを選べない）— だから
+  「``.`` があれば拡張子」とは見なさず、拡張子らしい末尾だけをファイルとする。
 * **一括の張り替えは行単位の張り替えと同じ材料で組む**。失敗の単位は
   ボリューム（ドライブレターの付け替え・ライブラリごとの移動）なので、
   行単位だけでは数百回のモーダル往復になる。:func:`prefix_rebind_group` が
@@ -46,7 +47,13 @@ import os
 from pathlib import Path
 
 from ..common.i18n import t
-from .folder_scan import FolderEntry
+from .folder_scan import (
+    ARCHIVE_SUFFIXES,
+    DOCUMENT_SUFFIXES,
+    IMAGE_SUFFIXES,
+    MEDIA_SUFFIXES,
+    FolderEntry,
+)
 from .user_meta import (
     CurationMap,
     UserMeta,
@@ -57,14 +64,39 @@ from .user_meta import (
 )
 
 
+# ビューアが種別を知っている拡張子。ここに当たる末尾は形に関わらずファイル。
+_KNOWN_FILE_SUFFIXES = (
+    IMAGE_SUFFIXES | MEDIA_SUFFIXES | ARCHIVE_SUFFIXES | DOCUMENT_SUFFIXES
+)
+# 未知の拡張子を「拡張子らしい」と見なす最大長（``.`` を除く）。
+_MAX_UNKNOWN_SUFFIX_LEN = 5
+
+
 def looks_like_file(path: Path) -> bool:
-    """拡張子を持つ末尾要素をファイルと推定する（純文字列・stat なし）。
+    """末尾要素が拡張子らしい末尾を持つならファイルと推定する（純文字列・stat なし）。
 
     到達不能なパスの実体種別は確かめようがないので、綴りから推定するしかない。
-    「``.`` 入りのフォルダ名」を誤ってファイル扱いしても、影響は張り替え
-    ダイアログがファイル選択になることだけ。
+    ``Path.suffix`` の真偽だけで決めると、投稿フォルダ名に頻出する
+    ``Vol.2`` / ``2024.01.02`` / ``ver1.5`` / ``Ch.3 update`` が全てファイル扱いに
+    なり、張り替えダイアログがファイル選択になってフォルダを選べなくなる。
+
+    判定: ビューアが知っている拡張子（画像・動画・音声・書庫・文書）なら
+    ファイル。それ以外は「ASCII 英数字だけで 1〜5 文字、英字を 1 つ以上含む」
+    末尾だけをファイルとし、数字だけ（``.2`` / ``.02``）・空白入り・長いものは
+    フォルダ名の一部と見なす。
     """
-    return bool(path.suffix)
+    suffix = path.suffix
+    if not suffix:
+        return False
+    if suffix.lower() in _KNOWN_FILE_SUFFIXES:
+        return True
+    body = suffix[1:]
+    return (
+        0 < len(body) <= _MAX_UNKNOWN_SUFFIX_LEN
+        and body.isascii()
+        and body.isalnum()
+        and any(c.isalpha() for c in body)
+    )
 
 
 def build_ghost_entries(
@@ -243,9 +275,9 @@ def prompt_rebind_prefix(parent, old_base: Path) -> str | None:
     （根の付け替えなので、選ばせるのは根だけ）。キャンセルは ``None``。
     Qt 層はこの関数に閉じる — テストはここを差し替えるだけで通せる。
     """
-    from PySide6.QtWidgets import QFileDialog
+    from .dialogs import pick_existing_directory
 
-    picked = QFileDialog.getExistingDirectory(
+    picked = pick_existing_directory(
         parent,
         t(
             "viewer.post_grid.curation_rebind_prefix_pick",
@@ -287,19 +319,19 @@ def prompt_current_location(parent, old_path: Path) -> str | None:
     """「現在の場所を指定…」のファイルダイアログを開き、選択パスを返す。
 
     行がフォルダ由来かファイル由来かを :func:`looks_like_file` で推定して
-    ``getExistingDirectory`` / ``getOpenFileName`` を出し分ける（判別できない
+    ``pick_existing_directory`` / ``pick_open_file`` を出し分ける（判別できない
     ときはフォルダ選択）。キャンセルは ``None``。Qt 層はこの関数に閉じる —
     テストはここを差し替えるだけで張り替えフローを通せる。
     """
-    from PySide6.QtWidgets import QFileDialog
+    from .dialogs import pick_existing_directory, pick_open_file
 
     name = old_path.name or str(old_path)
     if looks_like_file(old_path):
-        picked, _selected_filter = QFileDialog.getOpenFileName(
+        picked = pick_open_file(
             parent, t("viewer.post_grid.curation_rebind_pick_file", name=name),
         )
         return picked or None
-    picked = QFileDialog.getExistingDirectory(
+    picked = pick_existing_directory(
         parent, t("viewer.post_grid.curation_rebind_pick_folder", name=name),
     )
     return picked or None
@@ -360,7 +392,7 @@ def confirm_rebind_merge(
         accept_text=t("viewer.post_grid.curation_rebind_merge_accept"),
         destructive=True,
         # 本文にはフォルダ名・ユーザータグ（自由入力）が埋まる — AutoText の
-        # HTML 解釈に乗せない（plugin_host レビュー #28 と同じ理由）。
+        # HTML 解釈に乗せない（plugin_host のマニフェスト表示と同じ理由）。
         plain_text=True,
     )
 

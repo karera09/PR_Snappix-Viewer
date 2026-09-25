@@ -2,11 +2,10 @@
 
 The app catalog (:mod:`snappix.common.i18n`) owns every string *we* author,
 but the widgets Qt draws itself — ``QMessageBox`` の はい/いいえ,
-``QFileDialog`` の 場所/名前/サイズ/更新日 と 選択/キャンセル,
-``QInputDialog`` の OK/Cancel — come out of Qt's own resources and are
+standard dialog buttons, ``QInputDialog`` の OK/Cancel — come out of Qt's own resources and are
 English until Qt's ``qtbase`` translation is installed.  On a Japanese
-product the first screen a new user meets (フォルダピッカー) was therefore
-fully English (UIレビュー 2026-08-28 N-01).
+product the first screen a new user meets (フォルダピッカー) would therefore
+be fully English.
 
 We ship the single ``qtbase_ja.qm`` (≈130 KB) that lives in the PySide6
 wheel and install it at startup.  It is part of Qt itself (LGPL — already

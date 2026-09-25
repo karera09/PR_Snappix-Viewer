@@ -64,7 +64,7 @@ from .view_prefs import notify_failure
 #:   latency-bound, so this level of fan-out amortises round-trips without
 #:   the pools competing with each other.
 #: * ``nas`` — for SMB shares that throttle aggressively.  The live pools
-#:   share one SMB credit window (see ``docs/claude/viewer/scanning.md``);
+#:   share one SMB credit window;
 #:   at the standard fan-out (6+4+2 ≈ 12 outstanding requests) a slow or
 #:   credit-starved server makes every request — including tiny UI
 #:   round-trips — crawl, which reads as "the viewer froze".  Halving the
@@ -124,8 +124,7 @@ class CacheController(Protocol):
     は ``src/snappix/common``）なので、「型検査器が静的に弾く」という上の効能は
     ここでは効かない。実装 ``CacheBuildController`` とのシグネチャ一致は
     ``tests/test_of_d_cache_controller.py`` の parity テストが担保する
-    （レビュー 2026-09-03 項目 #193: キーワード専用引数が実装にだけ生えて、
-    2 つが黙って乖離していた）。
+    （キーワード専用引数が実装にだけ生えると、2 つが黙って乖離する）。
     """
 
     def cache_stats(self) -> dict[str, Any]: ...
@@ -173,12 +172,11 @@ class _CollapsibleGroupBox(QGroupBox):
         # Hide the native checkbox indicator: a checkbox in a settings
         # dialog reads as "this section is on/off", not "collapsed".  The
         # expand state is conveyed by a themed SVG chevron overlaid on the
-        # title row instead of a ▼/▶ text glyph (UIレビュー #14 —
-        # design.md の「記号文字をボタングリフに使わない」規約).  The title
+        # title row instead of a ▼/▶ text glyph (記号文字をボタングリフに
+        # 使わない).  The title
         # text is indented (``::title padding-left``) to leave room for it.
         # ``width/height: 0`` だけでは標識の枠が 4px 残り、見出しの前に用途
-        # 不明な点として見えていた (UIレビュー 2026-08-28 N-133 — light テーマ
-        # で顕著)。``border: none`` を足すと画素差分が 0 になる（``image:none``
+        # 不明な点として見える（light テーマで顕著）。``border: none`` を足すと画素差分が 0 になる（``image:none``
         # / ``background:transparent`` でも同値だが、意図が最も読めるのは枠）。
         self.setStyleSheet(
             "QGroupBox::indicator { width: 0px; height: 0px; border: none; }"
@@ -269,7 +267,7 @@ def _mib_spin(maximum: int = 16384) -> QSpinBox:
     return sb
 
 
-#: 本文フォントサイズスピンの「アプリ既定に従う」値 (N-138)。実装側の下限
+#: 本文フォントサイズスピンの「アプリ既定に従う」値。実装側の下限
 #: （:data:`~snappix.viewer.markdown_view.MIN_FONT_PT`）の 1 つ下を占位に使い、
 #: ``setSpecialValueText`` で語に置き換える。state 側の 0 と往復させる。
 #: 範囲は実装側から**導出**する — 写すと、実装側の上限を上げたときに
@@ -416,7 +414,7 @@ class SettingsDialog(QDialog):
         # 抑止する。``_build_performance_tab`` より前に置くのは、表の一括書き戻し
         # （``_restore_defaults``）がタブ構築の前後どちらから来ても読めるように。
         self._applying_preset = False
-        # 背景ビルドの在/不在を追う自走タイマー（項目 #227）。``_build_cache_tab``
+        # 背景ビルドの在/不在を追う自走タイマー。``_build_cache_tab``
         # が interval / 接続を決めて start する。停止は :meth:`done` の 1 箇所。
         self._cache_status_timer = QTimer(self)
 
@@ -446,10 +444,10 @@ class SettingsDialog(QDialog):
         btns.rejected.connect(self.reject)
         reset_btn = btns.button(QDialogButtonBox.RestoreDefaults)
         assert isinstance(reset_btn, QPushButton)
-        # UIレビュー 07-25 #35: 「既定値に戻す」は表示・キャッシュ・パフォーマンス
-        # の 3 タブ全部（テーマまで）を巻き戻すのに範囲表示も確認もフィードバック
-        # も無かった — 対象範囲をツールチップで示し、確認モーダル（既定 No）+
-        # 成功トーストを追加する（同ダイアログのキャッシュ削除と同じ方針）。
+        # 「既定値に戻す」は表示・キャッシュ・パフォーマンスの 3 タブ全部
+        # （テーマまで）を巻き戻すので、対象範囲をツールチップで示し、確認
+        # モーダル（既定 No）+ 成功トーストを付ける（同ダイアログのキャッシュ
+        # 削除と同じ方針）。
         reset_btn.setToolTip(t("viewer.settings_dialog.restore_defaults_tooltip"))
         reset_btn.clicked.connect(self._confirm_restore_defaults)
         root.addWidget(btns)
@@ -539,7 +537,7 @@ class SettingsDialog(QDialog):
         # メニューと同じ選択肢テーブル（viewer/theme.py）を流用 — メイン 4 択 +
         # 「その他」の追加テーマをフラットに列挙する（コンボにサブメニューは
         # 無いため）。ここが独自リストを持つとメニューと必ずドリフトする。
-        # UIレビュー 07-25 #84: 10 テーマがフラットで並ぶと主要 4 択と追加 6 択の
+        # 10 テーマがフラットで並ぶと主要 4 択と追加 6 択の
         # 区別が付かないため、区切り線 + 追加テーマの表示名に明暗を付記する
         # （保存値は従来どおり内部キーのまま — 表示のみの変更）。
         for key, label_key in THEME_CHOICES_MAIN:
@@ -569,15 +567,12 @@ class SettingsDialog(QDialog):
         self._wheel_nav_grace = self._bind("wheel_nav_grace_ms", _count_spin(
             minimum=0, maximum=3000, step=50, suffix=" ms",
         ))
-        # UIレビュー 07-25 #33: 「サイズスライダの上限」が何の上限かを示すヒントが
-        # タブ最下部（6 グループ先）に孤立していたため、対象グループの直下へ移動。
-        # 項目#133: さらにグループ**の中**（スパン行）へ入れる — タブ直下の
+        # ヒントは対象グループ**の中**（スパン行）へ入れる — タブ直下の
         # QVBoxLayout に置くと _CollapsibleGroupBox が畳んでも説明文だけが枠外に
-        # 残り、折りたたみの動機（縦の節約）が半減していた。
-        # UIレビュー 2026-08-28 N-130: 2 本のヒントをグループ末尾にまとめて
-        # 積んでいたため、①② 向けのヒントが対象行から 2 行離れ、直上の④行
-        # （ホイールナビ猶予）の説明に読めていた。``QFormLayout`` はスパン行を
-        # 任意位置へ挿入できるので、**各ヒントを対応する行の直下へ**置く。
+        # 残り、折りたたみの動機（縦の節約）が半減する。グループ末尾にまとめて
+        # 積むと対象行から離れ、直上の別の行の説明に読めてしまう。
+        # ``QFormLayout`` はスパン行を任意位置へ挿入できるので、**各ヒントを
+        # 対応する行の直下へ**置く。
         def _hint_row(key: str) -> None:
             lbl = QLabel(t(key))
             lbl.setWordWrap(True)
@@ -594,7 +589,7 @@ class SettingsDialog(QDialog):
         form.addRow(
             t("viewer.settings_dialog.preview_scroll_amount"), self._preview_scroll
         )
-        # UIレビュー 2026-09-11 N-58: この値は GalleryView のホイールハンドラ
+        # この値は GalleryView のホイールハンドラ
         # が読むので、プレビュー列だけでなく左右ペインの一覧にも効く。
         _hint_row("viewer.settings_dialog.preview_scroll_hint")
         form.addRow(
@@ -609,19 +604,19 @@ class SettingsDialog(QDialog):
             minimum=1, maximum=256, step=1, suffix=" MiB",
         ))
         text_form.addRow(t("viewer.settings_dialog.text_body_max"), self._text_max_mib)
-        # N-130 の「ヒントは対象行の直下」規約: text_hint はこの行（ログ・CSV・
+        # 「ヒントは対象行の直下」規約: text_hint はこの行（ログ・CSV・
         # JSON の読み込み上限）の説明なので、下に別対象の行が増える前に置く。
         def _text_hint_row(key: str) -> None:
             lbl = QLabel(t(key))
             lbl.setWordWrap(True)
             lbl.setStyleSheet(hint_style())
-            text_form.addRow(lbl)  # 項目#133: 畳んだら一緒に消える位置へ
+            text_form.addRow(lbl)  # 畳んだら一緒に消える位置へ
 
         _text_hint_row("viewer.settings_dialog.text_hint")
-        # 本文フォントサイズ (UIレビュー 2026-08-28 N-138)。Ctrl+ホイールで
+        # 本文フォントサイズ。Ctrl+ホイールで
         # 変えられて ``ViewerState.markdown_font_pt`` に**永続**するのに、
-        # 設定ダイアログからは見えず「既定値に戻す」の対象にも入って
-        # いなかった（07-25 #132 は右クリックの復帰項目だけを追加）。
+        # 設定ダイアログから見えず「既定値に戻す」の対象にも入らないのでは
+        # 困るので、ここに置く。
         # 0 = アプリ既定追従という現行の意味は、スピンの最小値の
         # specialValueText で表す（0 を打てるようにすると 0〜7pt という
         # 無効域を作ってしまう）。
@@ -641,7 +636,7 @@ class SettingsDialog(QDialog):
         text_form.addRow(
             t("viewer.settings_dialog.markdown_font_pt"), self._markdown_font_pt
         )
-        # UIレビュー 2026-09-11 N-132: 同じ群の「本文読み込み上限」と対象が
+        # 同じ群の「本文読み込み上限」と対象が
         # 違う（TextView / MarkdownView）ので、対象と 0 の意味をここで言う。
         _text_hint_row("viewer.settings_dialog.markdown_font_pt_hint")
         layout.addWidget(text_box)
@@ -655,12 +650,12 @@ class SettingsDialog(QDialog):
         zip_hint = QLabel(t("viewer.settings_dialog.zip_hint"))
         zip_hint.setWordWrap(True)
         zip_hint.setStyleSheet(hint_style())
-        zip_form.addRow(zip_hint)  # 項目#133
+        zip_form.addRow(zip_hint)
         layout.addWidget(zip_box)
 
         # PDF は ZIP / テキストと同じ「重いファイルを読むリーフ」だが上限が
         # 無く、しかも QPdfView はページを遅延レンダするので読んだバイト列は
-        # 表示中ずっと常駐する（項目#69）。ZIP 上限の隣で可変にする。
+        # 表示中ずっと常駐する。ZIP 上限の隣で可変にする。
         pdf_box = _CollapsibleGroupBox(t("viewer.settings_dialog.group_pdf_preview"))
         pdf_form = QFormLayout(pdf_box)
         self._pdf_size_limit = self._bind("pdf_preview_size_limit_mib", _count_spin(
@@ -670,7 +665,7 @@ class SettingsDialog(QDialog):
         pdf_hint = QLabel(t("viewer.settings_dialog.pdf_hint"))
         pdf_hint.setWordWrap(True)
         pdf_hint.setStyleSheet(hint_style())
-        pdf_form.addRow(pdf_hint)  # 項目#133
+        pdf_form.addRow(pdf_hint)
         layout.addWidget(pdf_box)
 
         image_box = _CollapsibleGroupBox(t("viewer.settings_dialog.group_image_preview"))
@@ -748,10 +743,9 @@ class SettingsDialog(QDialog):
         )
         layout.addWidget(media_box)
 
-        # UIレビュー 07-25 #133: 「サムネイル表示」（♡ のみ 1 項目）と
-        # 「サムネイルキャプション」に分裂していたタイル装飾設定を 1 グループへ
-        # 統合。state のキー（show_post_favorites / caption_show_* /
-        # tile_name_placement）は従来どおりで、UI の見せ方だけをまとめる。
+        # タイル装飾設定（♡ とキャプション）は 1 グループにまとめる。state の
+        # キー（show_post_favorites / caption_show_* / tile_name_placement）は
+        # 別々のままで、UI の見せ方だけをまとめる。
         caption_box = _CollapsibleGroupBox(
             t("viewer.settings_dialog.group_tile_display_items")
         )
@@ -876,7 +870,7 @@ class SettingsDialog(QDialog):
             suffix=t("viewer.settings_dialog.suffix_sheets"),
         ))
 
-        # 項目#17(C): 先読み k 番目のターゲットは「現在画像 + より近い k 件」
+        # 先読み k 番目のターゲットは「現在画像 + より近い k 件」
         # の挿入ガード付きで put されるため、件数上限 - 1 を超える先読みは
         # 構造上キャッシュに載らない（毎回フルデコード → 破棄の無駄 I/O に
         # なるだけ）。スピン上限を件数上限へ連動させ、無効な組み合わせを
@@ -894,8 +888,8 @@ class SettingsDialog(QDialog):
         layout.addWidget(iv_box)
 
         # このヒントだけは 2 グループ（md / iv）に共通の説明なので、どちらか一方
-        # の中へ入れると片方の説明が消える。タブ直下に残す（項目#133 — 他の
-        # ヒントは対応するグループのスパン行へ移した）。
+        # の中へ入れると片方の説明が消える。タブ直下に残す（他のヒントは対応
+        # するグループのスパン行にある）。
         hint = QLabel(t("viewer.settings_dialog.cache_hint"))
         hint.setWordWrap(True)
         hint.setStyleSheet(hint_style())
@@ -921,7 +915,7 @@ class SettingsDialog(QDialog):
         self._folder_preview_max = self._bind(
             "folder_preview_cache_max_mib", _mib_spin(maximum=1024)
         )
-        # I03 / (UIレビュー 08-28 N-79): 反映タイミングは 3 種類あり、行注記が
+        # 反映タイミングは 3 種類あり、行注記が
         # そのまま実態でなければならない —
         #   * 有効/無効 … ディスクキャッシュは起動時に開くので**再起動**が要る
         #   * サムネ長辺 … ``main_window._apply_cache_settings`` が両ローダーへ
@@ -938,7 +932,7 @@ class SettingsDialog(QDialog):
             + t("viewer.settings_dialog.timing_restart"),
             self._thumb_disk_enabled,
         )
-        # 項目#183: 行ラベルの種別名は stat_*_name キー（表示名の唯一の情報源）
+        # 行ラベルの種別名は stat_*_name キー（表示名の唯一の情報源）
         # を埋め込む — 統計行・削除確認と同じ呼称になる。
         def _kind_max_label(name_key: str) -> str:
             return t("viewer.settings_dialog.disk_kind_max", name=t(name_key))
@@ -967,7 +961,7 @@ class SettingsDialog(QDialog):
         disk_hint = QLabel(t("viewer.settings_dialog.disk_hint"))
         disk_hint.setWordWrap(True)
         disk_hint.setStyleSheet(hint_style())
-        disk_form.addRow(disk_hint)  # 項目#133
+        disk_form.addRow(disk_hint)
         layout.addWidget(disk_box)
 
         layout.addWidget(self._build_cache_manage_box())
@@ -1020,8 +1014,8 @@ class SettingsDialog(QDialog):
         box = _CollapsibleGroupBox(t("viewer.settings_dialog.group_cache_manage"))
         v = QVBoxLayout(box)
 
-        # UIレビュー 2026-09-11 N-61: 「無効」が 3 義（設定でオフ / 開けなかった
-        # / トグルが UI に無い）だったのを言い分ける。開けなかった理由は
+        # 「無効」の 3 義（設定でオフ / 開けなかった / トグルが UI に無い）を
+        # 言い分ける。開けなかった理由は
         # ログにしか無いので、その場からログフォルダへ行ける導線を並べる。
         stats_row = QHBoxLayout()
         self._cache_stats_label = QLabel("—")
@@ -1057,7 +1051,7 @@ class SettingsDialog(QDialog):
         v.addWidget(self._cache_build_bg)
 
         btn_row = QHBoxLayout()
-        # (UIレビュー 08-28 N-80) 診断メニューと同じ 1 キーで名乗る。
+        # 診断メニューと同じ 1 キーで名乗る。
         self._build_cache_btn = QPushButton(t("viewer.common.cache_prebuild"))
         self._build_cache_btn.setToolTip(
             t("viewer.settings_dialog.build_cache_tooltip")
@@ -1077,15 +1071,13 @@ class SettingsDialog(QDialog):
         # I04: type-split clearing — free just the thumbnail disk space, or drop
         # only the (cheap-to-rebuild-but-slow) search index, without the
         # all-or-nothing wipe taking the other caches down too.
-        # 項目#183: ボタンの種別名も stat_*_name キーを埋め込む（統計行・削除
+        # ボタンの種別名も stat_*_name キーを埋め込む（統計行・削除
         # 確認・行ラベルと同じ呼称）。
         #
-        # UIレビュー 2026-08-28 N-135: 種別別のボタンは thumb / search の 2 本
-        # しか無く、``_CLEAR_KIND_META`` が定義する 4 種のうち aspect / folder
-        # は個別に消せなかった。直上のコメントが「新しい種別はここへ足すだけ
-        # でよい」と単一情報源を謳っているのにボタン側だけがその方針から
-        # 外れていた形なので、**コンボ +「選択した種類を削除」**へ寄せて台帳を
-        # 回すだけにする（新種別を足しても片側欠落が構造的に起きない）。
+        # 種別ごとの専用ボタンを並べると ``_CLEAR_KIND_META`` の種別と
+        # 食い違いうる（新しい種別を足してもボタンが無い）ので、
+        # **コンボ +「選択した種類を削除」**で台帳を回すだけにする（新種別を
+        # 足しても片側欠落が構造的に起きない）。
         split_row = QHBoxLayout()
         self._clear_kind_combo = QComboBox()
         for kind in self._CLEAR_ORDER:
@@ -1115,9 +1107,8 @@ class SettingsDialog(QDialog):
         else:
             self._refresh_cache_stats()
             self._refresh_cache_build_state()
-            # レビュー 2026-09-03 項目 #227: 上の状態はダイアログ構築時の 1 回
-            # きりで、開いたまま背景ビルドが終わっても 3 ボタンは無効のまま
-            # だった（ダイアログ内に再評価の口が構造的に無かった）。1 秒ごとに
+            # 上の状態はダイアログ構築時の 1 回きりなので、開いたまま背景
+            # ビルドが終わっても 3 ボタンが無効のまま残らないよう、1 秒ごとに
             # 同じ関数を回して両方向へ追随させる。``cache_build_in_progress``
             # を呼ぶだけ（I/O 無し・例外は _cache_build_running が吸う）。
             self._cache_status_timer.setInterval(1000)
@@ -1144,7 +1135,7 @@ class SettingsDialog(QDialog):
         )
 
     def done(self, r: int) -> None:
-        """自走タイマーを 1 つ残らず止めてから閉じる（CLAUDE.md の close 規約）。
+        """自走タイマーを 1 つ残らず止めてから閉じる（close 時の規約）。
 
         ``accept`` / ``reject`` / Esc / × の全経路が ``QDialog.done`` を通るので、
         停止はここ 1 箇所で足りる（``stop`` は冪等）。
@@ -1162,7 +1153,7 @@ class SettingsDialog(QDialog):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(data_dir)))
 
     def _on_open_logs_folder(self) -> None:
-        """統計行の隣の「ログフォルダを開く」(N-61).
+        """統計行の隣の「ログフォルダを開く」.
 
         「開けませんでした（ログを参照）」の行き先をその場に置く。パスは
         ポータビリティ規約どおり ``get_paths()`` 経由（``Path.home()`` /
@@ -1195,9 +1186,9 @@ class SettingsDialog(QDialog):
                 t("viewer.settings_dialog.cache_stats_unavailable")
             )
             return
-        # 項目#182: キャッシュ種別の表示名は _CLEAR_KIND_META の *_name キーが
+        # キャッシュ種別の表示名は _CLEAR_KIND_META の *_name キーが
         # 唯一の情報源 — 統計行・削除確認・完了トーストが構造的に同じ名前を
-        # 使う（種別別の複合テンプレートへの焼き込みは廃止）。
+        # 使う（種別別の複合テンプレートへは焼き込まない）。
         parts: list[str] = []
         for kind in self._CLEAR_ORDER:
             bkey, ckey, ekey, lkey = self._CLEAR_KIND_META[kind]
@@ -1217,7 +1208,7 @@ class SettingsDialog(QDialog):
                     )
                 )
                 continue
-            # N-61: 「無効」は 2 義だった — 設定でオフなのか、開こうとして
+            # 「無効」は 2 義 — 設定でオフなのか、開こうとして
             # 失敗したのか（``_open_cache`` は best-effort で ``None`` を返す）。
             # 意図は ``<kind>_configured`` がコントローラから来る。キーを
             # 持たない古いコントローラ / テストダブルは従来表示へ落とす
@@ -1239,7 +1230,7 @@ class SettingsDialog(QDialog):
         )
 
     def _on_clear_selected_kind(self) -> None:
-        """コンボで選んだ 1 種別だけを削除する (N-135).
+        """コンボで選んだ 1 種別だけを削除する.
 
         ``_on_clear_cache`` は元から集合を受ける設計なので、呼び出し側は
         「選択された 1 つ」を包むだけでよい。
@@ -1251,11 +1242,11 @@ class SettingsDialog(QDialog):
     #: Cache kinds + their cache_stats keys and display-name i18n key (I04):
     #: (bytes_key, count_key, enabled_key, label_key).  Insertion order is the
     #: display order — :data:`_CLEAR_ORDER` is derived from it so a new kind
-    #: only has to be added here (項目#135: the order tuple used to repeat the
-    #: keys, and forgetting it left the new kind invisible in the breakdown).
+    #: only has to be added here (a separately maintained order tuple could
+    #: be forgotten, leaving the new kind invisible in the breakdown).
     #: Iterated for the stats line, the confirm breakdown and the success
     #: message — the *_name key is the ONE definition of each cache's display
-    #: name (項目#182).
+    #: name.
     _CLEAR_KIND_META = {
         "thumb": ("disk_bytes", "disk_count", "disk_enabled",
                   "viewer.settings_dialog.stat_thumb_images_name"),
@@ -1280,7 +1271,7 @@ class SettingsDialog(QDialog):
         a non-modal toast (design principle 1: 成功=非モーダル).
 
         「すべて」は :meth:`CacheController.clear_persistent_caches` へ ``None``
-        のまま渡す（項目#135）— 全種別の定義はコントローラ側
+        のまま渡す — 全種別の定義はコントローラ側
         （``CacheBuildController.CLEAR_KINDS``）にしか無く、ここで
         ``set(_CLEAR_ORDER)`` を組み直すと種別追加時に片方だけ古いまま「すべて
         削除」が一部を消さなくなる。この表示リストの取りこぼしは parity テスト
@@ -1316,10 +1307,10 @@ class SettingsDialog(QDialog):
             )
         detail = "\n".join(lines) if lines else "—"
         if "thumb" in selected:
-            # Flag the side-effect the old copy hid: the in-memory thumbnail
-            # LRUs are flushed too when thumbnails are cleared (#I04 review).
+            # Flag the side-effect: the in-memory thumbnail LRUs are flushed
+            # too when thumbnails are cleared.
             detail += "\n" + t("viewer.settings_dialog.clear_mem_note")
-        # 動詞ラベル（N-01）: 「はい」ではキャッシュ削除に同意したのか
+        # 動詞ラベル: 「はい」ではキャッシュ削除に同意したのか
         # ダイアログ全体を閉じることに同意したのか区別が付かない。
         if not confirm_action(
             self,
@@ -1330,7 +1321,7 @@ class SettingsDialog(QDialog):
             destructive=True,
         ):
             return
-        # 「すべて」は None のまま委譲する（項目#135 — docstring 参照）。
+        # 「すべて」は None のまま委譲する（docstring 参照）。
         self._cache_controller.clear_persistent_caches(
             None if kinds is None else selected
         )
@@ -1345,7 +1336,7 @@ class SettingsDialog(QDialog):
         show_toast(self, msg, kind="success")
 
     def _confirm_background_commit(self) -> bool:
-        """予告: a background build closes this dialog and commits it (N-82).
+        """予告: a background build closes this dialog and commits it.
 
         The dialog's contract is 「「OK」を押すと適用されます」 — the 「既定値に
         戻す」 toast says so on screen — yet the background path has to
@@ -1405,8 +1396,8 @@ class SettingsDialog(QDialog):
             self._build_touched_state = True
         for field, value in inputs.items():
             setattr(self._state, field, value)
-        # ``notify=False``: モーダル経路の通知はこのダイアログが自分で出す
-        # （UIレビュー 2026-09-11 N-11）。コントローラのトーストはホスト窓へ
+        # ``notify=False``: モーダル経路の通知はこのダイアログが自分で出す。
+        # コントローラのトーストはホスト窓へ
         # 親付けされるため、``exec()`` のアプリケーションモーダルなこの
         # ダイアログの**裏**に隠れてしまう。
         result = self._cache_controller.build_cache_interactive(
@@ -1416,13 +1407,13 @@ class SettingsDialog(QDialog):
         )
         if result is None:
             return
-        # N-29: モーダル prompt でその場に選ばれたモードを、accept が書き戻す
+        # モーダル prompt でその場に選ばれたモードを、accept が書き戻す
         # チェックボックスへ反映する。これが無いと、prompt で背景を選んで
         # 走らせても ``accept`` (:_write_state) はダイアログ側の未更新値
-        # （＝ OFF）を保存し、設定が実際に走ったモードと逆になっていた。
+        # （＝ OFF）を保存し、設定が実際に走ったモードと逆になる。
         # ただし逆方向（背景 ON の設定のまま prompt で「今回は前景」を選ぶ）
         # は「今回だけ」の選択なので書き戻さない — 書き戻すと [OK] で永続設定が
-        # 反転する（PR #189 レビュー）。背景 ON はコントローラが
+        # 反転する。背景 ON はコントローラが
         # confirm_background で永続化の可否を確認したうえで返している。
         if result.get("background"):
             self._cache_build_bg.setChecked(True)
@@ -1438,7 +1429,7 @@ class SettingsDialog(QDialog):
         failed = result.get("failed", 0)
         total = result.get("total", 0)
         if result.get("cancelled"):
-            # N-11: 中断を「完了しました」と言わない（背景経路と同じ文言）。
+            # 中断を「完了しました」と言わない（背景経路と同じ文言）。
             show_toast(
                 self,
                 t(
@@ -1459,7 +1450,7 @@ class SettingsDialog(QDialog):
             )
         else:
             # Clean success is non-modal (principle 1) to match the background
-            # path's toast and design.md's flagship example.
+            # path's toast.
             show_toast(
                 self,
                 t(
@@ -1543,7 +1534,7 @@ class SettingsDialog(QDialog):
             t("viewer.settings_dialog.aspect_probe_parallelism"),
             self._aspect_probe_parallelism,
         )
-        # 項目#133: 各つまみの反映タイミングを説明するヒントはグループの中
+        # 各つまみの反映タイミングを説明するヒントはグループの中
         # （スパン行）へ。畳んだとき / 詳細チェックで _perf_box ごと隠したとき
         # に説明文だけが残らない。
         self._perf_hint = QLabel(t("viewer.settings_dialog.perf_hint"))
@@ -1645,10 +1636,9 @@ class SettingsDialog(QDialog):
     def _confirm_restore_defaults(self) -> None:
         """Confirm (default No) before wiping all 3 tabs, then toast.
 
-        UIレビュー 07-25 #35: this button silently rewrote every field across
-        all three tabs (including the theme) with zero feedback, unlike the
-        cache-management group's delete actions in the same dialog (confirm +
-        toast). Bringing it in line with that existing pattern.
+        This button rewrites every field across all three tabs (including the
+        theme), so like the cache-management group's delete actions in the
+        same dialog it gets a confirm + toast instead of acting silently.
 
         The toast is **info, not success**: ``_restore_defaults`` only rewrites
         the dialog's own widgets — nothing reaches ``ViewerState`` until
@@ -1660,7 +1650,7 @@ class SettingsDialog(QDialog):
             self,
             title=t("common.action.restore_defaults"),
             body=t("viewer.settings_dialog.restore_defaults_confirm_body"),
-            # 動詞ラベル（N-01）— ボタンが自分の行為を名乗る。
+            # 動詞ラベル — ボタンが自分の行為を名乗る。
             accept_text=t("common.action.restore_defaults"),
         ):
             return

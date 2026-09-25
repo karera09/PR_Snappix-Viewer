@@ -103,7 +103,7 @@ def bootstrap_plugins(
         # 長さは本文の断片の上限（``clip_untrusted``）で切り、本文は
         # ``warn_modal`` のプレーンテキスト既定で出す（AutoText は HTML として
         # 解釈され、「プラグインが異常終了した」という最も注意を要する警告の
-        # 表示を攻撃者が操作できてしまう。レビュー #28 / 2026-08-27 #83）。
+        # 表示を攻撃者が操作できてしまう）。
         warn_modal(
             window,
             title=t("viewer.plugins.activate_failed_title"),
@@ -159,10 +159,10 @@ def bootstrap_plugins(
         # 本文には未検証のマニフェスト文字列（name / author / description）が
         # 入る。QMessageBox 既定の AutoText だと HTML として解釈され、
         # 「なりすまし疑い」を伝えるこの警告そのものの表示を攻撃者が
-        # 操作できてしまう（レビュー #28）。管理ダイアログの詳細ラベル
+        # 操作できてしまう。管理ダイアログの詳細ラベル
         # （dialog.py）と同じくプレーンテキストを明示する（``plain_text``）。
         #
-        # ボタンは動詞（N-01）。ここで同意しているのは「このフォルダの任意の
+        # ボタンは動詞。ここで同意しているのは「このフォルダの任意の
         # コードをビューアのプロセス内で実行してよい」ことで、「はい」では
         # 何に同意したのかが残らない — 押すボタン自体が行為を名乗る。
         approved = confirm_action(
@@ -247,7 +247,7 @@ def bootstrap_plugins(
     for manifest, error in failures:
         # name（未検証マニフェスト）と error（プラグインの例外メッセージ）は
         # どちらも攻撃者の制御下にあり、AutoText だと文頭の name が
-        # mightBeRichText を真にして本文が HTML 解釈される（レビュー #28）。
+        # mightBeRichText を真にして本文が HTML 解釈される。
         # ``warn_modal`` のプレーンテキスト既定がそれを塞ぐ。
         warn_modal(
             window,

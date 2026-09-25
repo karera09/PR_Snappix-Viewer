@@ -7,11 +7,9 @@ table (:data:`SHORTCUTS`) so it's easy to audit/update as bindings change
 elsewhere in the viewer — this dialog never inspects live ``QAction``/
 ``QShortcut`` objects, it's a plain reference table.
 
-UIレビュー 2026-09-11 のリデザイン E1: 旧「ショートカットと画面の凡例」は入力
-装置（ナビゲーション / 画像の操作 …）でしか分類されておらず、「探す・見る・
-印を付ける・整える」という**作業の軸**が製品のどこにも無かった（発見性テスト
-の未到達課題はすべてここに帰着した）。行に ``task`` / ``entry`` / ``seats`` を
-足し、左の作業ツリーから引ける形にする。**このガイドは補助**で、主要な操作は
+入力装置（ナビゲーション / 画像の操作 …）だけでなく、「探す・見る・
+印を付ける・整える」という**作業の軸**でも引けるよう、行に ``task`` /
+``entry`` / ``seats`` を持たせ、左の作業ツリーから引ける形にする。**このガイドは補助**で、主要な操作は
 マウスで画面から届くことを ``entry`` 列が保証する（キーしか入口の無い行は
 ``ENTRY_KEY_ONLY`` と明示し、主要機能には使わない）。ようこそカードの
 [操作の基本 (F1)] と README のクイックスタート（:func:`quickstart_markdown`）
@@ -26,7 +24,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QSize, Qt
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -194,9 +192,9 @@ SHORTCUTS: list[ShortcutRow] = [
     ShortcutRow(_NAV, "ダブルクリック", "viewer.shortcuts_dialog.desc_drill_down", TASK_VIEW, ENTRY_CLICK, SEAT_GRID),
     ShortcutRow(_NAV, "フォルダをドロップ", "viewer.shortcuts_dialog.desc_drop_folder", TASK_VIEW, ENTRY_GESTURE, SEAT_ANY),
     # グリッド / 右一覧の Ctrl+ホイール（``GalleryView.wheelEvent`` →
-    # ホストの ``zoom_handler``）は操作一覧にもツールチップにも無かった
-    # （UIレビュー 2026-09-11 N-66）。画像の Ctrl+ホイール（``_IMG``）とキー
-    # 文字列は重なるが、席（一覧 / 画像）で弁別するのが E1 の表の設計。
+    # ホストの ``zoom_handler``）も操作一覧に載せる。画像の Ctrl+ホイール
+    # （``_IMG``）とキー文字列は重なるが、席（一覧 / 画像）で弁別するのが
+    # この表の設計。
     ShortcutRow(_NAV, "Ctrl+ホイール", "viewer.shortcuts_dialog.desc_thumb_zoom", TASK_ARRANGE, ENTRY_GESTURE, SEAT_GRID_LIST),
     # -- プレビュー（分割 ⇄ 最大化） ------------------------------------------
     ShortcutRow(_MODE, "E", "viewer.shortcuts_dialog.desc_stage_mode", TASK_VIEW, ENTRY_STAGE_HEADER, SEAT_PREVIEW),
@@ -322,8 +320,7 @@ def key_hint(desc_key: str) -> str:
     """*desc_key* の動詞に割り当てられたキー文字列（無ければ ``""``）。
 
     表示面（ツールチップ・ラベル）がキーを併記するときはここから引く —
-    手書きで併記すると表とずれる（UIレビュー 2026-09-11 D1: キーの予告面が
-    F1 の表 1 枚に集中し、表示面との同期が無かった）。
+    手書きで併記すると表とずれる（キーの予告面を F1 の表と同期させる）。
     """
     for row in SHORTCUTS:
         if row.desc == desc_key and badge_kind_for_key(row.key) is None:
@@ -359,8 +356,8 @@ def quickstart_markdown() -> str:
     return "\n".join(lines) + "\n"
 
 
-#: 既定サイズの下限（UIレビュー 07-25 #36 の値）と高さ。実際の幅は
-#: :meth:`ShortcutsDialog._fit_default_width` が内容から決める（N-92）。
+#: 既定サイズの下限と高さ。実際の幅は
+#: :meth:`ShortcutsDialog._fit_default_width` が内容から決める。
 _MIN_DEFAULT_WIDTH = 820
 _DEFAULT_HEIGHT = 620
 #: セル padding / ヘッダの余白ぶんの上乗せ（``sizeHintForColumn`` は文字の
@@ -378,32 +375,30 @@ class ShortcutsDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(t("viewer.shortcuts_dialog.window_title"))
-        # UIレビュー 07-25 #36: the old 600x560 default left 7 of 25 visible
-        # rows eliding their 操作 text even with the column resize fix below.
+        # A smaller default (e.g. 600x560) leaves many visible rows eliding
+        # their 操作 text even with the column resize rules below.
         self.resize(_MIN_DEFAULT_WIDTH, _DEFAULT_HEIGHT)
         self.setModal(False)
         self._task = TASK_START
         self._build_ui()
         # 既定幅は**全行**を入れて測る — 開いた直後のページ（はじめに 10 行）
         # だけで測ると、「見る」「すべて」へ切り替えた途端に最長の説明が
-        # 省略される（N-92 の再発経路）。測ってから現在ページへ戻す。
+        # 省略される。測ってから現在ページへ戻す。
         self._populate(visible_shortcuts())
         self._fit_default_width()
         self._refresh()
 
     def _fit_default_width(self) -> None:
-        """既定サイズを**内容から**決める (UIレビュー 2026-08-28 N-92).
+        """既定サイズを**内容から**決める.
 
-        07-25 #36 は同じ症状を「幅を 820px へ広げる」で塞いだが、原因は
-        固定幅そのもの — 表に 1 行足す / 説明を 1 語伸ばすたびに、既定サイズで
-        末尾が「…」で切れる行が復活する（実際 4 行が切れていた）。列の
+        固定幅では、表に 1 行足す / 説明を 1 語伸ばすたびに、既定サイズで
+        末尾が「…」で切れる行が復活する。列の
         リサイズ規約（列0 Stretch + 他列 ResizeToContents + stretchLastSection
         False）は既に正しいので、残るのは**ウィンドウ幅の決め方**だけ。
 
         Qt 自身の内容幅（``sizeHintForColumn``）から必要幅を出し、下限
         （従来の既定）と画面幅の 9 割で挟む。以後どんな文言でも既定サイズで
-        省略されない — 文言を短く保つ努力（同 N-92 の文面整理）と独立した
-        恒久策として効く。
+        省略されない — 文言を短く保つ努力と独立した恒久策として効く。
 
         前提は「余白を受ける Stretch 列が操作列（列0）**だけ**」であること。
         余白を複数列で分け合う（均等配分）と、総幅が足りていても列0 が
@@ -515,12 +510,13 @@ class ShortcutsDialog(QDialog):
                 t("viewer.shortcuts_dialog.col_seat"),
             ]
         )
-        # 見出しの揃えは内容の揃えに合わせる (UIレビュー 07-25 #97) —
+        # 見出しの揃えは内容の揃えに合わせる —
         # キー列（列1）の値は右揃えなので見出しも右。
         align_header(self._tree, right=(1,))
         self._tree.setRootIsDecorated(True)
-        self._tree.setUniformRowHeights(True)
         self._tree.setAlternatingRowColors(True)
+        # 凡例のバッジ（badge_icon の既定高 18 の横長ピル）を 16px 四方へ縮めない。QIcon は拡大しないので幅は上限。
+        self._tree.setIconSize(QSize(18 * 4, 18))
         hdr = self._tree.header()
         # 余白を受ける Stretch は操作列（列0）だけ（``_fit_default_width`` の
         # 前提）。入口列（列2）は ``_fit_entry_column`` が手動で幅を決める。
@@ -528,14 +524,14 @@ class ShortcutsDialog(QDialog):
         hdr.setSectionResizeMode(2, QHeaderView.Interactive)
         for col in (1, 3):
             hdr.setSectionResizeMode(col, QHeaderView.ResizeToContents)
-        # UIレビュー 07-25 #36: stretchLastSection defaults to True, which
+        # stretchLastSection defaults to True, which
         # silently overrides the ResizeToContents columns and lets Qt grab back
-        # slack width for the last section — the net effect was column 0
-        # (操作, the widest/most-truncated text) never actually got to stretch.
+        # slack width for the last section — column 0 (操作, the
+        # widest/most-truncated text) would never actually get to stretch.
         hdr.setStretchLastSection(False)
-        # (UIレビュー 08-28 N-38) 絞り込み結果が 0 件のとき、以前は空のツリー
-        # だけが残り「一致が無い」のか「壊れた」のか読めなかった — 管理系
-        # ダイアログ 4 枚が既に使っている共通の空状態カードへ合流させる。
+        # 絞り込み結果が 0 件のとき、空のツリーだけでは「一致が無い」のか
+        # 「壊れた」のか読めない — 管理系ダイアログと共通の空状態カードを
+        # 使う。
         self._stack, self._empty_card = empty_state_stack(
             self._tree, icon_name="search"
         )
@@ -628,14 +624,14 @@ class ShortcutsDialog(QDialog):
                 group, [desc_text, "" if kind else row.key, entry_text, seat_text]
             )
             child.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
-            # UIレビュー #1: the 操作 column is the widest/most-truncated one
+            # The 操作 column is the widest/most-truncated one
             # (Stretch), and long key/gesture strings still deserve a tooltip
             # of their own — cover every column so an elided cell is always
             # fully readable on hover.
             child.setToolTip(0, desc_text)
             if kind:
-                # 実物のバッジチップを貼る（文字リテラルの模写ではない）—
-                # UIレビュー 08-28 提案1。名前はホバーで読める。
+                # 実物のバッジチップを貼る（文字リテラルの模写ではない）。
+                # 名前はホバーで読める。
                 child.setIcon(1, badge_icon(kind, on_surface=True))
                 child.setToolTip(1, badge_name(kind))
             else:
@@ -671,7 +667,7 @@ class ShortcutsDialog(QDialog):
         self._populate(rows)
 
     def changeEvent(self, event) -> None:  # type: ignore[override]
-        """テーマ切替でバッジ凡例のチップを描き直す (PR #87 の残件).
+        """テーマ切替でバッジ凡例のチップを描き直す.
 
         凡例のチップは :func:`_indicator.badge_icon` が**その時点のトークン
         色**でラスタライズした ``QPixmap`` なので、モードレスなこの窓を開いた

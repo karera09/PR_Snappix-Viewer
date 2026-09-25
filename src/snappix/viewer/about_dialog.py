@@ -1,12 +1,12 @@
-"""Dedicated "Snappix Viewer について" dialog (UIレビュー #12).
+"""Dedicated "Snappix Viewer について" dialog.
 
-Replaces the historical ``QMessageBox.about`` call: a plain message box had
-no room for anything beyond a title + one text blob, so About was the only
-read-only dialog in the app whose sole button read "OK" instead of the
-「閉じる」 every other view-only dialog uses, and it offered no way to reach
-the 利用規約 / サードパーティライセンス without hunting the Help menu.
+Why not ``QMessageBox.about``: a plain message box has no room for anything
+beyond a title + one text blob, so About would be the only read-only dialog
+in the app whose sole button reads "OK" instead of the 「閉じる」 every other
+view-only dialog uses, and it would offer no way to reach the 利用規約 /
+サードパーティライセンス without hunting the Help menu.
 
-Product decision (2026-07-18 review): a dedicated ``QDialog``, **no logo** —
+Product decision: a dedicated ``QDialog``, **no logo** —
 the large app-name label (``FONT_TITLE_PT``) carries the "brand" weight
 instead of an icon.  The copyright line is deliberately just the product
 name (``viewer.about_dialog.copyright``): ``terms_text.py`` documents that
@@ -45,11 +45,11 @@ class AboutDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(t("viewer.main_window.about_title"))
-        # 既定サイズは本文の出し分け（下の ``body_key``）に合わせる
-        # (UIレビュー 2026-08-28 N-123)。固定 460x380 では素の配布で約 175px、
-        # AI パック有効でも約 100px の空白が下半分に残っていた。
-        # 前例: ``detail_window.py`` の ``resize(420, 720 if self._ai_ui else 260)``
-        # ——「素の配布は内容が半分程度なので既定サイズも詰める」（07-25 #45）。
+        # 既定サイズは本文の出し分け（下の ``body_key``）に合わせる。
+        # 固定 460x380 では素の配布で約 175px、AI パック有効でも約 100px の
+        # 空白が下半分に残る。``detail_window.py`` の
+        # ``resize(420, 720 if self._ai_ui else 260)`` と同じく「素の配布は
+        # 内容が半分程度なので既定サイズも詰める」。
         self.resize(460, 340 if ai_pack.available() else 280)
 
         layout = QVBoxLayout(self)
@@ -92,7 +92,7 @@ class AboutDialog(QDialog):
         link_row = QHBoxLayout()
         terms_btn = QPushButton(t("viewer.about_dialog.show_terms"), self)
         terms_btn.clicked.connect(lambda: show_terms(self))
-        # UIレビュー #4 のポリシー: 閲覧専用ダイアログに主要アクションは無い。
+        # 閲覧専用ダイアログに主要アクションは無い。
         # Qt は最初の QPushButton を implicit default（アクセント色）にするため
         # 2 つのリンクボタンとも明示的に外す。
         terms_btn.setAutoDefault(False)
@@ -112,7 +112,7 @@ class AboutDialog(QDialog):
 
         buttons = localize_buttons(QDialogButtonBox(QDialogButtonBox.Close, self))
         buttons.rejected.connect(self.reject)
-        # UIレビュー #4/#12: 閲覧専用ダイアログの唯一のボタン — 単一ボタンだと
+        # 閲覧専用ダイアログの唯一のボタン — 単一ボタンだと
         # Qt が implicit default（アクセント色）にしてしまうため明示的に外す。
         demote_close_default(buttons)
         layout.addWidget(buttons)
@@ -123,8 +123,8 @@ def show_about(parent=None) -> None:
 
     ``exec()`` だけでは親（ViewerWindow）が C++ 側でダイアログを所有し続け、
     Python 参照が落ちても破棄されない — ヘルプ ▸ バージョン情報… を開くたびに
-    ラベル・ボタン一式が終了までリークしていた（レビュー 2026-07-31 #64）。
-    呼び出し側の他ダイアログ（#14 / #58）と同じく exec 後に deleteLater する。
+    ラベル・ボタン一式が終了までリークする。呼び出し側の他ダイアログと同じく
+    exec 後に deleteLater する。
     """
     dlg = AboutDialog(parent)
     dlg.exec()

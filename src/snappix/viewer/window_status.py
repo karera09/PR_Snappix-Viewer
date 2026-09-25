@@ -53,7 +53,7 @@
     ``_sync_centre_placeholder`` / ``_update_stage_header`` /
     ``_sync_nav_rail_curation`` / ``_apply_tab_order`` / ``_can_go_up`` /
     ``_settle_startup_focus``（いずれもウィンドウ側の委譲メソッド経由 —
-    テストと UI レビューハーネスが差し替える口をそのまま通す）、
+    テストと UI 撮影ハーネスが差し替える口をそのまま通す）、
     ``_reset_preview_panes`` / ``_enter_browse_mode``（ステージ維持を
     取りやめるときの後始末と態の切替 — どちらも窓の持ち物）、
     ``statusBar()``（Qt の口。6 セグメントの親）、
@@ -252,15 +252,15 @@ class WindowStatus(QObject):
     # --------------------------------------------------- 走査ライフサイクル
 
     def settle_startup_focus(self) -> None:
-        """初回スキャン着地の一手（UIレビュー 07-25 #4-①）— one-shot。
+        """初回スキャン着地の一手 — one-shot。
 
         * 選択が無ければ**先頭タイルを選択**する（初回起動でプレビュー列 +
           情報パネル = 中央の約 45% がプレースホルダのまま空白になるのを解消。
           復元起動では既に選択が入っているので何もしない）。
         * どちらの場合も**キーボードフォーカスをグリッドへ**移す。既定の初期
           フォーカスはツールバー先頭のナビボタンで、最初の Space/Enter が
-          「上の階層へ」を発火してライブラリ外へ出てしまっていた
-          （#4-② のフォーカスポリシーと合わせて根治）。
+          「上の階層へ」を発火してライブラリ外へ出てしまう（ツールバー側の
+          フォーカスポリシーと合わせて防ぐ）。
 
         ユーザーが着地前に**自分でフォーカスを移していた**場合は奪わない
         （入力中の横取りは事故）。判定は「初期フォーカスの居場所（ツール
@@ -295,7 +295,7 @@ class WindowStatus(QObject):
     def on_loading_changed(self, loading: bool) -> None:
         win = self._window
         # Tracked separately from ``load_status`` because the thumbnail
-        # segment (#75) must only take the label once the scan has settled.
+        # segment must only take the label once the scan has settled.
         self.scan_loading = loading
         if loading:
             self.load_failed = False
@@ -316,8 +316,7 @@ class WindowStatus(QObject):
             # 開始時点へ巻き戻る）。着地しなかった予約は次の着地まで持ち越さ
             # ない — ``startup_focus_pending`` と同じ規律。
             win._pending_restore_preview.clear()
-            # ステージ維持の保険も**失敗着地で**消費する（レビュー 2026-09-03
-            # 項目 #78）。失敗時こそグリッドはエラーカード + [再試行] を出して
+            # ステージ維持の保険も**失敗着地で**消費する。失敗時こそグリッドはエラーカード + [再試行] を出して
             # いるのに、最大化中はグリッド席が幅 0 でそれが 1px も見えない —
             # ここで分割へ落とさないと行き止まりになる（保険も True のまま
             # 次の別ルート set_root まで残る）。
@@ -349,28 +348,27 @@ class WindowStatus(QObject):
         # post that landed in the index during this scan becomes clickable.
         if not loading:
             win._content.refresh_markdown_links()
-            # 委譲メソッド経由で呼ぶ — UI レビューのスクリーンショット
-            # ハーネス (``tools/ui_review/shoot.py``) が窓のこの名前を
-            # 差し替えて「初回着地の 1 枚」を撮る。
+            # 委譲メソッド経由で呼ぶ — UI のスクリーンショット撮影ハーネスが
+            # 窓のこの名前を差し替えて「初回着地の 1 枚」を撮る。
             win._settle_startup_focus()
             self.settle_stage_after_scan()
 
     def settle_stage_after_scan(self) -> None:
-        """再スキャン着地でステージ維持の保険を消費する（項目9 / 項目 #78）。
+        """再スキャン着地でステージ維持の保険を消費する。
 
         ``set_root(keep_mode=True)`` は最大化を維持したまま非同期スキャンを
         投げ、``stage_settle_pending`` を立てる。着地時点で保持対象が消えて
         いたら（投稿/ファイルの削除、スキャン失敗）分割へ戻す — 最大化中は
         グリッド席が幅 0 なので、そこに出た空状態やエラーカード + [再試行] が
         1px も見えないまま行き止まりになるため。**スキャン失敗も「保持対象が
-        消えた」の一種**として同じ出口を通す（レビュー 2026-09-03 項目 #78 —
-        以前は ``load_failed`` の早期 return がこの処理の手前で抜けていた）。
+        消えた」の一種**として同じ出口を通す（``load_failed`` の早期 return が
+        この処理の手前で抜けてはならない）。
 
         旧表示の後始末は ``ViewerWindow._reset_preview_panes``（「再ルートは
         選択を捨てる」規約の唯一の実体）へ委ねる — 手写しすると
         ``invalidate_image_sibling_cache`` / ``_refresh_info_meta(None)`` /
         ``_refresh_file_detail(None)`` が落ち、消えた投稿のメタカードと
-        「本文を読む」導線が残ったままになる（レビュー 2026-09-03 項目 #50）。
+        「本文を読む」導線が残ったままになる。
         """
         if not self.stage_settle_pending:
             return

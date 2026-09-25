@@ -376,7 +376,7 @@ class WindowHelp(QObject):
         """Help ▸ ログフォルダを開く — reveal data/logs in the OS file manager.
 
         Opens the portable ``get_paths().logs`` directory (created on demand) so
-        a user filing a bug report can attach ``viewer.log`` without hunting for
+        a user reporting a problem can attach ``viewer.log`` without hunting for
         the path.  Failure is logged and surfaced through the shared 「開く」
         失敗ファネル (``view_prefs.notify_failure`` — 直書きの ``showMessage``
         だけが残ると、同じ「開けなかった」が入口ごとに別の面へ出る); it never

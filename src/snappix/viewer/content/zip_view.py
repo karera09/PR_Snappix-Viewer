@@ -40,7 +40,7 @@ from ._shared import _popup_entry_menu
 # freeze the GUI building that many QTreeWidgetItem rows (plus the sort /
 # ResizeToContents recompute).  Totals still count every member; rows past
 # this cap are omitted with a "…他 N 件" note.  Module-level so it's easy to
-# tune (no settings UI — see the ZIP preview notes in docs/claude/viewer/content.md).
+# tune (deliberately no settings UI).
 _ZIP_PREVIEW_MAX_ENTRIES = 5000
 
 
@@ -61,8 +61,8 @@ def _read_zip_listing(
     files within ``ZIP_PREVIEW_SIZE_LIMIT``.
 
     The ``stat()`` size probe lives here too: a cold NAS round-trip on
-    every ``.zip`` selection used to run synchronously on the GUI thread
-    (FileInfoView / TextView had already moved theirs off-thread).  The
+    every ``.zip`` selection must not run synchronously on the GUI thread
+    (FileInfoView / TextView keep theirs off-thread the same way).  The
     size cap is captured at dispatch time so a settings change mid-flight
     doesn't re-gate a running task.
 
@@ -151,7 +151,7 @@ class ZipView(QWidget):
             t("viewer.content_view.col_filename"),
             t("common.label.size"),
             t("viewer.content_view.col_ratio"),
-            t("viewer.content_view.col_mtime"),
+            t("common.label.modified"),
         ])
         hdr = self._tree.header()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)

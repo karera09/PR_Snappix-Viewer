@@ -1,8 +1,7 @@
 """印ストリップ — ★ / あとで見る / ユーザータグ を対象に束ねた 1 部品を 3 席に置く。
 
-UIレビュー 2026-09-11 のリデザイン E2。印を付ける操作面が右クリックと数字キーに
-散り、情報パネルの印の行は post.md の有無に従属して消えていた（N-53）。
-ユーザータグには常設の「付ける」面が無かった（N-44）。この部品を
+印を付ける操作面を右クリックと数字キーに散らさず、post.md の有無にも
+従属させず、ユーザータグにも常設の「付ける」面を持たせるため、この部品を
 
 * **分割ビュー**: 情報パネル最上段（full 変種 — 常設・post.md 非依存）
 * **プレビュー最大化**: ステージヘッダーの旧 ★N ラベルの席（compact 変種・高さ増 0）
@@ -17,7 +16,7 @@ UIレビュー 2026-09-11 のリデザイン E2。印を付ける操作面が右
 不変:
 
 * **全子が ``NoFocus``** — フォーカスを取ると ``focus_target.focused_seat`` の
-  席判定が変わり、``L`` / 0-5 が別の項目へ書く（N-16 の再発）。マウス専用の面で、
+  席判定が変わり、``L`` / 0-5 が別の項目へ書いてしまう。マウス専用の面で、
   キーボードは既存の 0-5 / ``L`` / 右クリックが担う。
 * 店（``user_meta``）が無ければ :meth:`set_store_available` で丸ごと隠す
   （右クリックの印の節が出ない劣化と同じ）。
@@ -31,7 +30,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QToolButton, QWidget
 
@@ -153,7 +152,7 @@ class _StarRow(QWidget):
         # 「同じ星をもう一度で解除」は素早い 2 クリックになりやすく、Qt は 2 回目の
         # 押下を DblClick として届ける。既定実装は ignore して親へ抜けるので、
         # ステージヘッダーの席では ``PreviewColumn`` のダブルクリック（最大化⇄分割）
-        # まで発火した（PR #184 レビュー。``StageFilmstrip`` と同じ封じ込め）。
+        # まで発火してしまう（``StageFilmstrip`` と同じ封じ込め）。
         # 2 回目の release は通常どおり :meth:`mouseReleaseEvent` へ届く。
         if event.button() == Qt.MouseButton.LeftButton:
             event.accept()
@@ -174,18 +173,22 @@ class _StarRow(QWidget):
 _LATER_ICON_PX = 16
 
 
-def _clock_icon(widget: QWidget) -> QIcon:
-    """「あとで見る」の時計グリフだけを描いたアイコン（DPR 対応）."""
+def _clock_icon(widget: QWidget, outline: QColor) -> QIcon:
+    """「あとで見る」の時計グリフ — OFF は輪郭、ON（checked）は塗り（DPR 対応）."""
     dpr = max(1.0, float(widget.devicePixelRatioF()))
     px = int(round(_LATER_ICON_PX * dpr))
-    pm = QPixmap(px, px)
-    pm.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pm)
-    painter.scale(dpr, dpr)
-    draw_clock_glyph(painter, QRectF(1.0, 1.0, _LATER_ICON_PX - 2.0, _LATER_ICON_PX - 2.0))
-    painter.end()
-    pm.setDevicePixelRatio(dpr)
-    return QIcon(pm)
+    result = QIcon()
+    for state, color in ((QIcon.State.Off, outline), (QIcon.State.On, None)):
+        pm = QPixmap(px, px)
+        pm.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pm)
+        painter.scale(dpr, dpr)
+        rect = QRectF(1.0, 1.0, _LATER_ICON_PX - 2.0, _LATER_ICON_PX - 2.0)
+        draw_clock_glyph(painter, rect, color)
+        painter.end()
+        pm.setDevicePixelRatio(dpr)
+        result.addPixmap(pm, QIcon.Mode.Normal, state)
+    return result
 
 
 def _scrim_button_style() -> str:
@@ -193,7 +196,8 @@ def _scrim_button_style() -> str:
         "QToolButton { background: transparent; border: none;"
         f" padding: 2px 4px; border-radius: {RADIUS_SM}px;"
         f" color: {overlay.rgba_str(overlay.OVERLAY_TEXT)}; }}"
-        "QToolButton:hover, QToolButton:checked {"
+        # :checked は地を敷かない — 状態は時計の塗り / 輪郭が示し、ホバーと混ざらない。
+        "QToolButton:hover {"
         f" background: {overlay.rgba_str(overlay.LIGHTBOX_BTN_HOVER)}; }}"
     )
 
@@ -262,7 +266,7 @@ class CurationStrip(QWidget):
         self._later_btn.setCheckable(True)
         self._later_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._later_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._later_btn.setIcon(_clock_icon(self))
+        self._later_btn.setIcon(_clock_icon(self, self._stars._outline_color()))
         self._later_btn.setIconSize(QSize(_LATER_ICON_PX, _LATER_ICON_PX))
         self._later_btn.setToolTip(t("viewer.post_grid.watch_later_menu"))
         if mode == MODE_FULL:
@@ -333,6 +337,12 @@ class CurationStrip(QWidget):
 
     # ------------------------------------------------------------------ API
 
+    def changeEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        # テーマ切替で OFF の輪郭色（text_muted）を引き直す（★行は描画時に読む）。
+        if event.type() == QEvent.Type.PaletteChange:
+            self._later_btn.setIcon(_clock_icon(self, self._stars._outline_color()))
+        super().changeEvent(event)
+
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt API)
         # 帯の余白でも親（ステージヘッダー → PreviewColumn の分割⇄最大化）へ
         # 抜けさせない — 操作面の中で起きたことは操作面で閉じる。
@@ -374,7 +384,7 @@ class CurationStrip(QWidget):
         self._later_btn.setChecked(self._later)
         self._later_btn.blockSignals(False)
         self._rebuild_tags()
-        # 「この印はどれに付くか」は面自身が名乗る（N-16 / N-88 の教訓）—
+        # 「この印はどれに付くか」は面自身が名乗る —
         # 席の見出し側（情報パネルの節見出し）が名前を出し、こちらはツールチップ。
         tip = t("viewer.curation_strip.target_tooltip", path=path) if path else ""
 
@@ -603,7 +613,7 @@ class CurationStrip(QWidget):
         # ダムビュー: ボタンの自己トグルは戻し、要求だけを出す。書けたときは
         # ホストが ``curation_changed`` → ``set_target`` で新しい値を配る。
         # 書けなかったとき（読み取り専用ボリューム等）に画面だけ ON で固まり、
-        # 次のクリックが「外す」要求になる事故を防ぐ（PR #184 レビュー）。
+        # 次のクリックが「外す」要求になる事故を防ぐ。
         self._later_btn.blockSignals(True)
         self._later_btn.setChecked(self._later)
         self._later_btn.blockSignals(False)

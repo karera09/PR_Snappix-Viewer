@@ -20,7 +20,7 @@ from __future__ import annotations
 from loguru import logger
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
 from .palette import build_palette
 from .qss import build_app_qss
@@ -70,7 +70,7 @@ def register_theme(tokens: ThemeTokens) -> None:
     ``ValueError`` so a plugin can't silently repaint the built-ins.
 
     **Re-registering identical tokens is a no-op**（frozen dataclass の
-    同値比較。``qss.py::register_qss_fragment`` #121 と同型 — #185）:
+    同値比較。``qss.py::register_qss_fragment`` と同型）:
     プラグインのセッション内 無効化 → 再有効化は activate 再実行になる
     ため、無条件拒否だと自分が前サイクルで登録したテーマと衝突して
     再有効化が恒久失敗する。
@@ -131,14 +131,27 @@ class _PopupCornerWatcher(QObject):
     pop-ups / toolbar popovers) or ``Qt.ToolTip`` (tooltips) so ordinary
     windows and dialogs are never touched; it is a no-op on Windows 10 /
     non-Windows, where the corners stay square (never black).
+
+    The same Show hook also turns on ``QMenu.toolTipsVisible`` for every
+    menu.  Its default is ``False``, so an action tooltip (an ancestor
+    folder's full path, a verb's purpose) would silently never appear unless
+    each menu-building site remembered to opt in — and which menu an action
+    lands in is data flow no static check can close.  Setting it here makes
+    the invariant hold by construction for every menu however it is built
+    (menu-bar drop-downs, context menus, sub-menus, plugin menus).  It is
+    noise-free: a menu only shows tooltips that were set explicitly (an
+    action without ``setToolTip`` shows none), and Show always precedes the
+    first ToolTip event, so there is no timing window.
     """
 
     def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
-        if (
-            event.type() == QEvent.Show
-            and isinstance(obj, QWidget)
-            and obj.isWindow()
-            and obj.windowType() in (Qt.WindowType.Popup, Qt.WindowType.ToolTip)
+        if event.type() != QEvent.Show or not isinstance(obj, QWidget):
+            return False
+        if isinstance(obj, QMenu) and not obj.toolTipsVisible():
+            obj.setToolTipsVisible(True)
+        if obj.isWindow() and obj.windowType() in (
+            Qt.WindowType.Popup,
+            Qt.WindowType.ToolTip,
         ):
             round_window_corners(obj)
         return False
@@ -253,6 +266,7 @@ def _install_app_filters(app) -> None:
     # Round the (opaque) popup / tooltip windows' corners via DWM on show, so
     # menus / combo drop-downs / toolbar popovers / tooltips get soft corners
     # without the black-corner artefact of a QSS border-radius (see the class).
+    # The same watcher makes every QMenu show its actions' tooltips.
     if _popup_watcher is None:
         _popup_watcher = _PopupCornerWatcher()
     app.installEventFilter(_popup_watcher)

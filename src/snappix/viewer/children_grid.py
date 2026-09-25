@@ -11,7 +11,7 @@ selection, and scrolling.
 Subclasses (``PostGrid`` / ``FileListView``) add only pane-specific chrome
 and signal handling via the hook methods below.
 
-Key behaviours (see ``docs/claude/viewer.md``):
+Key behaviours:
 
 * **Viewport-bounded loading** — thumbnails AND aspect probes are issued
   only for the buffered visible range, off ``GalleryView.visible_range_
@@ -89,9 +89,8 @@ class SelectRequest(NamedTuple):
 
 
 #: 表示形式コンボの選択肢 ``(key, i18n ラベルキー)`` — **左右ペイン共通の単一
-#: 情報源**。両ペインが手で ``addItem`` していた頃は選択肢の順が完全な逆順
-#: (左 justified→square→list / 右 list→square→justified) になっていて、
-#: コード上いかなる理由付けも無かった (UIレビュー 2026-08-28 N-75)。
+#: 情報源**。両ペインが手で ``addItem`` すると選択肢の順が理由無く食い違う
+#: (左 justified→square→list / 右 list→square→justified のように)。
 VIEW_LAYOUT_CHOICES: tuple[tuple[str, str], ...] = (
     ("justified", "viewer.common.layout_justified"),
     ("square", "common.view.grid"),
@@ -108,7 +107,7 @@ def _labeled_row(label_key: str, widget: QWidget) -> tuple[QHBoxLayout, QLabel]:
 
     ラベルも返すのは、3 行ぶんを集めて
     :func:`~snappix.common.ui.align_form_labels` へ一度に渡すため（その場で
-    作って捨てるとラベル列が揃えられない — N-39）。
+    作って捨てるとラベル列が揃えられない）。
     """
     row = QHBoxLayout()
     row.setSpacing(_VIEW_ROW_SPACING)
@@ -216,8 +215,7 @@ def build_tile(
         entry=entry,
         is_fallback=entry.is_fallback_thumbnail,
         tooltip=tooltip,
-        # post.md / #thumb# は一覧に残すが本編と同格には描かない
-        # (UIレビュー 07-25 #52)。
+        # post.md / #thumb# は一覧に残すが本編と同格には描かない。
         dimmed=not entry.is_dir and is_meta_or_marker_file(entry.path),
         warn=warn,
     )
@@ -259,11 +257,26 @@ def build_tile(
     return tile
 
 
+def _same_file_content(old: Tile, new: Tile) -> bool:
+    """*old* と *new* が同じファイル内容を指すか（フォルダ・不明は常に真）.
+
+    タイルのキーはパスだけなので、同名上書きを見分ける材料はエントリの
+    ``mtime`` / ``size``。どちらかがエントリを持たない（テストの素組み等）
+    ときは判定できないので従来どおり同一とみなす。
+    """
+    oe, ne = old.entry, new.entry
+    if not isinstance(oe, FolderEntry) or not isinstance(ne, FolderEntry):
+        return True
+    if oe.is_dir or ne.is_dir:
+        return True
+    return (oe.mtime, oe.size) == (ne.mtime, ne.size)
+
+
 def _button_specs(actions: list[EmptyAction]) -> list[tuple[str, str]]:
     """:class:`EmptyAction` 列 → ``GalleryView`` が要る ``(label, tooltip)`` 列.
 
     ビューはラベルと添字しか知らない（押下先を持たせると「表示は変わったのに
-    押下先が古い」形の二重管理が戻る — 項目 #95）。
+    押下先が古い」形の二重管理になる）。
     """
     return [(a.label, a.tooltip) for a in actions]
 
@@ -309,10 +322,10 @@ class ChildrenGrid(QWidget):
     tiles_changed = Signal()
     #: Backspace pressed on the pane's grid (``GalleryView.keyPressEvent``) —
     #: 「上の階層へ」, the same meaning as the ↑ button / Alt+Up.  Declared on
-    #: the **base** (UIレビュー 2026-08-28 N-26) because the key is a property
-    #: of the shared grid body: it used to exist only on ``PostGrid``, so
-    #: Backspace was silently dead whenever the 情報パネル一覧 held focus even
-    #: though the shortcut table documents it as a plain 「グリッド」 key.
+    #: the **base** because the key is a property of the shared grid body:
+    #: declared only on ``PostGrid``, Backspace would be silently dead whenever
+    #: the 情報パネル一覧 held focus even though the shortcut table documents it
+    #: as a plain 「グリッド」 key.
     #: ``PostGrid`` also emits it from its ↑ chrome button.
     go_up_requested = Signal()
 
@@ -446,7 +459,7 @@ class ChildrenGrid(QWidget):
         # the next request / successful result.
         self._scan_error: str | None = None
         # 空状態オーケストレータ（:func:`empty_state.resolve_empty_state`）が
-        # 「この席が案内カードを持つ」と裁定しているか（項目#196）。既定 True
+        # 「この席が案内カードを持つ」と裁定しているか。既定 True
         # = 従来どおり自走。ウィンドウが :meth:`refresh_empty_state` の
         # ``allowed`` で更新し、**以後の内部リビルドにも効く**（状態にして
         # あるので、次の裁定まで黙ったカードが勝手に復活しない）。
@@ -460,11 +473,11 @@ class ChildrenGrid(QWidget):
         )
 
         self._build_ui()
-        # 空状態カードのボタン（何個でも — UIレビュー 07-25 #26 の主 / 副も
-        # この列の先頭 2 つ）。飛んでくるのは添字だけなので、意味は
-        # :meth:`_current_empty_actions` の**同じ列**で引き直す（項目 #95）。
+        # 空状態カードのボタン（何個でも — 主 / 副はこの列の先頭 2 つ）。
+        # 飛んでくるのは添字だけなので、意味は
+        # :meth:`_current_empty_actions` の**同じ列**で引き直す。
         self._view.empty_action_clicked.connect(self._on_empty_action)
-        # Backspace = 上の階層へ（N-26）。両ペイン共通なのでここで中継する。
+        # Backspace = 上の階層へ。両ペイン共通なのでここで中継する。
         self._view.go_up_requested.connect(self.go_up_requested.emit)
 
     # ----------------------------------------------------- hooks (subclass)
@@ -495,7 +508,7 @@ class ChildrenGrid(QWidget):
         lines = [head]
         if str(entry.path) != head:
             lines.append(str(entry.path))
-        # ♡N / 🔒N バッジは初見で意味が伝わりにくい (UIレビュー #23) —
+        # ♡N / 🔒N バッジは初見で意味が伝わりにくい —
         # ホバーで言葉に展開する（凡例はショートカット一覧の最下部にもある）。
         if getattr(entry, "favorites", None):
             lines.append(
@@ -534,10 +547,10 @@ class ChildrenGrid(QWidget):
     def _scan_error_text(message: str) -> str:
         """走査失敗カードの本文 — 定型の説明 + OS が返した理由 1 行。
 
-        (UIレビュー 2026-09-11 N-75) 理由は例外メッセージとしてログにだけ
-        残り、画面には「ネットワークドライブの接続やアクセス権を確認して
-        ください」という総称しか出ていなかった — 「共有名が見つからない」と
-        「アクセスが拒否されました」では次の一手が違う。例外文字列にはパスも
+        理由を例外メッセージとしてログにだけ残し、画面には「ネットワーク
+        ドライブの接続やアクセス権を確認してください」という総称しか出さない
+        と、「共有名が見つからない」と「アクセスが拒否されました」を区別
+        できない — 次の一手が違う。例外文字列にはパスも
         入るが、それは既にカードの文脈そのもの（ログにも出ている）。
 
         カードを縦に割らないよう **先頭 1 行だけ**を採り、さらに長さでも
@@ -558,7 +571,7 @@ class ChildrenGrid(QWidget):
         """走査失敗カード（⚠ + [再試行]）のボタン列 — 描画と押下で共有する。
 
         理由を読んでも分からないとき（権限・SMB 方言）に、報告用の
-        ``viewer.log`` へ 1 クリックで辿り着けるようにする（N-75）。ホストが
+        ``viewer.log`` へ 1 クリックで辿り着けるようにする。ホストが
         その導線を持たない構成（単体起動・テスト）では 再試行 だけになる。
         """
         actions = [
@@ -612,12 +625,11 @@ class ChildrenGrid(QWidget):
         いる）ので、ここで書くと現れた瞬間に消える文言を作るだけになる。
         走査失敗中は自前のエラーカード（⚠ + [再試行]）が勝つ。
 
-        *allowed* は空状態オーケストレータの裁定（項目#196）:
+        *allowed* は空状態オーケストレータの裁定:
         :func:`empty_state.resolve_empty_state` が返す ``plan.grid`` の役割が
-        ``PRIMARY`` でないとき、この席は**黙る**（案内カードは 1 画面に 1 枚
-        — 07-25 #51）。以前 ``plan.grid`` は production では誰も読まず、
-        「PRIMARY は多くとも 1 席」はリゾルバ内部とその単体テストの中でしか
-        成立していなかった。``None``（既定）は「裁定を更新しない」で、
+        ``PRIMARY`` でないとき、この席は**黙る**（案内カードは 1 画面に 1 枚）。
+        ``plan.grid`` を本番経路で読まないと「PRIMARY は多くとも 1 席」は
+        リゾルバ内部でしか成立しない。``None``（既定）は「裁定を更新しない」で、
         グリッド内部からの再適用が最後の裁定を引き継ぐ。走査失敗カードは
         裁定より前に勝つ — 席が黙っていても失敗は伝える必要がある。
         """
@@ -656,7 +668,7 @@ class ChildrenGrid(QWidget):
         self._view.set_empty_state(str(text), "", "")
 
     def _empty_state_message(self) -> str:
-        """Message painted when the pane settles at zero tiles (#5).
+        """Message painted when the pane settles at zero tiles.
 
         Consulted by ``_set_entries_as_tiles`` whenever a rebuild lands empty
         — i.e. only for *settled* results, never mid-scan (``set_folder``
@@ -668,7 +680,7 @@ class ChildrenGrid(QWidget):
         return ""
 
     def _empty_state_actions(self) -> list[EmptyAction]:
-        """空状態カードのボタン列（ラベル + 押下先を 1 つの値で — 項目 #95）.
+        """空状態カードのボタン列（ラベル + 押下先を 1 つの値で）.
 
         :meth:`_empty_state_message` と同じ分類から導く。ラベルの分岐
         (``_empty_state_action`` / ``_empty_state_secondary``) と振る舞いの分岐
@@ -697,7 +709,7 @@ class ChildrenGrid(QWidget):
 
     def _empty_state_icon(self) -> str:
         """``common/ui/icons.py`` glyph painted above the settled-empty
-        message (redesign 2026-07 Phase 3-4), or ``""`` for none.
+        message, or ``""`` for none.
 
         Consulted together with :meth:`_empty_state_message`.  The base
         offers no icon; subclasses pick one that matches their message.
@@ -745,13 +757,12 @@ class ChildrenGrid(QWidget):
         self._view.selection_changed.connect(self._on_view_selection_changed)
         self._view.item_activated.connect(self._on_view_item_activated)
         self._view.visible_range_changed.connect(self._schedule_visible_request)
-        # 収束適用 (issue #99): 保留スクロール (B-13) はタイル再構築時
+        # 収束適用: 保留スクロールはタイル再構築時
         # （``_set_entries_as_tiles``）だけでなく、遅延リレイアウトの収束時にも
         # 適用を試みる。ステージ復帰（席幅 0 → 復元）はタイル再構築を**伴わず**
         # ジオメトリ反映のタイミングも環境依存なので、「幅が戻ればいつかは
         # resizeEvent → コアレサ → このフック」という収束点だけが適用を保証
-        # できる（時点適用の 1 tick 再試行は低速 CI で不発だった — #83 追補の
-        # 撤去理由）。
+        # できる（時点適用の 1 tick 再試行は低速環境で不発になる）。
         self._view.relayout_converged.connect(self._apply_pending_scroll)
         outer.addWidget(self._view, 1)
         self._reconfigure_view()
@@ -797,7 +808,7 @@ class ChildrenGrid(QWidget):
         return max(36, fm.lineSpacing() * 2 + 8)
 
     def _caption_overlay(self) -> bool:
-        """Whether icon tiles ride the caption on the image (Phase 3-2 seating).
+        """Whether icon tiles ride the caption on the image.
 
         When True the layout reserves NO caption strip (``caption_height=0``)
         and :class:`~snappix.viewer.gallery_view.GalleryView` draws the title on
@@ -880,7 +891,19 @@ class ChildrenGrid(QWidget):
         so a freshly-built tile that already carries its own pixmap / aspect
         still wins.  The loader caches by the (path-derived) tile key, so the
         carried pixmap is exactly what a re-request would have re-emitted.
+
+        Nothing is carried for a *file* whose content changed underneath
+        (``mtime`` / ``size`` differ between the two entries): the tile key
+        is path-only, so an in-place overwrite (same name, new bytes — the
+        case F5 / ``notify_library_changed`` re-scan for) would otherwise
+        inherit the stale pixmap + aspect, and ``thumb_loaded`` /
+        ``aspect_known`` would suppress the re-request and re-probe for good.
+        Folders keep carrying: their own mtime moves on every child add /
+        remove while the representative image usually stays, and dropping
+        the carry there would blank every folder tile on each re-scan.
         """
+        if not _same_file_content(old, new):
+            return
         if not new.thumb_loaded and old.thumb_loaded and old.pixmap is not None:
             new.pixmap = old.pixmap
             new.thumb_loaded = True
@@ -892,7 +915,7 @@ class ChildrenGrid(QWidget):
         # already has thumb_loaded) supersedes the old failure and wins.
         if old.thumb_failed and not new.thumb_loaded:
             new.thumb_failed = True
-            # Keep the recorded failure edge too (#114) — without it a
+            # Keep the recorded failure edge too — without it a
             # rebuild would reset the gate to 0 and the very next visible
             # pass would re-request (and re-fail) the unreadable file.
             new.thumb_failed_edge = old.thumb_failed_edge
@@ -973,7 +996,7 @@ class ChildrenGrid(QWidget):
                 # normal flush path — the loader's source-limited serve stays
                 # silent on re-request (it assumes the caller already holds
                 # the image), so without this re-seed such a tile would show
-                # the "loading" dots forever (#10).  A key the loader has
+                # the "loading" dots forever.  A key the loader has
                 # since evicted simply re-decodes via the visible request.
                 for tile in tiles:
                     if tile.thumb_loaded or tile.thumb_failed:
@@ -986,7 +1009,7 @@ class ChildrenGrid(QWidget):
                 # Warm-seed any still-unknown aspects from the cache so a
                 # revisited folder lays out justified with zero reflow.
                 if self._meta_cache is not None:
-                    # 未解決のタイルだけで specs を組む（レビュー 09-03 #250）。
+                    # 未解決のタイルだけで specs を組む。
                     # ``_carry_render_state`` が既知アスペクトを引き継ぐので、
                     # 絞り込み 1 打鍵ごとの再構築では大半が ``aspect_known``
                     # になる — 全件で組むと GUI スレッド上の IN クエリが毎回
@@ -1009,10 +1032,10 @@ class ChildrenGrid(QWidget):
                                 tile.aspect = wh[0] / wh[1]
                                 tile.aspect_known = True
             self._view.set_tiles(tiles)
-        # Empty-state message (#5): a rebuild that lands with zero tiles shows
+        # Empty-state message: a rebuild that lands with zero tiles shows
         # the subclass-provided explanation (plus an optional one-click action
-        # button, C06); any non-empty result clears both.  While the last scan
-        # FAILED (I01), the error state wins — a follow-up rebuild (e.g. the
+        # button); any non-empty result clears both.  While the last scan
+        # FAILED, the error state wins — a follow-up rebuild (e.g. the
         # metadata close-out re-sort) must not overwrite it with "empty".
         if tiles:
             self._view.set_empty_state("")
@@ -1094,8 +1117,8 @@ class ChildrenGrid(QWidget):
         """Re-apply a deferred scroll offset (B-13) when the layout can take it.
 
         Two triggers: after a tiles rebuild (``_set_entries_as_tiles``) and on
-        every deferred-relayout convergence (``relayout_converged`` — issue
-        #99, the only reliable point for restores that don't rebuild tiles,
+        every deferred-relayout convergence (``relayout_converged`` — the
+        only reliable point for restores that don't rebuild tiles,
         e.g. the stage-return splitter expansion).  Runs one event-loop tick
         later via ``QTimer.singleShot(0)`` so the justified layout's scroll
         range (set in ``GalleryView._do_relayout``) is finalised — ``setValue``
@@ -1134,11 +1157,11 @@ class ChildrenGrid(QWidget):
         if self._view.tile_count() == 0:
             return False
         # 現在のスクロールレンジが**縮退レイアウト**（席が畳まれた幅 0 時代の
-        # フォールバック幅 1、または未レイアウト — issue #99）由来の間は消費
+        # フォールバック幅 1、または未レイアウト）由来の間は消費
         # しない: そのレンジへの setValue は maximum=0 への恒久クランプで値を
         # 失う。判定はウィジェットジオメトリではなくレンジの出自
         # （``GalleryView.layout_is_degenerate`` = ``last_layout_viewport_width``
-        # の共有述語。可視集合を空にする判定 — issue #160 — と同一）で行う。
+        # の共有述語。可視集合を空にする判定と同一）で行う。
         # setSizes の反映遅延中は
         # ジオメトリ（まだ旧幅 > 0）とレンジ（もう幅 0 時代）が逆方向に
         # 食い違う（CI 実測）。実幅レイアウトでレンジが 0 のケース（内容が
@@ -1256,18 +1279,18 @@ class ChildrenGrid(QWidget):
 
         Reads the already-built tiles only (no filesystem I/O), so it reflects
         the pane's live sort / filter.  Used by the stage-mode filmstrip
-        (layout redesign 2026-07 Phase 2-1) as the sibling-post strip content —
+        as the sibling-post strip content —
         the same item set the browse grid shows, one row, same order.
 
-        内部ファイル（``post.md`` / ``#thumb#…``）は除く (UIレビュー 07-25 #52 —
+        内部ファイル（``post.md`` / ``#thumb#…``）は除く (本編優先 —
         判定は :func:`folder_scan.is_meta_or_marker_file` の 1 か所)。これが
         ‹ › / ←→ の画像送りが**歩く**母集合。**見せる**母集合はこれとは別で、
         ヘッダーの ``n/m`` も最大化中の画像トラックもメディア（画像 + 動画）
-        だけを数え・並べる（表示層の分離 — UIレビュー 2026-08-28 N-22② /
-        2026-09-11 N-109。``main_window._stage_media_paths`` が唯一の絞り込み）。
+        だけを数え・並べる（表示層の分離 — ``main_window._stage_media_paths``
+        が唯一の絞り込み）。
 
         閲覧モードのプレイリスト（:func:`lightbox_parts.scan.list_playlist_sorted`）との
-        関係は **包含であって一致ではない** (#137 / UIレビュー07-25 追修):
+        関係は **包含であって一致ではない**:
         あちらは ``PLAYLIST_SUFFIXES``（画像 + 動画）だけを採るのに対し、ここは
         メタ / マーカー以外は種別を問わず残す — フォルダタイルや ``.pdf`` /
         ``.zip`` / ``.txt`` のタイルはここにあってプレイリストには無い。
@@ -1359,9 +1382,9 @@ class ChildrenGrid(QWidget):
 
         左グリッドはリビルド（メタデータ 2 段リビルド・``#thumb#`` トグル・
         検索 teardown 復元等）のたびに同一フォルダで ``folder_selected`` を
-        再発火し、従来は窓が :meth:`set_folder` を呼び直すため
+        再発火する。窓が :meth:`set_folder` を呼び直すと
         ``_scanner.request``（フォルダ 1 つぶんの scandir + stat — NAS で
-        顕著）がリビルドごとに発行されていた（issue #146 残課題 1）。内容が
+        顕著）がリビルドごとに発行されてしまう。内容が
         変わっていない再発火では選択の入れ直しだけで十分なので、このメソッドが
         その軽量経路を担う。
 
@@ -1379,7 +1402,7 @@ class ChildrenGrid(QWidget):
             # しない — それで正しい。選択が変わらない再発火で右ペイン側の
             # 状態を戻す責務は窓（``_on_folder_selected`` の
             # ``selection_unchanged``）が「そもそも壊さない」形で負う
-            # （issue #153: ここで emit を強制すると代表画像の自動選択が
+            # （ここで emit を強制すると代表画像の自動選択が
             # 明示選択と区別できずメタカードがファイルカードに化ける）。
             self.set_pending_select(pending_select)
         return True
@@ -1399,7 +1422,7 @@ class ChildrenGrid(QWidget):
         self._view.select_first(emit=True)
 
     def select_last(self) -> None:
-        """末尾の項目を選択する（最大化プレビューの End — UIレビュー 07-25 #22）。"""
+        """末尾の項目を選択する（最大化プレビューの End）。"""
         self._view.select_last(emit=True)
 
     def focus_grid(self) -> None:
@@ -1436,8 +1459,7 @@ class ChildrenGrid(QWidget):
 
         The pane's own tile tooltips are baked at build time (:meth:`_tooltip_for`);
         this adds lines resolved when the tooltip is actually shown, for facts
-        that change while the tile is on screen — ★ / 「あとで見る」 / ユーザータグ
-        (UIレビュー 07-25 #136 / #13).
+        that change while the tile is on screen — ★ / 「あとで見る」 / ユーザータグ.
         """
         self._view.set_tooltip_extra_provider(provider)
 
@@ -1514,8 +1536,8 @@ class ChildrenGrid(QWidget):
             # 「選ぶ前の状態を戻す」という意図ごと陳腐化する。残すと着地時の
             # ``_resolve_pending_select`` が後からユーザー選択（と、それに
             # 連なる詳細カード/プレビュー）を奪い返す — SWR の温存ビューが
-            # 「飛行中も選べる」窓を広げて CI 実写になった (2026-08-31、
-            # PR #148 viewer-b)。プローブの自動選択がクリックを上書きする
+            # 「飛行中も選べる」窓を広げるので現実に起きる。プローブの自動選択が
+            # クリックを上書きする
             # 同族もこの弁で塞がる。resolve 自身の選択適用は
             # ``_resolving_pending`` で除外（自分の pending を消させない）。
             self._pending_select.clear()
@@ -1588,7 +1610,7 @@ class ChildrenGrid(QWidget):
                 #
                 # A tile whose decode has *settled as failed* (C03) is only
                 # re-requested once the box grows PAST the edge the failure
-                # was recorded at (``thumb_failed_edge``, #114).  At the same
+                # was recorded at (``thumb_failed_edge``).  At the same
                 # size the loader would just re-fail on every scroll /
                 # relayout, hammering an unreadable file forever — but a
                 # blanket "never again" gate also froze an already-loaded
@@ -1648,6 +1670,20 @@ class ChildrenGrid(QWidget):
             return True
         return fitted_edge(have, box) > max(hw, hh) + _EDGE_UPGRADE_MARGIN
 
+    def _lazy_resolve_excludes_marker(self) -> bool:
+        """遅延解決（``resolve_in_folder``）が ``#thumb#`` マーカーを避けるか.
+
+        メタデータ経路を持つ席（左ペイン）は代表画像を ``select_thumbnail``
+        で「クリエイターアイコンを隠す」に合わせて選ぶので、遅延解決も同じ
+        規則で選ぶ — 遅延解決が先着したタイルの画像は、後着したメタデータ
+        経路の付け替えでも引き継がれる（``_carry_render_state``）ため、ここが
+        ずれるとマーカー画像が残る。メタデータ経路の無い席（右ペイン）は
+        従来どおりマーカー優先（``_seed_folder_resolution`` と同じ）。
+        """
+        return self._WITH_METADATA and bool(
+            getattr(self, "_exclude_thumb_marker", False)
+        )
+
     def _request_thumb(
         self, key: str, entry: FolderEntry, size: QSize, dpr: float,
     ) -> None:
@@ -1655,6 +1691,7 @@ class ChildrenGrid(QWidget):
             self._loader.request(
                 key, entry.path, size, resolve_in_folder=True, dpr=dpr,
                 folder_mtime=entry.mtime,
+                exclude_thumb_marker=self._lazy_resolve_excludes_marker(),
             )
         elif entry.thumbnail_path is not None:
             self._loader.request(key, entry.thumbnail_path, size, dpr=dpr)
@@ -1807,8 +1844,7 @@ class ChildrenGrid(QWidget):
 
         上限の出どころは表示形式で変わる（リストは設定値 ``_icon_size_max``、
         サムネイル表示はペイン幅由来）ので、**設定への案内はリストのときだけ**
-        出す — サムネイル表示で「設定で変えられます」と書くと誤誘導になる
-        (UIレビュー 2026-09-11 N-134 / N-62 と整合)。
+        出す — サムネイル表示で「設定で変えられます」と書くと誤誘導になる。
         """
         slider = getattr(self, "size_slider", None)
         if slider is None:
@@ -1881,7 +1917,7 @@ class ChildrenGrid(QWidget):
         self._view_mode_did_change()
         self._sync_view_mode_combo()
 
-    # -------------------------------------------- shared 表示設定 3 行 (N-75)
+    # -------------------------------------------- shared 表示設定 3 行
 
     def _build_view_settings_rows(
         self,
@@ -1893,13 +1929,10 @@ class ChildrenGrid(QWidget):
         """並び順 → 表示形式 → サムネイルサイズ の 3 行を組む（左右共通）。
 
         同じ 3 設定が、行の並び・ラベルの有無・選択肢の順序・操作方法まで
-        左右で違っていた（左で身につけた筋肉記憶を右が裏切る）ため、両ペインの
-        ポップオーバーはこの 1 ファクトリから生成する — UIレビュー 2026-08-28
-        N-75。行の並びと選択肢順は左（従来）に揃え、右の「並び順」は
-        ``QToolButton`` + 入れ子メニューをやめて左と同じインラインコンボにする
-        （元の設計コメントは「右は永続的なソートコンボを持たない葉ビュー」を
-        理由に挙げていたが、両者ともポップオーバーの中に入った時点で
-        "permanent" の前提自体が消えている）。
+        左右で違うと、左で身につけた筋肉記憶を右が裏切る。そのため両ペインの
+        ポップオーバーはこの 1 ファクトリから生成し、右の「並び順」も左と同じ
+        インラインコンボにする（両者ともポップオーバーの中にあるので、
+        「右は永続的なソートコンボを持たない葉ビュー」という前提は成り立たない）。
 
         並び順コンボは**項目を入れるところまで**で、現在値の選択とシグナル接続
         は呼び出し側が行う（左はランク表示中の差し替え、右は単純な永続化と、
@@ -1930,10 +1963,10 @@ class ChildrenGrid(QWidget):
 
         self.size_slider = QSlider(Qt.Horizontal)
         # 縦の当たり判定を 24px へ広げる QSS を引き当てるための名前
-        # (UIレビュー 2026-08-28 N-126 — 規則は common/ui/qss.py 側)。
+        # (規則は common/ui/qss.py 側)。
         self.size_slider.setObjectName("thumbSizeSlider")
-        # ツールチップ（範囲 + Ctrl+ホイールの案内 — UIレビュー 2026-09-11
-        # N-66 / N-134）は _sync_slider_tooltip が表示形式ごとに出す。
+        # ツールチップ（範囲 + Ctrl+ホイールの案内）は _sync_slider_tooltip が
+        # 表示形式ごとに出す。
         # Range + value finalise in _apply_view_mode (per-mode bounds), but
         # set sensible initial values so the handle isn't at zero before
         # the first paint.
@@ -1947,18 +1980,18 @@ class ChildrenGrid(QWidget):
         self.size_slider.sliderReleased.connect(self._on_slider_released)
         enable_click_jump(self.size_slider)
         # ``_sync_slider_range`` はビューポート幅が確定するまで早期 return する
-        # ので、初期レンジぶんのツールチップはここで 1 回張っておく (N-134)。
+        # ので、初期レンジぶんのツールチップはここで 1 回張っておく。
         self._sync_slider_tooltip(self.size_slider.minimum(), self.size_slider.maximum())
         row, label = _labeled_row("common.label.thumb", self.size_slider)
         layout.addLayout(row)
         labels.append(label)
         # 3 行のラベル列を共有幅 + 右揃えに（両ペインのポップオーバーが同じ
-        # ファクトリを通るので、揃え直しも 1 か所で済む — N-39）。
+        # ファクトリを通るので、揃え直しも 1 か所で済む）。
         align_form_labels(*labels)
 
-        # UIレビュー 2026-09-11 N-135: フィルターポップオーバーには
-        # 「※ ここの条件は保存されません」があるのに、**永続する**この 3 設定に
-        # 対の注記が無かった。ファクトリが左右共通なので 1 行で 3 席に出る。
+        # フィルターポップオーバーの「※ ここの条件は保存されません」と対に、
+        # **永続する**この 3 設定にも注記を付ける。ファクトリが左右共通なので
+        # 1 行で 3 席に出る。
         persist_hint = QLabel(t("viewer.common.view_settings_persistent_hint"))
         persist_hint.setWordWrap(True)
         persist_hint.setStyleSheet(hint_style())
@@ -2040,7 +2073,7 @@ class ChildrenGrid(QWidget):
         """Forward the metadata-pass parallelism to the children scanner.
 
         Public wrapper so the window's initial propagation of the persisted
-        setting doesn't reach into the private ``_scanner`` (#99).  Applies
+        setting doesn't reach into the private ``_scanner``.  Applies
         from the next scan; ``PostGrid.apply_settings`` covers the runtime
         settings-dialog path.
         """

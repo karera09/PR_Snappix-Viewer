@@ -104,11 +104,15 @@ from .justified_layout import (
     LayoutParams,
     LayoutResult,
     LayoutStrategy,
+    ScrollAnchor,
     SquareGrid,
     TileInput,
+    anchor_at_top,
+    anchor_on_tile,
     hit_test,
     make_strategy,
     nearest_in_adjacent_row,
+    scroll_for_anchor,
     visible_range,
 )
 from .perf import measure
@@ -151,7 +155,7 @@ class GalleryView(QAbstractScrollArea):
     #: A **deferred** relayout (60ms コアレサ発火 / ``flush_pending_relayout``)
     #: が完了し、スクロールレンジが現在のビューポートジオメトリを反映した。
     #: ``set_tiles`` / ``clear`` の同期リレイアウトでは発火しない — ホストの
-    #: 収束適用（``ChildrenGrid._apply_pending_scroll``、issue #99）が
+    #: 収束適用（``ChildrenGrid._apply_pending_scroll``）が
     #: ``_resolve_pending_select`` より前に保留値を消費してしまわないため。
     relayout_converged = Signal()
     # Keyboard-only navigation completion (host wires it where meaningful):
@@ -160,11 +164,11 @@ class GalleryView(QAbstractScrollArea):
     # pane-agnostic.
     go_up_requested = Signal()
     # Request to clear any active filter / search.  NOT emitted by this
-    # view's own key handling any more (#115): Escape is consumed by the
+    # view's own key handling: Escape is consumed by the
     # window-level single QShortcut (main_window ``_sc_escape`` →
-    # ``_on_escape`` → ``PostGrid._on_escape_clear``, UIレビュー 07-25 #20)
-    # before it could reach ``keyPressEvent``, so the old Escape branch here
-    # was dead code.  The signal itself stays as a host-level hook (the left
+    # ``_on_escape`` → ``PostGrid._on_escape_clear``)
+    # before it could reach ``keyPressEvent``, so an Escape branch here
+    # would be dead code.  The signal itself stays as a host-level hook (the left
     # pane keeps it wired; non-keyboard emitters remain possible).
     clear_filter_requested = Signal()
     # A number key 0–5 was pressed while a tile is selected — the host sets
@@ -180,11 +184,10 @@ class GalleryView(QAbstractScrollArea):
     # (retry / 絞り込みを解除 / フォルダを開く… の意味はホストが決める。
     # :meth:`set_empty_state` 参照)。
     #
-    # 引数付きの 1 本にしたのはレビュー 2026-09-03 項目 #95: 従来は主
-    # (``empty_action_clicked``) と副 (``empty_secondary_clicked``) の 2 本
-    # 立てで、ボタンが 3 つ以上ある空状態（AI 検索の 0 件緩和カード — 効いて
+    # 引数付きの 1 本にしているのは、主 / 副の 2 本立てでは
+    # ボタンが 3 つ以上ある空状態（AI 検索の 0 件緩和カード — 効いて
     # いる軸ごとに 1 ボタン）を表せず、その面だけ別のオーバーレイ実装を持つ
-    # 二重管理になっていた。0 = 主、1 = 副、以降は並び順。
+    # 二重管理になるため。0 = 主、1 = 副、以降は並び順。
     empty_action_clicked = Signal(int)
 
     #: 部品側の定数の別名（席の幾何・キャッシュ上限は部品が権威）。
@@ -247,19 +250,27 @@ class GalleryView(QAbstractScrollArea):
         self._curation_provider = None
         # Hover-tooltip extra-line provider (``path -> list[str]``), resolved at
         # tooltip time so mutable facts (★ / あとで見る / ユーザータグ) stay fresh
-        # without a tile rebuild — UIレビュー 07-25 #136 / #13.
+        # without a tile rebuild.
         self._tooltip_extra_provider = None
         self._layout = LayoutResult()
-        # 直近の ``_do_relayout`` がレイアウト計算に使ったビューポート幅
-        # (#99)。0 = まだ一度もレイアウトしていない / 1 = 幅 0 席の縮退
+        # 直近の ``_do_relayout`` がレイアウト計算に使ったビューポート幅。
+        # 0 = まだ一度もレイアウトしていない / 1 = 幅 0 席の縮退
         # フォールバック（``_do_relayout`` の ``max(1, ...)``）。スクロール
         # レンジの「出自」なので、レンジに依存する消費判断（保留スクロール）
         # はウィジェットジオメトリではなくこちらを見る — ジオメトリは
         # setSizes 反映遅延中レンジと逆方向に古くなり得る（CI 実測）。
         self._last_layout_vp_w = 0
+        #: 縮退レイアウト（幅 0 の席 = プレビュー最大化）のあいだ預かっておく
+        #: スクロールアンカー。縮退レイアウトのスクロール値は実幅のレイアウト
+        #: では意味を持たないので、畳む直前の位置（または畳んでいる間に選択へ
+        #: 追従した先 — :meth:`ensure_visible`）をここに置き、幅が戻った最初の
+        #: リレイアウトで適用する。最大化の往復でグリッドの位置を戻すのは
+        #: これだけ（ホストは位置を控えない）。通常のリレイアウトはその場の
+        #: 値からアンカーを取り直すので、縮退していない間は常に ``None``。
+        self._parked_anchor: ScrollAnchor | None = None
         #: 単一選択モデル（添字と遷移規則）— :mod:`gallery_view_parts.selection`。
         self._selection = SelectionState()
-        # Empty-state message (#5): painted centred in the viewport when the
+        # Empty-state message: painted centred in the viewport when the
         # tile set has *settled* at zero.  The view stays dumb about data — the
         # host decides WHAT to say (empty folder vs. filter matched nothing)
         # and sets it via :meth:`set_empty_message`; an empty string (the
@@ -267,20 +278,20 @@ class GalleryView(QAbstractScrollArea):
         # historical blank viewport while results are still pending.
         self._empty_message = ""
         # Optional icon name (common/ui/icons.py glyph) painted above the
-        # settled-empty message (redesign 2026-07 Phase 3-4's empty-state
-        # card grammar) — "" (the default) paints no icon, matching the
-        # historical text-only look.  Set alongside the message via
+        # settled-empty message (the empty-state
+        # card grammar) — "" (the default) paints no icon, i.e. the
+        # text-only look.  Set alongside the message via
         # :meth:`set_empty_state`.
         self._empty_icon_name = ""
         # 空状態メッセージの下に並ぶ操作ボタン（"再試行" / "絞り込みを解除" /
         # "精度を 0.35 まで下げる" …）の ``(label, tooltip)`` 列。ボタン本体は
         # 遅延生成し、タイルが 0 のあいだだけ出す。クリックは
         # :attr:`empty_action_clicked` に**添字**として乗る — 意味はホスト持ち。
-        # 主 / 副の 2 本立てを 1 本のリストへ畳んだ経緯は項目 #95（同上）。
+        # 主 / 副を別シグナルにせず 1 本のリストに畳んである（``empty_action_clicked`` 参照）。
         self._empty_actions: list[tuple[str, str]] = []
         self._empty_action_btns: list[QPushButton] = []
         self._placeholder_cache: dict[tuple[str, int], QPixmap] = {}
-        # Reused title-band scrim gradient (Phase 3-2) — 1 本を各タイルの帯の
+        # Reused title-band scrim gradient — 1 本を各タイルの帯の
         # 下へ平行移動して使う（タイル毎に確保しない）。
         self._scrim = gvpaint.ScrimCache()
         # Memoised 2-line caption elision keyed by (text, width) — see
@@ -323,7 +334,7 @@ class GalleryView(QAbstractScrollArea):
         enable_touch_scroll(self.viewport())
         self.verticalScrollBar().valueChanged.connect(self._on_scroll)
 
-        # Coalesce geometry-driven relayouts (#13): a burst of aspect-probe
+        # Coalesce geometry-driven relayouts: a burst of aspect-probe
         # results, a size-slider drag (configure per valueChanged), or a
         # window/splitter resize each schedule ONE deferred re-layout instead
         # of running the O(n) full layout per event — on a 5000-tile flat
@@ -343,7 +354,7 @@ class GalleryView(QAbstractScrollArea):
         """Set the view mode, layout strategy, and geometry params at once.
 
         The re-layout itself is deferred through :meth:`_schedule_relayout`
-        (#13) so a slider drag — one ``configure`` per ``valueChanged`` —
+        so a slider drag — one ``configure`` per ``valueChanged`` —
         coalesces into at most ~16 full layouts per second instead of one
         per event.
         """
@@ -377,6 +388,7 @@ class GalleryView(QAbstractScrollArea):
         self._empty_actions = []
         self._sync_empty_action_button()
         self._layout = LayoutResult()
+        self._parked_anchor = None
         self.verticalScrollBar().setValue(0)
         self.verticalScrollBar().setRange(0, 0)
         self.viewport().update()
@@ -387,7 +399,11 @@ class GalleryView(QAbstractScrollArea):
         self._selection.reset()
         self._reset_pointer_state()
         self._sync_empty_action_button()
-        self._do_relayout()
+        # タイル列が入れ替わったので旧列のアンカーは意味を持たない — 位置の
+        # 復元はホストの保留スクロールか、選択の復元に伴う ensure_visible
+        # （縮退中なら選択タイルを中央に出すアンカーを預け直す）が決める。
+        self._parked_anchor = None
+        self._do_relayout(keep_position=False)
 
     def _reset_pointer_state(self) -> None:
         """Disarm an in-progress drag when the tile array is replaced.
@@ -423,7 +439,7 @@ class GalleryView(QAbstractScrollArea):
         *,
         actions: Sequence[tuple[str, str]] | None = None,
     ) -> None:
-        """Set the message painted when the tile set has settled at zero (#5).
+        """Set the message painted when the tile set has settled at zero.
 
         The host calls this after a rebuild lands: a non-empty *text* is drawn
         centred in the viewport while there are no tiles; ``""`` (also the
@@ -439,20 +455,20 @@ class GalleryView(QAbstractScrollArea):
 
         *icon_name* (a ``common/ui/icons.py`` glyph, e.g. ``"folder"`` /
         ``"search"``) paints a small muted icon above the message — the
-        empty-state card grammar (redesign 2026-07 Phase 3-4).  ``""`` (the
-        default) paints no icon, matching the historical text-only look.
+        empty-state card grammar.  ``""`` (the
+        default) paints no icon, i.e. the text-only look.
 
         *secondary_text* は**第 2 ボタン**（副アクション）で、主ボタンの右隣に
-        並ぶ (UIレビュー 07-25 #26)。回復手段が 2 つある空状態（例: 「サブ
-        フォルダも検索して再試行」/「検索条件をすべて解除」）で、片方をもう
-        片方に差し替えるしかなかった制約を外すために追加した。``""`` なら
-        従来どおり主ボタンのみ。
+        並ぶ。回復手段が 2 つある空状態（例: 「サブ
+        フォルダも検索して再試行」/「検索条件をすべて解除」）で、両方を
+        同時に出すための口。``""`` なら
+        主ボタンのみ。
 
         *actions* を渡すと ``action_text`` / ``secondary_text`` の代わりに
         ``(label, tooltip)`` の**任意個**のボタンを並べる（3 つ以上は縦積み）。
-        AI 検索の 0 件カードが「効いている軸ごとに 1 つ緩和ボタン」を出すため
-        (レビュー 2026-09-03 項目 #95) — 以前はそれ専用の別オーバーレイ実装が
-        あり、同じグリッドに空状態のオーナーが 2 つ居た。
+        AI 検索の 0 件カードが「効いている軸ごとに 1 つ緩和ボタン」を出すための口で、
+        空状態のオーナーをこのグリッド 1 つに保つ（専用の別オーバーレイ実装を
+        持たない）。
         """
         text = str(text or "")
         icon_name = str(icon_name or "")
@@ -555,8 +571,8 @@ class GalleryView(QAbstractScrollArea):
         if count == 0 or not self._empty_action_btns:
             return
         btns = self._empty_action_btns[:count]
-        # UIレビュー07-25 追修: ``resizeEvent`` からもここへ来るため、フォント /
-        # テーマが変わった直後は古い幅・高さのままだった。位置決めの前に
+        # ``resizeEvent`` からもここへ来るため、フォント /
+        # テーマが変わった直後は古い幅・高さのままになる。位置決めの前に
         # サイズヒントを取り直す（テキストは既に set 済みなので再計算だけ）。
         for btn in btns:
             btn.adjustSize()
@@ -576,11 +592,10 @@ class GalleryView(QAbstractScrollArea):
             btn.setVisible(True)
             btn.raise_()
 
-    # NOTE (#70): there is deliberately no ``append_tiles``.  The removed
-    # implementation had no callers and skipped ``_sync_empty_action_button``
-    # / ``_reset_pointer_state`` — a batched-append entry point must perform
-    # the same synchronisation ``set_tiles`` does, or it re-introduces the
-    # "empty-state button left on top of tiles" / stale drag-index bugs.
+    # NOTE: there is deliberately no ``append_tiles``.  A batched-append entry
+    # point would have to perform the same synchronisation ``set_tiles`` does
+    # (``_sync_empty_action_button`` / ``_reset_pointer_state``), or the
+    # empty-state button stays on top of tiles and drag indices go stale.
 
     # ----------------------------------------------------------- tile access
 
@@ -624,7 +639,7 @@ class GalleryView(QAbstractScrollArea):
         tile.pixmap_size = (
             QSize(pixmap.width(), pixmap.height()) if pixmap else QSize(0, 0)
         )
-        # A successful decode supersedes any settled failure (#114): the
+        # A successful decode supersedes any settled failure: the
         # failure gate exists to stop retry storms, and once a fresh decode
         # lands the tile is healthy again — future upgrades gate on
         # ``pixmap_size`` alone.
@@ -678,7 +693,7 @@ class GalleryView(QAbstractScrollArea):
         so a broken / unreadable image stops looking forever-pending.
 
         Also records the tile's current physical box edge as
-        ``thumb_failed_edge`` (#114): the host skips re-requests at (or
+        ``thumb_failed_edge``: the host skips re-requests at (or
         below) that size — no retry storm on an unreadable file — but a
         later box growth past it earns one fresh attempt, so a one-off
         failure during a resolution upgrade can't pin an already-loaded
@@ -698,7 +713,7 @@ class GalleryView(QAbstractScrollArea):
         self._update_tile_region(idx)
 
     def _box_physical_edge(self, index: int) -> int:
-        """Longest edge of tile *index*'s laid-out box in physical px (#114).
+        """Longest edge of tile *index*'s laid-out box in physical px.
 
         Mirrors the host's request-size computation
         (``ChildrenGrid._physical_size`` over ``box_size``), falling back to
@@ -776,7 +791,7 @@ class GalleryView(QAbstractScrollArea):
         return False
 
     def select_last(self, *, emit: bool = True) -> bool:
-        """末尾タイルを選択（Home/End の End 側 — UIレビュー 07-25 #22）。"""
+        """末尾タイルを選択（Home/End の End 側）。"""
         if self._tiles:
             return self.select_index(len(self._tiles) - 1, emit=emit)
         return False
@@ -801,7 +816,7 @@ class GalleryView(QAbstractScrollArea):
             return
         # The host drives this from an unconditional 80ms timer, so without
         # this guard an idle pane repainted every visible tile 12.5x per
-        # second with no spinner to animate (#71).
+        # second with no spinner to animate.
         if not self._has_spinner_tile():
             return
         self._spinner_angle = (self._spinner_angle + 30) % 360
@@ -813,7 +828,7 @@ class GalleryView(QAbstractScrollArea):
         描画側 (:func:`painter.maybe_paint_spinner`) と**同じ述語**
         (:func:`painter.spinner_eligible`) を可視域だけに掛ける — 片側だけ
         緩いと「描かないタイルのために 80ms タイマが viewport 全体を回し
-        続ける」（項目#60）。述語は純粋なメモリ引きで paint パスと同じ。
+        続ける」。述語は純粋なメモリ引きで paint パスと同じ。
         """
         check = self._spinner_check
         if check is None:
@@ -834,7 +849,7 @@ class GalleryView(QAbstractScrollArea):
     # ----------------------------------------------------------- layout
 
     def last_layout_viewport_width(self) -> int:
-        """直近のレイアウト計算に使われたビューポート幅 (#99).
+        """直近のレイアウト計算に使われたビューポート幅.
 
         現在のスクロールレンジの「出自」。``<= 1`` は縮退レイアウト
         （幅 0 席のフォールバック幅 1、または未レイアウト = 0）を意味し、
@@ -867,7 +882,7 @@ class GalleryView(QAbstractScrollArea):
         """Coalesce geometry changes into one deferred :meth:`_do_relayout`.
 
         Shared by ``configure`` / ``set_params`` / ``resizeEvent`` and the
-        aspect-probe settles (#13): every path rides the same 60ms
+        aspect-probe settles: every path rides the same 60ms
         single-shot timer, so an event burst (slider drag, splitter drag,
         probe batch) costs one O(n) layout instead of one per event.  A
         stale layout can be read for at most one timer interval; the
@@ -878,10 +893,10 @@ class GalleryView(QAbstractScrollArea):
         self._relayout_timer.trigger()
 
     def flush_pending_relayout(self) -> None:
-        """保留中の遅延リレイアウトを今すぐ実行する（#13 追補）。
+        """保留中の遅延リレイアウトを今すぐ実行する。
 
         コアレサ(60ms)の唯一の観測可能な弱点は「スクロールレンジを直後に
-        読むホスト操作」: 分割復帰のスクロール復元（項目#10）は setSizes 直後
+        読むホスト操作」: 分割復帰のスクロール復元は setSizes 直後
         に ``verticalScrollBar().maximum()`` を読むが、resizeEvent 経由の
         レイアウトが保留のままだと幅 0 時代の maximum=0 が見え、復元値が 0 に
         クランプされてしまう（値はタイマー発火後も自然回復しない）。レンジに
@@ -890,7 +905,7 @@ class GalleryView(QAbstractScrollArea):
         self._relayout_timer.flush_now()
 
     def _run_deferred_relayout(self) -> None:
-        """遅延リレイアウト（コアレサ発火 / flush）の実体 + 収束通知 (#99).
+        """遅延リレイアウト（コアレサ発火 / flush）の実体 + 収束通知.
 
         レンジ確定**後**に ``relayout_converged`` を発火する — ホストはこれを
         「保留スクロールを適用してよいレンジが揃った」合図として使う。
@@ -900,11 +915,30 @@ class GalleryView(QAbstractScrollArea):
         self._do_relayout()
         self.relayout_converged.emit()
 
-    def _do_relayout(self) -> None:
+    def _do_relayout(self, *, keep_position: bool = True) -> None:
+        """レイアウトを作り直し、*keep_position* なら見ていた場所を保つ.
+
+        スクロール値（px）の意味はレイアウトごとに変わる — タイルサイズ
+        （Ctrl+ホイール / スライダ）・幅（窓 / スプリッタ）・上側の行への
+        アスペクト着地で全行の y が動くので、値を据え置くと同じ値が数百枚先を
+        指す。作り直す前に :class:`ScrollAnchor` を取り（:meth:`_capture_anchor`）、
+        作り直した後に新しいレイアウトの値へ訳して戻す。同じレイアウトへの
+        作り直しでは値は変わらない。
+
+        縮退レイアウト（幅 0 の席）の間はアンカーを :attr:`_parked_anchor` に
+        預けて適用せず、幅が戻った最初の作り直しで適用する。``set_tiles`` の
+        同期リレイアウトはタイル列が入れ替わるので保たない（``False``）。
+        """
         # Tiles are about to move; a stale hover index would wash the wrong
         # cell.  The relayout repaints the whole viewport anyway, and the
         # next mouse move re-establishes the highlight.
         self._hover_index = None
+        anchor: ScrollAnchor | None = None
+        if keep_position:
+            anchor = (
+                self._parked_anchor if self.layout_is_degenerate()
+                else self._capture_anchor()
+            )
         vp_w = self._stable_viewport_width()
         if vp_w <= 0:
             vp_w = max(1, self.viewport().width())
@@ -919,12 +953,38 @@ class GalleryView(QAbstractScrollArea):
         vbar.setRange(0, max_scroll)
         vbar.setPageStep(vp_h)
         vbar.setSingleStep(max(1, vp_h // 10))
+        if self.layout_is_degenerate():
+            self._parked_anchor = anchor
+        else:
+            self._parked_anchor = None
+            target = (
+                scroll_for_anchor(self._layout, anchor) if anchor is not None
+                else None
+            )
+            if target is not None:
+                vbar.setValue(max(0, min(max_scroll, target)))
         self.viewport().update()
         if self._layout.rows:
             self.visible_range_changed.emit()
 
+    def _capture_anchor(self) -> ScrollAnchor | None:
+        """いまの（縮退していない）レイアウト上の見ている場所をアンカーにする.
+
+        選択タイルの中心がビューポート内にあればそのタイルの中心を同じ
+        ビューポート位置に留める — Ctrl+ホイールは「いま見ている所を拡大する」
+        操作なので、選択タイルを軸に伸び縮みさせる。無ければビューポート
+        上端の行に掛ける。
+        """
+        scroll_y = self.verticalScrollBar().value()
+        sel = self._selection.index
+        if 0 <= sel < len(self._layout.boxes):
+            anchor = anchor_on_tile(self._layout, sel, scroll_y=scroll_y)
+            if anchor is not None and 0 <= anchor.view_offset < self.viewport().height():
+                return anchor
+        return anchor_at_top(self._layout, scroll_y=scroll_y)
+
     def layout_is_degenerate(self) -> bool:
-        """現在のレイアウトが**畳まれた席**由来か (issue #160).
+        """現在のレイアウトが**畳まれた席**由来か.
 
         判定は ``last_layout_viewport_width() <= 1`` — ウィジェットジオメトリ
         ではなく**レンジの出自**を見る（保留スクロールの消費判断
@@ -936,8 +996,8 @@ class GalleryView(QAbstractScrollArea):
     def visible_indices(self, *, buffer_rows: int = 1) -> tuple[int, int] | None:
         """可視（+ *buffer_rows* 行）のタイル添字域。畳まれた席では ``None``.
 
-        プレビュー最大化は分割比プリセットでグリッド席の幅を 0 に畳む
-        (issue #160)。幅 0 のレイアウト（``_do_relayout`` のフォールバック幅
+        プレビュー最大化は分割比プリセットでグリッド席の幅を 0 に畳む。
+        幅 0 のレイアウト（``_do_relayout`` のフォールバック幅
         1）では 1 行 1 タイルの細い帯が縦に並び、**1 画面も表示していない**の
         にビューポート高さいっぱいのタイルが「可視」と出る — ホストはそれを
         信じてサムネイル / アスペクトプローブを要求し、アスペクトが着地する
@@ -997,7 +1057,22 @@ class GalleryView(QAbstractScrollArea):
             self.viewport().update(rect.adjusted(-2, -2, 2, 2))
 
     def ensure_visible(self, index: int) -> None:
+        """タイル *index* が見えるようにスクロールする.
+
+        縮退レイアウト（幅 0 の席 = プレビュー最大化中）ではスクロール値を
+        書いても実幅のレイアウトでは意味を持たない — 最大化中に Ctrl+←/→ で
+        選択を動かして分割へ戻ると、選択タイルが画面外に着地していた。
+        そこで縮退中は「幅が戻ったらこのタイルをビューポート中央に出す」
+        アンカーを預け（:attr:`_parked_anchor`。畳む直前の位置のアンカーを
+        置き換える）、戻った最初のリレイアウトで適用させる。
+        """
         if not (0 <= index < len(self._layout.boxes)):
+            return
+        if self.layout_is_degenerate():
+            self._parked_anchor = ScrollAnchor(
+                index=index, fraction=0.5,
+                view_offset=self.viewport().height() // 2,
+            )
             return
         box = self._layout.boxes[index]
         cell_h = box.h + (self._params.caption_height if self._view_mode == "icon" else 0)
@@ -1016,7 +1091,7 @@ class GalleryView(QAbstractScrollArea):
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._position_empty_action_button()
-        # Deferred (#13): a window/splitter drag fires resize continuously;
+        # Deferred: a window/splitter drag fires resize continuously;
         # the shared coalescer caps the O(n) relayouts at the timer rate.
         self._schedule_relayout()
 
@@ -1078,7 +1153,7 @@ class GalleryView(QAbstractScrollArea):
             idx = self._index_at_viewport_pos(ev.pos())
             tile = self.tile_at(idx) if idx is not None else None
             # The 類似検索 overlay is a *button* inside the tile: name it rather
-            # than repeating the tile's own tooltip (UIレビュー 08-28 N-63).
+            # than repeating the tile's own tooltip.
             seat = (
                 self._similar_button_rect(idx)
                 if idx is not None and self._similar_overlay_index == idx
@@ -1097,7 +1172,7 @@ class GalleryView(QAbstractScrollArea):
         return super().viewportEvent(ev)
 
     def _tooltip_text_for(self, tile: "Tile") -> str:
-        """``Tile.tooltip`` plus any display-time extra lines (UIレビュー #136).
+        """``Tile.tooltip`` plus any display-time extra lines.
 
         ``Tile.tooltip`` is baked when the tile is built, so anything that can
         change *while the tile is on screen* (the user's ★ / 「あとで見る」 /
@@ -1116,7 +1191,7 @@ class GalleryView(QAbstractScrollArea):
         return "\n".join(lines)
 
     def set_tooltip_extra_provider(self, provider) -> None:
-        """Install a ``path -> list[str]`` hover-tooltip line supplier (#136).
+        """Install a ``path -> list[str]`` hover-tooltip line supplier.
 
         Resolved at tooltip time (see :meth:`_tooltip_text_for`), so the host can
         surface mutable per-entry facts — ★N / 「あとで見る」 / ユーザータグ — that
@@ -1125,12 +1200,12 @@ class GalleryView(QAbstractScrollArea):
         self._tooltip_extra_provider = provider
 
     def focusInEvent(self, event) -> None:  # noqa: N802 (Qt API)
-        """フォーカスを得た: 選択枠を通常の強さで描き直す (UIレビュー 07-25 #47)."""
+        """フォーカスを得た: 選択枠を通常の強さで描き直す."""
         super().focusInEvent(event)
         self.viewport().update()
 
     def focusOutEvent(self, event) -> None:  # noqa: N802 (Qt API)
-        """フォーカスを失った: 選択枠を減光して描き直す (UIレビュー 07-25 #47).
+        """フォーカスを失った: 選択枠を減光して描き直す.
 
         レール・グリッド・情報パネルの一覧が同時に同じアクセントで光ると、
         キーがどのペインへ届くのかを画面から読み取れない。QAbstractItemView
@@ -1142,10 +1217,10 @@ class GalleryView(QAbstractScrollArea):
     def _selection_active(self) -> bool:
         """選択強調を満照度で描くか（= このビューがキー入力を受ける側か）.
 
-        UIレビュー07-25 追修: 判定が ``hasFocus()`` だけだったため、右クリック
+        判定を ``hasFocus()`` だけにすると、右クリック
         メニュー（``QMenu.exec()``）やツールバーのポップオーバーを開いた瞬間に
         フォーカスがポップアップへ移り、**いま操作している当のタイル**が減光
-        されていた。Qt 本体の非アクティブ選択描画がフォーカスウィジェットでは
+        されてしまう。Qt 本体の非アクティブ選択描画がフォーカスウィジェットでは
         なくウィンドウのアクティブ状態 (``State_Active``) を見ているのと同じ
         理由で、ポップアップ表示中はこのビューがキーの受け手のままとみなす。
 
@@ -1167,7 +1242,7 @@ class GalleryView(QAbstractScrollArea):
         return isinstance(app.focusWidget(), QMenu)
 
     def _selection_color(self, alpha: int = 255):
-        """選択強調色（palette の highlight）を *alpha* で返す (#47)。"""
+        """選択強調色（palette の highlight）を *alpha* で返す。"""
         return gvpaint.selection_color(
             self.palette(), self._selection_active(), alpha,
         )
@@ -1176,7 +1251,7 @@ class GalleryView(QAbstractScrollArea):
         """キーを**意図**へ翻訳して適用する（分岐表は
         :func:`gallery_view_parts.input.key_intent`）。
 
-        Escape の枝はここにも意図側にも**無い** (#115): 窓の常時 ``QShortcut``
+        Escape の枝はここにも意図側にも**無い**: 窓の常時 ``QShortcut``
         (main_window ``_sc_escape`` → ``_on_escape``) が先に消費する（Escape は
         意図的に ``NAV_KEYS`` に入れていないので ``ShortcutOverride`` でも
         取り返さない）— 枝を置くと生きた第 2 実装に読める死にコードになる。
@@ -1308,10 +1383,10 @@ class GalleryView(QAbstractScrollArea):
         """Viewport rect of the 「◇」 overlay button on tile *index*, or ``None``.
 
         Delegates to :func:`painter.similar_seat` so the hit test always matches
-        where the button is painted — including the drawn-image anchoring (#12):
+        where the button is painted — including the drawn-image anchoring:
         the painter seats the button on :func:`painter.drawn_image_rect`, so the
         hit test must use the same rect.  ``None`` when the tile has no
-        laid-out box, or when the seat doesn't fit (#116 — a sliver tile's
+        laid-out box, or when the seat doesn't fit (a sliver tile's
         fixed-size seat would hit-test over the inter-tile gutter).
         """
         if not (0 <= index < len(self._layout.boxes)):
@@ -1323,7 +1398,7 @@ class GalleryView(QAbstractScrollArea):
         if tile is not None:
             img_rect = gvpaint.drawn_image_rect(img_rect, tile)
         if not gvpaint.similar_seat_fits(img_rect):
-            return None  # sliver tile — no seat, no gutter misclicks (#116)
+            return None  # sliver tile — no seat, no gutter misclicks
         return gvpaint.similar_seat(
             img_rect, seated=self._caption_overlay_active(),
         )
@@ -1405,6 +1480,9 @@ class GalleryView(QAbstractScrollArea):
             if idx is not None:
                 self.select_index(idx, emit=True, ensure=False)
                 self.item_activated.emit(idx)
+                # タイルで消化した — 親（プレビュー列の最大化切替）へ伝えない。
+                event.accept()
+                return
         super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event) -> None:  # type: ignore[override]
@@ -1414,8 +1492,8 @@ class GalleryView(QAbstractScrollArea):
         ):
             # Shift+F10 / メニューキー: Qt はキーボード起動の pos に**フォーカス
             # ウィジェットの中央**を載せるので、当たり判定に掛けると「見えている
-            # 中央のタイル」に効いてしまい、選択中の別タイルへ★が書かれる
-            # （UIレビュー 2026-09-11 N-88 — 実機で誤爆した）。キーボードの対象は
+            # 中央のタイル」に効いてしまい、選択中の別タイルへ★が書かれる。
+            # キーボードの対象は
             # 選択タイルで、メニューはそのタイルの上に出す。
             selected = self._selection.index
             self.ensure_visible(selected)
@@ -1486,7 +1564,7 @@ class GalleryView(QAbstractScrollArea):
     # ----------------------------------------------------------- painting
 
     def _caption_overlay_active(self) -> bool:
-        """Whether icon tiles use the on-image seating chart (Phase 3-2).
+        """Whether icon tiles use the on-image seating chart.
 
         Triggered when the layout reserves NO caption strip in icon mode
         (``caption_height == 0``): the caption then rides the image bottom on a
@@ -1568,7 +1646,7 @@ class GalleryView(QAbstractScrollArea):
             painter.end()
 
     def _paint_empty_message(self, painter) -> None:
-        """Paint the settled empty-state icon + heading + body (#5 / redesign #3-4)."""
+        """Paint the settled empty-state icon + heading + body."""
         empty_card.paint(
             painter,
             self._empty_text_layout(),

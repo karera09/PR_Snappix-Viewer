@@ -1,4 +1,4 @@
-"""Left pane — the always-on navigation rail (layout redesign 2026-07, Phase 2-3).
+"""Left pane — the always-on navigation rail.
 
 The left splitter seat, previously an empty placeholder, is now a thin
 :class:`NavRail`: three stacked sections, each under a
@@ -10,26 +10,25 @@ dialogs:
   labelled 「ライブラリ」 like the breadcrumb).  A click re-roots there; the
   entry matching the current root is drawn as "current" (see below).
 * **スター・あとで見る** — the cross-library 「スター付き一覧」 /
-  「あとで見る一覧」 overlays (UIレビュー 07-25 #57) plus one row per ユーザータグ
-  (UIレビュー 2026-08-28 N-71).  A click enters the matching curation view; the
+  「あとで見る一覧」 overlays plus one row per ユーザータグ.  A click enters the matching curation view; the
   active one is drawn as "current" while it lasts.  Each row carries its
-  「印を付けた件数」 and the section's header badge is suppressed (N-117).
+  「印を付けた件数」 and the section's header badge is suppressed.
 * **ブックマーク** — the saved bookmarks.  A click navigates.
 * **保存した検索** — the saved smart-search payloads.  A click re-applies the
   search against the current root.
 
 Each section's ``⋯`` overflow button opens the corresponding management dialog
 (the same one the menus already open — the rail never re-implements it) and
-carries a tooltip naming that dialog (UIレビュー 07-25 #79); the existing menu
+carries a tooltip naming that dialog; the existing menu
 routes stay in place.
 
-Keyboard parity (UIレビュー 07-25 #7): rows activate on ``itemActivated`` (Enter
+Keyboard parity: rows activate on ``itemActivated`` (Enter
 *and* double-click) as well as ``itemClicked``, and the "current location" is a
 *painted* state (bold + a left accent bar via :class:`_RailItemDelegate`) rather
-than the list's selection — so moving the cursor with ↑↓ no longer turns the
+than the list's selection — so moving the cursor with ↑↓ cannot turn the
 current-root indicator into a lie.  A library that merely *contains* the current
 root (after drilling down) gets the same bar at a fainter alpha, the second tier
-of the two-step emphasis (UIレビュー 07-25 #79).
+of the two-step emphasis.
 
 ``NavRail`` is a dumb view: it owns no state and reads nothing off disk.  The
 window feeds it already-collected lists via :meth:`set_libraries` /
@@ -61,14 +60,15 @@ from PySide6.QtWidgets import (
 from ..common.i18n import t
 from ..common.ui import PanelHeader, current_tokens, empty_state_stack
 from .breadcrumb import pick_library_base
+from .curation_list import CurationList
 
 # Same role slot everywhere: each list item stores its click payload here
 # (a library-root path string, a bookmark path string, or a saved-search index).
 _PAYLOAD_ROLE = Qt.UserRole
 
 # 行の右端に淡色で添える数（現状はキュレーション行の「印を付けた件数」だけ）。
-# ラベル文字列に埋め込むと、他 3 節が右寄せ muted で数を見せる書式と割れる
-# （UIレビュー 2026-09-11 N-120）。``None`` = 数を持たない行。
+# ラベル文字列に埋め込むと、他 3 節が右寄せ muted で数を見せる書式と割れる。
+# ``None`` = 数を持たない行。
 _COUNT_ROLE = Qt.UserRole + 1
 
 # 件数と本文 / 右端の間隔（px）。
@@ -77,13 +77,13 @@ _COUNT_GAP = 6
 #: 1 行ぶんの素材 ``(label, payload, tooltip, count)``。*count* を**タプルに
 #: 含める**のが要点: :meth:`_RailSection.set_items` の no-op ガードは行タプル
 #: の同値比較なので、件数を外に出すと「件数だけ変わったときに更新されない」
-#: 穴が開く（N-120）。
+#: 穴が開く。
 _Row = tuple[str, object, "str | None", "int | None"]
 
 # A section's list/empty-hint area is capped to a *content-sized* height
 # (row height x item count, up to this many visible rows) instead of being
 # left to stretch — otherwise a rail with few entries per section spreads
-# them out with large gaps (the bug this module fixes).  Past the cap the
+# them out with large gaps.  Past the cap the
 # list scrolls internally like any other list.  The empty-hint height is a
 # fixed, compact allowance (roughly two lines of hint text) so a section
 # with nothing in it still reads as a small guidance strip, not a stretched
@@ -91,10 +91,10 @@ _Row = tuple[str, object, "str | None", "int | None"]
 _MAX_VISIBLE_ROWS = 6
 _EMPTY_STATE_HEIGHT = 56
 
-# "Current location" accent bar (UIレビュー 07-25 #7 / #79).  Two tiers: the
+# "Current location" accent bar.  Two tiers: the
 # exact current row is opaque + bold, an ancestor of the current root is a
 # faint bar with normal weight.  Colour comes from the accent token — never a
-# literal (docs/claude/design.md).
+# literal (design-system tokens only).
 _ACCENT_BAR_WIDTH = 3
 _ACCENT_BAR_INSET = 3
 _ANCESTOR_BAR_ALPHA = 90
@@ -111,22 +111,21 @@ def bookmark_label(raw: str, names: dict[str, str]) -> str:
     優先順は「管理ダイアログで付けた表示名 → フォルダ名 → 生パス」。追加時
     （``ViewerWindow._add_current_bookmark``）は表示名を持たないので、生パスの
     ままだとレールの狭い列に ``D:\\lib\\creator\\2024-05-01_Title`` が省略記号
-    付きで並ぶ（保存した検索は無題の既定名を持つのに、ブックマークだけ素通し
-    だった — N-126）。同名フォルダが並ぶ場合はツールチップのフルパスで
+    付きで並ぶ（保存した検索は無題の既定名を持つので、ブックマークも揃える）。同名フォルダが並ぶ場合はツールチップのフルパスで
     区別する。ドライブ直下（``Path("D:/").name == ""``）は生パスへ戻す。
     """
     return names.get(raw) or Path(raw).name or raw
 
 
 class _RailItemDelegate(QStyledItemDelegate):
-    """Paints the rail's "current location" emphasis (UIレビュー 07-25 #7).
+    """Paints the rail's "current location" emphasis.
 
-    The list's *selection* is now purely a keyboard cursor; where the user
+    The list's *selection* is purely a keyboard cursor; where the user
     actually **is** is drawn by this delegate from the owning section's
     ``current_payload`` / ``ancestor_payload``, so ↑↓ cannot desynchronise the
     two.  Tier 1 (current) = bold + opaque accent bar; tier 2 (ancestor of the
     current root, i.e. the library we drilled down from) = faint accent bar
-    only (UIレビュー 07-25 #79).
+    only.
     """
 
     def __init__(self, section: "_RailSection") -> None:
@@ -165,7 +164,7 @@ class _RailItemDelegate(QStyledItemDelegate):
         painter.restore()
 
     def _paint_with_count(self, painter, option, index, text: str) -> None:
-        """本文 + 右端の淡色な数（N-120）.
+        """本文 + 右端の淡色な数.
 
         本文は**スタイルに描かせる**（``CE_ItemViewItem``）。自前で
         ``SE_ItemViewItemText`` の矩形へ直接描いていたころは、スタイルが本文を
@@ -213,7 +212,7 @@ class _RailItemDelegate(QStyledItemDelegate):
 class _RailList(QListWidget):
     """レール節のリスト — ←→ をウィンドウの ←→ ショートカットに渡さない。
 
-    UIレビュー 2026-08-28 N-90: ウィンドウレベルの ←→ は
+    ウィンドウレベルの ←→ は
     ``main_window._step_or_navigate`` へ入り、「最大化中か / フォーカスが
     中央ペイン配下か」以外はすべて **無条件で左グリッドの選択を動かす**。
     そのためレールにフォーカスがある状態で ←→ を押すと、見てもいないグリッド
@@ -243,7 +242,7 @@ class _RailSection(QWidget):
     caller wires :attr:`item_clicked` (payload of the clicked *or* keyboard-
     activated row) and the header's ``⋯`` overflow (:attr:`manage_clicked`).
 
-    *manage_tooltip* names the dialog the ``⋯`` opens (UIレビュー 07-25 #79);
+    *manage_tooltip* names the dialog the ``⋯`` opens;
     passing ``None`` omits the overflow button entirely (a section with nothing
     to manage).
     """
@@ -260,11 +259,11 @@ class _RailSection(QWidget):
     ) -> None:
         super().__init__(parent)
         # Payloads driving the delegate's two-tier "current location" paint
-        # (UIレビュー 07-25 #7/#79) — deliberately *not* the list selection.
+        # — deliberately *not* the list selection.
         self._current_payload: object = None
         self._ancestor_payload: object = None
         self._last_emit: tuple[object, float] = (None, 0.0)
-        # 直近に流し込んだ行（``set_items`` の同内容 no-op 判定用 — 追修 #7）。
+        # 直近に流し込んだ行（``set_items`` の同内容 no-op 判定用）。
         # ``None`` = 未投入（初回は空リストでも必ず適用してヒント面へ切り替える）。
         self._rows: list[_Row] | None = None
         #: 直近の ``show_count``（同内容 no-op 判定に含める — バッジだけを
@@ -277,11 +276,11 @@ class _RailSection(QWidget):
 
         self._header = PanelHeader(title)
         if manage_tooltip is not None:
-            # (UIレビュー 08-28 N-24) 歯車であって ⋯ ではない — このボタンは
+            # 歯車であって ⋯ ではない — このボタンは
             # メニューですらなく管理ダイアログを開く**単一アクション**なので、
             # 「⋯ = そのペインの表示オプション」という図像の意味を借りない。
-            # (UIレビュー 07-25 #79) 右一覧の ⋯ にはあるツールチップが
-            # レールだけ無かった — どのダイアログが開くかを名指しする。
+            # 右一覧の ⋯ と同じく、どのダイアログが開くかをツールチップで
+            # 名指しする。
             manage = self._header.action_button("settings")
             manage.setToolTip(manage_tooltip)
             manage.clicked.connect(self.manage_clicked)
@@ -294,9 +293,9 @@ class _RailSection(QWidget):
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._list.setItemDelegate(_RailItemDelegate(self))
         self._list.itemClicked.connect(self._on_item_clicked)
-        # (UIレビュー 07-25 #7) Enter / ダブルクリックの双方が発火する
-        # itemActivated をクリックと同じスロットへ — レールは Tab で到達
-        # できるのにキーボードでは開けない袋小路だった。
+        # Enter / ダブルクリックの双方が発火する itemActivated をクリックと
+        # 同じスロットへ — さもないとレールは Tab で到達できるのにキーボード
+        # では開けない袋小路になる。
         self._list.itemActivated.connect(self._on_item_clicked)
         self._stack, self._empty_label = empty_state_stack(self._list)
         self._empty_label.setText(empty_hint)
@@ -314,8 +313,8 @@ class _RailSection(QWidget):
 
         *count* (``None`` for every section but キュレーション) is painted by
         :class:`_RailItemDelegate` at the row's right edge in ``text_muted`` —
-        the same 右寄せ muted 書式 the other sections' header badges use
-        (N-120)。件数を行タプルに**含める**こと: 下の no-op ガードはタプルの
+        the same 右寄せ muted 書式 the other sections' header badges use.
+        件数を行タプルに**含める**こと: 下の no-op ガードはタプルの
         同値比較なので、外に出すと件数だけの変化が黙って捨てられる。
 
         An empty *rows* shows the section's hint label instead of a bare list.
@@ -324,14 +323,14 @@ class _RailSection(QWidget):
         selection-based highlight it survives a repopulate untouched.
 
         *show_count* ``False`` suppresses the header badge for a section whose
-        row count carries no information (UIレビュー 2026-08-28 N-117): the
+        row count carries no information: the
         キュレーション section's rows are a fixed menu of destinations, so its
-        badge was the constant 「2」 sitting in a column of numbers that vary
+        badge would be the constant 「2」 sitting in a column of numbers that vary
         everywhere else — read as 「★を 2 件付けている」.  The badge contract
-        itself (「行数を映す」) is unchanged for every other section; those rows
+        itself (「行数を映す」) holds for every other section; those rows
         carry their own real counts in the label instead.
 
-        **内容が同じ呼び出しは no-op** (UIレビュー07-25 追修 #7): ホストは
+        **内容が同じ呼び出しは no-op**: ホストは
         グリッド再構築のたび（= 背景スキャンが着地するたび / 絞り込み 1 文字
         ごと）に ``set_curation`` 等を呼び直すが、``clear()`` + 再生成は
         キーボードカーソル（current item）を落とす — Tab で入って ↑↓ を
@@ -378,8 +377,8 @@ class _RailSection(QWidget):
         """Mark the "current location" row (and optionally its ancestor).
 
         Purely a *painted* state (see :class:`_RailItemDelegate`) — the list's
-        selection stays a free keyboard cursor, so ↑↓ can no longer break the
-        current-location indicator (UIレビュー 07-25 #7).  ``None`` for both
+        selection stays a free keyboard cursor, so ↑↓ cannot break the
+        current-location indicator.  ``None`` for both
         means "nothing here is current".
         """
         if (current, ancestor) == (self._current_payload, self._ancestor_payload):
@@ -403,8 +402,13 @@ class _RailSection(QWidget):
         self._list.clearSelection()
         self._list.setCurrentItem(None)
 
+    @property
+    def header(self) -> PanelHeader:
+        """この節の見出し（フォーカス帯の点灯先）。"""
+        return self._header
+
     def focus_list(self) -> bool:
-        """行があればリストへフォーカスを移す（Alt+1 — N-28）。
+        """行があればリストへフォーカスを移す（Alt+1）。
 
         空の節はヒントラベルに差し替わっていてキーの行き先が無いので False を
         返し、呼び出し側が次の節を試せるようにする。
@@ -412,8 +416,8 @@ class _RailSection(QWidget):
         if self._list.count() == 0:
             return False
         self._list.setFocus(Qt.ShortcutFocusReason)
-        if self._list.currentItem() is None:
-            self._list.setCurrentRow(0)
+        # focusIn が選択なしで current を立てるので、選択で行カーソルを見せる。
+        self._list.setCurrentRow(max(self._list.currentRow(), 0))
         return True
 
     # -------------------------------------------------------------- internals
@@ -421,7 +425,7 @@ class _RailSection(QWidget):
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         payload = item.data(_PAYLOAD_ROLE)
         # A double-click delivers itemClicked *and* itemActivated; collapse the
-        # pair into one navigation (UIレビュー 07-25 #7).
+        # pair into one navigation.
         last_payload, last_at = self._last_emit
         now = time.monotonic()
         if last_payload == payload and now - last_at < _ACTIVATE_DEDUPE_S:
@@ -469,8 +473,8 @@ class NavRail(QWidget):
         self._libraries.manage_clicked.connect(self.manage_libraries)
         layout.addWidget(self._libraries)
 
-        # (UIレビュー 07-25 #57) 横断キュレーション一覧はブックマークメニューの
-        # 奥にしか無かった — ライブラリと同格の「行き先」としてレールに常設する。
+        # 横断キュレーション一覧は、ライブラリと同格の「行き先」としてレールに
+        # 常設する（メニューの奥だけに置かない）。
         # 管理ダイアログを持たないセクションなので ⋯ は出さない。
         self._curation = _RailSection(
             t("viewer.nav_rail.section_curation"),
@@ -504,6 +508,18 @@ class NavRail(QWidget):
 
     # ------------------------------------------------------------------ API
 
+    def focus_band_targets(self) -> list[tuple[QWidget, PanelHeader]]:
+        """フォーカス帯の ``(節, 見出し)`` — 4 節それぞれが自分の見出しを灯す。"""
+        return [
+            (section, section.header)
+            for section in (
+                self._libraries,
+                self._curation,
+                self._bookmarks,
+                self._searches,
+            )
+        ]
+
     def set_libraries(
         self, bases: list[tuple[Path, str]], current_root: Path | None
     ) -> None:
@@ -523,7 +539,7 @@ class NavRail(QWidget):
     def set_current_root(self, root: Path | None) -> None:
         """Mark the library row for *root* — exact match, else its ancestor.
 
-        Two tiers (UIレビュー 07-25 #7 / #79): the row equal to *root* is the
+        Two tiers: the row equal to *root* is the
         strong "current" paint, and — when the user has drilled below a
         library — the enclosing library keeps a faint bar instead of the rail
         going blank.  Pure path arithmetic (no disk access).
@@ -564,7 +580,7 @@ class NavRail(QWidget):
         *,
         reason: str | None = None,
     ) -> None:
-        """Populate the キュレーション section (UIレビュー 07-25 #57).
+        """Populate the キュレーション section.
 
         *available* mirrors "a user-curation store is wired" (read-only volumes
         have none) — without it there is nothing to list, so the section falls
@@ -574,60 +590,46 @@ class NavRail(QWidget):
         与えられた（かつ *available* が False の）ときだけ空文言を**保存でき
         ない**旨へ差し替える — 既定の「スターや「あとで見る」を付けると一覧
         できます」は保存できる前提の案内なので、開けない環境では誤案内に
-        なっていた（N-128）。例外メッセージそのものはここへ出さない（定型文
+        なる。例外メッセージそのものはここへ出さない（定型文
         のみ。詳細は起動時の警告トースト）。
 
         *counts* maps each row's payload (``"starred"`` / ``"later"`` /
         ``"tag:<名前>"``) to **how many entries the user has marked**, shown after
-        the row label (UIレビュー 2026-08-28 N-117).  The host reads them off its
+        the row label.  The host reads them off its
         in-memory curation map, so this costs no I/O; it is deliberately
         「印を付けた件数」 and not 「一覧に並ぶ件数」, which can be smaller when
-        entries have moved, gone, or become unreachable (N-09).
+        entries have moved, gone, or become unreachable.
 
-        *user_tags* adds one row per distinct ユーザータグ (N-71) — the third
-        curation axis, which until now had no cross-library way out at all.
+        *user_tags* adds one row per distinct ユーザータグ — the third
+        curation axis, with its own cross-library way in.
         """
         rows: list[_Row] = []
         if available:
             counts = counts or {}
-            rows = [
-                self._curation_row(
-                    "starred",
-                    t("viewer.main_window.curation_starred_list"),
-                    t("viewer.main_window.curation_starred_list_hint"),
-                    counts,
-                ),
-                self._curation_row(
-                    "later",
-                    t("viewer.main_window.curation_later_list"),
-                    t("viewer.main_window.curation_later_list_hint"),
-                    counts,
-                ),
-            ]
-            for tag in user_tags or []:
+            # 行の列挙・表示名・補足はすべて軸台帳（``CurationList``）から引く
+            # — 台帳に軸を足せばレールにも行が出る（編集メニューと同じ列）。
+            for kind in CurationList.kinds(user_tags or ()):
+                view = CurationList.from_kind(kind)
+                if view is None:
+                    continue
                 rows.append(
-                    self._curation_row(
-                        f"tag:{tag}",
-                        t("viewer.main_window.curation_tag_list", tag=tag),
-                        t("viewer.main_window.curation_tag_list_hint", tag=tag),
-                        counts,
-                    )
+                    self._curation_row(kind, view.label(), view.hint(), counts)
                 )
         self._curation.set_empty_text(
             t("viewer.nav_rail.empty_curation_unavailable")
             if (not available and reason)
             else t("viewer.nav_rail.empty_curation")
         )
-        # バッジは出さない (N-117) — この節の行数は「行き先の数」であって印の数
-        # ではないので、変動する他 3 節の数字の列に定数が混ざって誤読させていた。
-        # 実件数は各行が専用ロールで持つ（N-120）。
+        # バッジは出さない — この節の行数は「行き先の数」であって印の数
+        # ではないので、変動する他 3 節の数字の列に定数が混ざると誤読させる。
+        # 実件数は各行が専用ロールで持つ。
         self._curation.set_items(rows, show_count=False)
 
     @staticmethod
     def _curation_row(
         payload: str, label: str, hint: str, counts: dict[str, int],
     ) -> _Row:
-        """One キュレーション row with its 「印を付けた件数」 (N-117 / N-120).
+        """One キュレーション row with its 「印を付けた件数」.
 
         件数はラベル文字列ではなく専用ロールへ載せる（デリゲートが右端に
         ``text_muted`` で描く = 他 3 節のヘッダー件数と同じ書式）。タプルに
@@ -648,9 +650,8 @@ class NavRail(QWidget):
     def set_current_curation(self, kind: str | None) -> None:
         """Mark the active cross-library curation view.
 
-        *kind* is ``"starred"`` / ``"later"`` / ``"tag:<名前>"`` (N-71) or
-        ``None``.  Same "current location" paint as the library row (UIレビュー
-        07-25 #7) so the rail tells the truth about which横断ビュー is showing.
+        *kind* is ``"starred"`` / ``"later"`` / ``"tag:<名前>"`` or
+        ``None``.  Same "current location" paint as the library row so the rail tells the truth about which横断ビュー is showing.
         現在地はレール全体で 1 つ — 一覧の表示中はライブラリ行の強調を祖先へ
         落とす（:meth:`_apply_library_emphasis`）。
         """
@@ -674,7 +675,7 @@ class NavRail(QWidget):
 
         *tooltips* (same order / length as *searches*) is the hover text the
         window builds from each payload — the条件サマリ + 「現在のフォルダを起点に
-        適用」 line (UIレビュー 07-25 #34).  Omitted / short lists fall back to the
+        適用」 line.  Omitted / short lists fall back to the
         row's name, keeping the rail a dumb view that never inspects a payload.
         """
         rows: list[_Row] = []
@@ -687,11 +688,11 @@ class NavRail(QWidget):
         self._searches.set_items(rows)
 
     def focus_first_row(self) -> None:
-        """Alt+1 の着地点 — 中身のある最初の節のリストへフォーカスする (N-28).
+        """Alt+1 の着地点 — 中身のある最初の節のリストへフォーカスする.
 
         全節が空（登録ライブラリも保存も無い新規環境）なら、レール内で最初に
         フォーカスを受けられる部品（節見出しの ``⋯``）へ落とす: 何も起きない
-        より、フォーカス枠（N-26 案B）が左席に出て「ここに居る」ことが伝わる
+        より、フォーカス帯が左席の節見出しに出て「ここに居る」ことが伝わる
         ほうがよい。``NavRail`` 自身は ``NoFocus`` のまま（Tab 巡回の席は
         ``main_window._tab_stops`` が子へ展開する規約を崩さない）。
         """
@@ -712,7 +713,7 @@ class NavRail(QWidget):
         # 不変条件）。クリック由来の**選択ハイライト**も落とす — 落とさないと、
         # ライブラリ行を踏んだあとに横断一覧へ入ったとき、強調を祖先へ下げた
         # ライブラリ行が選択ハイライトのまま点灯し続け、キュレーション行と
-        # 併せて現在地が 2 箇所光る（UIレビュー 2026-08-28 N-90）。実際の
+        # 併せて現在地が 2 箇所光る。実際の
         # 現在地は payload 由来の描画（``set_current_root``）が担う。
         self._libraries.clear_selection()
         if isinstance(payload, str):
@@ -721,7 +722,7 @@ class NavRail(QWidget):
     def _on_curation_clicked(self, payload: object) -> None:
         # 横断ビューは「現在地」なので選択は落とすが、
         # ``set_current_curation`` の描画（ホストが実際に入場した後に呼ぶ）
-        # で点灯し続ける (UIレビュー 07-25 #57)。
+        # で点灯し続ける。
         self._curation.clear_selection()
         if isinstance(payload, str):
             self.open_curation.emit(payload)

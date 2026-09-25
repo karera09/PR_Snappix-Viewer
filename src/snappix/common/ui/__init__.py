@@ -1,7 +1,7 @@
 """Shared UI design system for the snappix GUI tools (viewer and plugin windows).
 
-Single source of truth for colours, typography and widget styling.  See
-docs/claude/design.md for the full design policy.
+Single source of truth for colours, typography and widget styling: callers
+take colours and font sizes from these tokens instead of hard-coding them.
 
 Public API:
 
@@ -39,6 +39,9 @@ editing it):
   theme switch without the widget re-applying them.
 - :func:`show_toast` — non-modal corner notification (success / status
   feedback; see the design policy's modal-vs-non-modal principle).
+- ``file_picker`` — the file / folder picker (``pick_directory`` /
+  ``pick_open_file`` / ``pick_save_file``); ``QFileDialog`` is not used
+  anywhere because it writes the per-user ``QtProject`` settings store.
 - :class:`OverlayCapsule` / :class:`OverlayPill` — bases for chrome drawn on
   top of image content (fixed overlay palette + styled background + parent
   clamp + auto-hide); colours live in ``overlay.py``.
@@ -71,7 +74,7 @@ from .buttons import (
     warn_modal,
 )
 from .elided_label import ElidedLabel
-from .focus_ring import PaneFocusRings
+from .focus_band import FocusBandMixin, FocusBandTarget, PaneFocusBands
 from .icons import (
     fixed_icon,
     fixed_pixmap,
@@ -87,7 +90,13 @@ from .notifications import (
     notification_center_for,
 )
 from .overlay_chrome import OverlayCapsule, OverlayPill
-from .qss import chip_style, hairline_style, hint_style, register_qss_fragment
+from .qss import (
+    caption_size_style,
+    chip_style,
+    hairline_style,
+    hint_style,
+    register_qss_fragment,
+)
 from .popover import popover_position
 from .theme import apply_theme, current_tokens, register_theme, resolve_tokens
 from .toast import Toast, show_toast
@@ -103,6 +112,10 @@ from .window_geometry import (
     center_on_primary,
     frame_intersects_any_screen,
 )
+from . import file_picker_catalog as _file_picker_catalog
+
+# The picker module carries no catalog of its own (see file_picker_catalog).
+_file_picker_catalog.install()
 
 __all__ = [
     "fixed_icon",
@@ -146,6 +159,7 @@ __all__ = [
     "OverlayPill",
     "PanelHeader",
     "hint_style",
+    "caption_size_style",
     "indent_to_form_column",
     "localize_buttons",
     "localize_input_dialog",
@@ -159,5 +173,7 @@ __all__ = [
     "NotificationCenter",
     "NotificationRecord",
     "notification_center_for",
-    "PaneFocusRings",
+    "FocusBandMixin",
+    "FocusBandTarget",
+    "PaneFocusBands",
 ]

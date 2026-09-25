@@ -192,9 +192,11 @@ def label_intent(
         # 「プレビューを大きく」。最大化中 / 全画面では従来どおりフィット ⇄
         # 実寸をカーソル基準で切り替える。GIF はダブルクリックが再生トグルに
         # 化けるので**ズーム**の切り替えだけ静止画に限るが、最大化は分割
-        # ビューの主要なマウス導線なのでアニメーションでも先に判定する
-        # （再生トグルに先を譲ると、押下 → 離しで 2 回走って「何も起きない」
-        # ように見える）。
+        # ビューの主要なマウス導線なのでアニメーションでも先に判定する。
+        # 1 回目の Release（押下はここへ来る前に DblClick へ置き換わるので
+        # トグルはその 1 回だけ）が切り替えた再生状態は、最大化の実行側
+        # （``ImageView.eventFilter`` → ``MoviePlayback.undo_release_toggle``）が
+        # 打ち消す。
         return Maximize() if double_click_maximize else ToggleZoomAt()
     if (
         etype == QEvent.Type.MouseMove

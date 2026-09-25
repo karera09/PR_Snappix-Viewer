@@ -1,28 +1,26 @@
-"""条件次元レジストリ（UIレビュー 2026-08-28 提案2 第1段）.
+"""条件次元レジストリ.
 
 検索・絞り込みの 1 つの条件軸（種別・年齢区分・★・精度・検索範囲など）の
 知識 — 正式名・中立値・永続性・検索欄トークン接頭辞・保存ペイロードの
-キー・チップ書式 — は、従来 条件チップ（``PostGrid._view_dimensions``）/
+キー・チップ書式 — を条件チップ（``PostGrid._view_dimensions``）/
 構文ヘルプ HTML / 検索要約（``describe_search_payload``）/ コンボ構築 に
-手書きで複製されており、片側欠落（N-06 / N-30 / N-31 / N-99 …）の温床に
-なっていた。本モジュールは **1 軸 = 1 行の台帳**として、表示系 3 面
+手書きで複製すると片側欠落の温床になる。本モジュールは **1 軸 = 1 行の台帳**として、表示系 3 面
 （条件チップ・構文ヘルプ・検索要約）とコンボ選択肢の単一情報源になる。
 
 Qt 非依存の純データ + 関数（依存は ``common.i18n.t`` のみ）で、単体テスト
 は ``tests/test_viewer_search_dimensions.py``。
 
-**第3段（``filter_query`` トークン統合）**: :data:`TOKEN_FIELDS` が
+**``filter_query`` トークン統合**: :data:`TOKEN_FIELDS` が
 ``match`` / ``source`` 列を持ち、``filter_query`` のフィールド表
 （``_FILTER_FIELD_GETTERS`` / ``_NUMERIC_FIELDS`` / ``_CURATION_FIELDS`` /
 ``_CONTROL_FIELDS``）は**この台帳から導出**される
 （``filter_query._rebuild_field_tables`` — モジュールロード時に 1 回組み
-立て、パース毎の走査は増やさない）。第1段の「集合一致」テストは「同一
-ソースからの導出」に置き換わり、補完・ヘルプ・パーサの対象がずれることは
-構造的に起きない（台帳へ 1 行足すと全面に現れる — 受け入れテストあり）。
+立て、パース毎の走査は増やさない）。「同一ソースからの導出」なので、
+補完・ヘルプ・パーサの対象がずれることは構造的に起きない（台帳へ 1 行足すと全面に現れる — 受け入れテストあり）。
 
-**第2段（2026-08-28 提案2）**: フィルターポップオーバーの行そのものを台帳
+**フィルターポップオーバー**: ポップオーバーの行そのものを台帳
 から生成する。1 行 = 1 軸で、ラベル・エディタ種別・ウィジェット属性名・
-選択肢の出所・ツールチップ（AI 可用性で出し分け — N-51）を宣言し、
+選択肢の出所・ツールチップ（AI 可用性で出し分け）を宣言し、
 ``PostGrid._build_filter_popover`` は :func:`filter_rows` を列挙するだけに
 なる。行の順序は :data:`FILTER_POPOVER_ROWS`（チップ順 = ``DIMENSIONS``
 の順とは別物なので独立して宣言する）。
@@ -41,12 +39,12 @@ Qt 非依存の純データ + 関数（依存は ``common.i18n.t`` のみ）で�
   「分野を限定」「コントロール」表と接頭辞補完が共有する）。
 * :func:`chip_text` — 条件チップ / 検索要約の共通書式チョークポイント。
   書式の統一（「ラベル: 値」）は ``chip_form`` 列で宣言し、テストが
-  テンプレートの形を機械検証する（N-31 / N-99 の書式ドリフト再発防止）。
+  テンプレートの形を機械検証する（軸ごとの書式ドリフトを防ぐ）。
 * :func:`token_expression` — 「この条件を構文で書くと」の等価表現。
   ``token_prefix`` + ``token_form`` から組むので、AI ポップオーバーの
-  共有条件プレビューと検索欄の構文が同じ台帳を情報源にする（提案2 第2段
-  — 07-25 #41 の二重存在を「重複コントロール」から「読み取り専用の共有
-  条件表示」へ置き換えるための土台）。
+  共有条件プレビューと検索欄の構文が同じ台帳を情報源にする（両面に
+  またがる条件を「重複コントロール」ではなく「読み取り専用の共有
+  条件表示」で見せるための土台）。
 """
 
 from __future__ import annotations
@@ -58,7 +56,7 @@ from ..common.i18n import t
 
 #: AIタグ精度（しきい値）の製品既定値。``state.ViewerState`` の初期値・
 #: ``AiQuery`` の初期値・精度チップの engaged 判定（既定値の
-#: ままなら「条件」ではない — N-31）が全てここを参照する（0.35 の手書き
+#: ままなら「条件」ではない）が全てここを参照する（0.35 の手書き
 #: 複製を残さない）。
 DEFAULT_TAG_THRESHOLD = 0.35
 
@@ -80,16 +78,17 @@ class SearchDimension:
       その表示ラベルキー。
     * ``persistent`` — 起動時に前セッションの値が**復元**されるか
       （書き込みはされるが起動時に中立へ落とす軸 — 投稿日・年齢区分
-      (N-06) — は False。セッション内の履歴スナップショットは別経路で
+      — は False。セッション内の履歴スナップショットは別経路で
       全軸を往復する）。``restore_tag_settings`` の実挙動との一致は
-      ``tests/test_viewer_search_dimensions.py`` が突き合わせる（項目 #249
-      — 宣言だけあって誰も検証していない飾りの列にしない）。
+      ``tests/test_viewer_search_dimensions.py`` が突き合わせる（宣言だけ
+      あって誰も検証していない飾りの列にしない）。
     * ``token_prefix`` — 検索欄の等価トークン（``type:`` 等、あれば）。
     * ``payload_keys`` — 保存ペイロード（SearchSnapshot / ViewerState）の
       キー（表示単位のように 2 キーへ写像される軸があるため tuple）。
-      引くのは :func:`payload_key`（``describe_search_payload`` が使う）で、
+      引くのは :func:`payload_key`（保存検索の要約の入口
+      ``condition_chips.state_from_payload`` が使う）で、
       ``serialize_search_snapshot`` の実キー集合に含まれることをテストが
-      機械検証する（項目 #249）。
+      機械検証する。
     * ``owner`` — ``"ai"`` は AI パック有効時のみ存在する軸。
     * ``value_keys`` — コンボ軸の (保存値, 表示ラベルキー) 列。コンボの
       選択肢順そのもの（:func:`combo_items`）。
@@ -110,15 +109,15 @@ class SearchDimension:
       ``"star"`` =「すべて + ★N以上」（保存値が int の例外形）、
       ``"user_tags"`` = ストアの現在値で実行時に詰め直す。
     * ``tooltip_key`` / ``tooltip_free_key`` — ツールチップ。``_free`` 側が
-      あれば AI パック無効時にそちらを使う（N-51 — 素の配布で存在しない
+      あれば AI パック無効時にそちらを使う（素の配布で存在しない
       AI 検索の使用を指示しない。二本立ての規約を台帳の列にした）。
     * ``needs_user_meta`` — ``user_meta`` ストアがあるときだけ出す行
       （無いとキュレーションは常に空の map への絞り込みになる）。
     * ``token_form`` — :func:`token_expression` が組む値の形。``"value"``
       （そのまま / ``token_values`` で読み替え）/ ``"floor"``（``>=N``）/
       ``"flag"``（``yes``）。``None`` = 構文で等価に書けない軸（構文
-      プレビューに出さない）。``mytags:`` は N-65（第3段）でコンボと同期
-      するようになった — コンボ値（既存タグそのもの）は必ず完全一致で
+      プレビューに出さない）。``mytags:`` はコンボと同期
+      する — コンボ値（既存タグそのもの）は必ず完全一致で
       同期できるので ``"value"`` で等価に書ける。
     * ``token_values`` — 保存値 → トークン値の読み替え（``rating`` の
       ``sfw`` → ``r15`` など、:func:`token_expression` が書く正準形）。
@@ -131,8 +130,7 @@ class SearchDimension:
       選択肢を 1 行足したときに「コンボと構文プレビューは出すのにパーサは
       知らないトークン」が生まれない。
 
-    書き込み面（リセット導線）を台帳から導くための列（レビュー 2026-09-03
-    項目 #89）:
+    書き込み面（リセット導線）を台帳から導くための列:
 
     * ``panel_reset`` — AI パネルの「詳細条件のみリセット」
       (:meth:`~.advanced_search.AdvancedSearchController._on_reset_advanced_only`)
@@ -170,7 +168,7 @@ class SearchDimension:
 
 
 #: メディア種別の選択肢（フィルターバーの「種別」と AI 検索の「対象種別」が
-#: 同じ 6 択を共有する — 07-25 #41 の二重存在は残るが、選択肢はここ 1 箇所）。
+#: 同じ 6 択を共有する — 軸は 2 面にあるが、選択肢はここ 1 箇所）。
 _MEDIA_VALUE_KEYS: tuple[tuple[str, str], ...] = (
     ("all", "common.filter.all"),
     ("image", "common.media_type.image"),
@@ -232,8 +230,7 @@ DIMENSIONS: tuple[SearchDimension, ...] = (
         panel_reset=True,
     ),
     # チップの語「種別(再帰)」とフォームラベル「対象種別 (AI 検索)」の呼び分け
-    # は 07-25 #41 の判断を維持 — 台帳上は custom として宣言（第2段の
-    # フィルター行生成で調停する候補）。
+    # は意図的 — 台帳上は custom として宣言する。
     SearchDimension(
         id="ai_media",
         label_key="viewer.advanced_search.media_type_label",
@@ -247,10 +244,10 @@ DIMENSIONS: tuple[SearchDimension, ...] = (
         value_keys=_MEDIA_VALUE_KEYS,
         panel_reset=True,
     ),
-    # 年齢区分 — 保存はされるが起動時は "all" へ落とす（N-06 案B。投稿日と
+    # 年齢区分 — 保存はされるが起動時は "all" へ落とす（投稿日と
     # 同型の「検索は揮発・設定は永続」）。
     # 年齢区分は AI ポップオーバーではなく**フィルターポップオーバー**の行
-    # （提案2 第2段 — AI 側の重複軸整理）。owner="ai" なので素の配布では
+    # （AI 側に重複軸を持たない）。owner="ai" なので素の配布では
     # 行ごと出ない（ウィジェットは inert に存在する — advanced_search.py）。
     SearchDimension(
         id="rating",
@@ -296,7 +293,7 @@ DIMENSIONS: tuple[SearchDimension, ...] = (
         editor="combo",
         widget_attr="filterbar_media_combo",
         tooltip_key="viewer.post_grid.filterbar_media_tooltip",
-        # N-51: 素の配布に AI 検索は存在しないので、再帰の代替導線も違う。
+        # 素の配布に AI 検索は存在しないので、再帰の代替導線も違う。
         tooltip_free_key="viewer.post_grid.filterbar_media_tooltip_free",
         token_form="value",
         # 入力の語彙 → 保存値（正準値そのものは ``value_keys`` から導出）。
@@ -328,7 +325,7 @@ DIMENSIONS: tuple[SearchDimension, ...] = (
         token_form="floor",
     ),
     # 「あとで見る」は動詞（付ける）と条件（付いたものだけ）で別の語にする —
-    # ``locked`` が「ロックありのみ」で先に採っている形（N-115）。
+    # ``locked`` が「ロックありのみ」で採っている形。
     SearchDimension(
         id="later",
         label_key="viewer.post_grid.filterbar_later_label",
@@ -355,7 +352,7 @@ DIMENSIONS: tuple[SearchDimension, ...] = (
         combo_source="user_tags",
         tooltip_key="viewer.post_grid.filterbar_usertag_tooltip",
         needs_user_meta=True,
-        # N-65（第3段）: ``mytags:値`` は既存タグと casefold 完全一致する
+        # ``mytags:値`` は既存タグと casefold 完全一致する
         # ときだけコンボへ同期する（star:>=N と同じ「表現可能なときだけ
         # 同期」の規約 — post_grid._syncable_curation_value）。コンボ値は
         # 定義上その完全一致形なので、構文プレビューは等価に書ける。
@@ -392,9 +389,8 @@ DIMENSIONS: tuple[SearchDimension, ...] = (
         widget_attr="locked_check",
         tooltip_key="viewer.post_grid.locked_only_tooltip",
     ),
-    # 検索範囲 — フィルターポップオーバーの先頭行（UIレビュー 2026-09-11 E3:
-    # 旧「検索オプション」ポップオーバーの唯一の軸だったが、条件次元として
-    # ここに載った以上、別 UI に置く理由が無い — N-26 / N-124）。
+    # 検索範囲 — フィルターポップオーバーの先頭行（条件次元として
+    # ここに載っている以上、別 UI に置く理由が無い）。
     SearchDimension(
         id="recursive",
         label_key="viewer.post_grid.recursive_check",
@@ -422,7 +418,7 @@ _BY_ID: dict[str, SearchDimension] = {dim.id: dim for dim in DIMENSIONS}
 #: ``DIMENSIONS`` の順はチップ順なので、席の順序はここで独立に宣言する。
 #: 年齢区分は AI パック有効時のみ（``owner="ai"`` を :func:`filter_rows` が
 #: 落とす）、★ / あとで見る / ユーザータグは ``user_meta`` ストアがあるとき
-#: のみ。「あとで見る」は N-99 の裁定で★と同居せず独立行。
+#: のみ。「あとで見る」は★と同居せず独立行。
 FILTER_POPOVER_ROWS: tuple[str, ...] = (
     "recursive", "media", "rating", "date", "star", "later", "usertag", "locked",
 )
@@ -508,12 +504,11 @@ def get(dim_id: str) -> SearchDimension | None:
 def payload_key(dim_id: str, index: int = 0) -> str:
     """軸の保存ペイロードキー（``SearchSnapshot`` / ``ViewerState`` の項目名）。
 
-    ``payload_keys`` を**実際に消費する**唯一の口。これが無かったころ、保存
-    ペイロード面だけが台帳を迂回して ``data.get("filterbar_media", …)`` の
-    手書きリテラルで書かれており、台帳側の列は誰にも読まない飾りだった
-    （レビュー 2026-09-03 項目 #249）。飾りのままだと「新しい軸を足す人が
+    ``payload_keys`` を**実際に消費する**唯一の口。保存ペイロード面が台帳を
+    迂回して ``data.get("filterbar_media", …)`` の手書きリテラルで書かれると
+    台帳側の列は誰も読まない飾りになり、「新しい軸を足す人が
     ``payload_keys`` を書いて満足し、要約側への追加を忘れる」= 保存した検索の
-    条件要約から軸が丸ごと欠ける（項目 #164 と同型）を誘発する。
+    条件要約から軸が丸ごと欠ける、を誘発する。
 
     *index* は表示単位のように 1 軸が 2 キーへ写像される場合の位置。
     """
@@ -538,7 +533,7 @@ def label(dim_id: str) -> str:
 def form_label(dim_id: str) -> str:
     """フォーム行の先頭ラベル（正式名 + ASCII コロン）.
 
-    N-99: 2 面で「コロンあり 4 / なし 3」に割れていた。正式名は
+    面ごとにコロンの有無が割れないように、正式名は
     :func:`label` が末尾コロンを剥がしたものなので、ここで**必ず 1 つ**
     足す — カタログ値のコロン有無に関わらず書式が揃う（半角/全角の
     混在も起こせない）。
@@ -553,8 +548,8 @@ def chip_text(dim_id: str, **params) -> str:
 
     書式そのもの（「ラベル: 値」）は i18n テンプレートに残す（翻訳可能・
     既存キー互換）が、**全チップがここを通る**ことと ``chip_form`` の宣言
-    をテストが機械検証することで、軸ごとの書式ドリフト（N-31 の
-    「精度0.35」だけコロン無し等）を再発不能にする。
+    をテストが機械検証することで、軸ごとの書式ドリフト（「精度0.35」
+    だけコロン無し等）を起こせなくする。
     """
     dim = _BY_ID[dim_id]
     if dim.chip_key is None:  # pragma: no cover (ai_semantic は実行時組み立て)
@@ -566,8 +561,7 @@ def value_label(dim_id: str, stored: str) -> str | None:
     """コンボ軸の保存値 → 表示ラベル（中立値・未知値は ``None``）。
 
     「中立値は条件ではない（チップ・要約に載せない）」の判定を兼ねる —
-    ``describe_search_payload`` の旧 ``_MEDIA_LABELS`` 等 3 つの手書き写像を
-    置き換える。
+    ``describe_search_payload`` が手書きの写像を持たずに済むようにする。
     """
     dim = _BY_ID[dim_id]
     if stored == dim.neutral:
@@ -595,7 +589,7 @@ def filter_rows(
     ``needs_user_meta`` の軸（★ / あとで見る / ユーザータグ）を落とす。
     行の有無を決める条件はこの 1 関数だけが持つ — ``_build_filter_popover``
     と「その行が実際に存在するか」を見る側（アクセント同期・状態復元）が
-    別々の条件を書いて食い違う、という第1段以前の形を作らない。
+    別々の条件を書いて食い違う、という形を作らない。
     """
     rows: list[SearchDimension] = []
     for dim_id in FILTER_POPOVER_ROWS:
@@ -611,9 +605,8 @@ def filter_rows(
 def tooltip(dim_id: str, *, ai: bool = True) -> str:
     """軸のツールチップ（AI パック無効時は ``tooltip_free_key`` を優先）.
 
-    N-51: 素の配布に存在しない AI 検索の使用を指示するツールチップが 1 件
-    だけ無条件で出ていた。二本立ての規約を台帳の列にしたので、行の追加時に
-    片側だけ書き忘れることが起きない（``_free`` が無い軸は共通文言）。
+    素の配布に存在しない AI 検索の使用を指示しないための二本立て。規約を
+    台帳の列にしてあるので、行の追加時に片側だけ書き忘れることが起きない（``_free`` が無い軸は共通文言）。
     """
     dim = _BY_ID[dim_id]
     if not ai and dim.tooltip_free_key is not None:
@@ -628,8 +621,8 @@ def token_expression(values: dict[str, object]) -> str:
 
     *values* は ``{軸 id: 現在値}`` — **どの軸を載せるかは呼び出し側が決める**
     （AI ポップオーバーの共有条件プレビューは フィルター側の軸だけを渡す）。
-    中立値・空値・``token_form`` を持たない軸は落とす。``mytags:`` は N-65
-    （第3段）でコンボ完全一致形の同期が入ったので等価に書ける（含める）。
+    中立値・空値・``token_form`` を持たない軸は落とす。``mytags:`` は
+    コンボ完全一致形で同期するので等価に書ける（含める）。
     値が 1 トークンに書けない形（空白入り — ユーザータグは
     ``split_user_tags`` の規約上あり得ないが防御）は落とす。出力順は
     :data:`_TOKEN_EXPRESSION_ORDER`（画面の行順 = 読み手が目で追う順）。
@@ -727,18 +720,18 @@ def filter_help_html(*, ai: bool) -> str:
 
 
 def filter_help_brief_html() -> str:
-    """初回フォーカスで自動表示する**短縮版**の構文ヘルプ（N-116）.
+    """初回フォーカスで自動表示する**短縮版**の構文ヘルプ.
 
     絞り込み欄を初めてクリックしただけで 382×415px の全文パネルが中央
-    グリッドに被さっていた。割り込み感の主因は「毎回出ること」ではなく
+    グリッドに被さると割り込みになる。割り込み感の主因は「毎回出ること」ではなく
     「初回に大きすぎること」なので、**表示済みフラグの永続化ではなく減量**
     で解く（永続化は教示機会を恒久的に失う副作用がある）。
 
     残すのは全モード共通で post.md にも tags.db にも依存しない 3 行
     （AND / ``-除外`` / ``~OR``）だけ。分野限定表・コントロール表・脚注は
     「?」ボタンの :func:`filter_help_html` 側に残り、そこへの誘導と
-    **閉じ方**（Esc または入力）を 1 行ずつ添える — 閉じ方が画面のどこにも
-    書かれていなかったのが指摘の後半。
+    **閉じ方**（Esc または入力）を 1 行ずつ添える — 閉じ方は画面のどこかに
+    書かれていなければならない。
     """
     return (
         t("viewer.post_grid.filter_help_syntax_html")
@@ -751,7 +744,7 @@ def cheatsheet_axis_rows() -> list[tuple[str, str]]:
     """AI 検索チートシートの「軸の行」= (正式名, 説明) — 台帳由来。
 
     軸の名称がチップ・フォームラベルと同じ情報源（:func:`label`）から
-    出ることが要点（N-99 のラベルばらけの再発防止）。表示単位の説明は
+    出ることが要点（ラベルのばらけを防ぐ）。表示単位の説明は
     選択肢列そのものから合成する。
     """
     rows: list[tuple[str, str]] = []
@@ -783,9 +776,8 @@ def cheatsheet_html() -> str:
         + axis_rows
         + t("viewer.advanced_search.cheatsheet_rows_modes")
         + "</table>"
-        # (UIレビュー 2026-08-28 N-148) 2 枚のチートシートは互いを知らない。
-        # AI 側は「投稿タグは絞り込み欄の tags: で」と片方向に参照する一方、
-        # 種別 / 年齢区分 / 精度 が絞り込み欄の type: / rating: / score: と
-        # **等価**であることに一切触れていなかった。
+        # 2 枚のチートシートは互いを知らないので、種別 / 年齢区分 / 精度 が
+        # 絞り込み欄の type: / rating: / score: と**等価**であることを
+        # ここで明示する。
         + t("viewer.advanced_search.cheatsheet_equivalent_tokens")
     )

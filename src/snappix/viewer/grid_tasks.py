@@ -2,14 +2,12 @@
 
 左ペインは 4 種類の重い仕事をワーカースレッドへ出す — ``body:`` 判定 /
 NSFW レーティング解決 / 「最近追加されたファイル」の再帰走査 / 横断一覧の
-可視タイル post.md 後追い解決。以前はそれぞれが ``_XxxSignals(QObject)`` +
-``_XxxTask(QRunnable)`` の対を手書きし、①世代カウンタ ②``CancelToken`` の
+可視タイル post.md 後追い解決。どれも ①世代カウンタ ②``CancelToken`` の
 生成と保持 ③無親ブリッジ ④専用 1 スレッドプール ⑤``shutdown()`` での停止配線
-という同じ 5 点セットを 4 回再現していた（レビュー 2026-09-03 項目 #56）。
-5 点のどれか 1 つが落ちても症状が出るのに、落ちたことを検出する共通の場所が
-無く、実際に curation-meta 側が ②⑤ を落としていた。
+という同じ 5 点セットが要り、5 点のどれか 1 つが落ちても症状が出るのに、
+手書きの複製では落ちたことを検出する共通の場所が無い。
 
-今は Qt 側（世代・キャンセル・プール・シグナル・ドレイン）を
+そこで Qt 側（世代・キャンセル・プール・シグナル・ドレイン）を
 :class:`~._runnable.GuardedStream` が一手に持ち、**このモジュールには「何を
 計算するか」だけ**が残る。どれも GUI スレッドから呼んではならない
 （``os.stat`` / ``post.md`` 読み / sqlite が入る）。
@@ -45,10 +43,10 @@ def body_filter_matches(
     """``body:`` 項を post.md 本文に照合する（GUI スレッド禁止）。
 
     ``body:`` 照合は候補フォルダごとに post.md を読んで解析する — コールドな
-    NAS で子が数百あれば数秒の直列 I/O で、以前は ``_apply_filter_and_sort``
-    のインラインで走り最初の 1 キーストロークで UI が固まっていた。
+    NAS で子が数百あれば数秒の直列 I/O で、``_apply_filter_and_sort`` の
+    インラインで走らせると最初の 1 キーストロークで UI が固まる。
 
-    返すのは ``(and_matched, or_matched)`` のパス文字列集合の対 (#4):
+    返すのは ``(and_matched, or_matched)`` のパス文字列集合の対:
     *and_matched* は ``~`` の付かない全 body 項を満たすエントリ（include は
     在り / exclude は無し — 旧同期実装と同じ意味論）、*or_matched* は
     ``~body:`` プールのいずれかに当たったエントリ。どちらも **現在の全
@@ -100,7 +98,7 @@ def nsfw_ratings(
 ) -> dict[str, str]:
     """タイル群の代表レーティングを ``tags.db`` から引く（GUI スレッド禁止）。
 
-    NSFW ビュー抑制 (項目 2-1) は描画 / 再構築のホットパスで sqlite を叩いて
+    NSFW ビュー抑制は描画 / 再構築のホットパスで sqlite を叩いて
     はならないので、ここで解決する: フォルダタイルは部分木の最も強い区分
     (:meth:`tag_db.TagIndex.folder_representative_ratings`)、ファイルタイルは
     自分の支配的区分 (:meth:`~tag_db.TagIndex.image_ratings`)。ホストは着地
@@ -165,7 +163,7 @@ def recent_files_walk(
 def curation_metadata(
     entries: list[FolderEntry], folder_cache, cancel: CancelToken,
 ) -> list[FolderEntry]:
-    """横断一覧の**可視**タイルぶんだけ ``post.md`` を読む (N-49 後半)。
+    """横断一覧の**可視**タイルぶんだけ ``post.md`` を読む。
 
     横断一覧は軽量な索引として組む — 母集合がライブラリ横断（複数ボリューム
     にも及ぶ）なので、集める段階でメタデータを読むと最初のタイルが出る前に

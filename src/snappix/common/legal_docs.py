@@ -42,7 +42,7 @@ def getting_started_path() -> Path | None:
 
     Frozen builds carry the rendered plain-text guide beside the EXEs; a dev
     checkout has only the committed ``README.md`` it is rendered from, so that
-    is used as the fallback (UIレビュー 08-28 N-114).
+    is used as the fallback.
     """
     base = get_paths().base
     shipped = base / GETTING_STARTED_NAME
@@ -55,7 +55,7 @@ def getting_started_path() -> Path | None:
 def open_shipped_file(path: Path | None, parent, missing_name: str) -> bool:
     """Open *path* with the OS default viewer; warn if it's missing.
 
-    Shared by the Help-menu doc openers — plugin-agnostic on purpose (#178):
+    Shared by the Help-menu doc openers — plugin-agnostic on purpose:
     a pack that ships its own document hands the resolved path in (via its
     ``ai_pack`` provider), so this module never knows any pack's internal
     layout.  Returns ``True`` when the open was dispatched.

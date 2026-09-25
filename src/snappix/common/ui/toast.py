@@ -2,8 +2,7 @@
 
 A toast is a small, self-dismissing message floated in the bottom-right of a
 window.  It is the design system's answer to *success* feedback: the "成功=
-非モーダル、失敗=モーダル、破壊的操作=確認モーダル" principle (see
-docs/claude/design.md) — success and other transient status should never
+非モーダル、失敗=モーダル、破壊的操作=確認モーダル" principle — success and other transient status should never
 interrupt with a modal dialog.
 
 Public API::
@@ -18,9 +17,9 @@ All colours come from the app-wide QSS (``qss.py::build_qss`` styles
 ``QFrame#toast``; the ``kind`` stripe is selected via the ``toastKind``
 dynamic property set at construction) — nothing here hardcodes a hex value
 or a point size, and theme switches restyle live toasts automatically with
-the rest of the application (#184; the per-widget ``setStyleSheet`` this
-replaced needed a ``changeEvent(PaletteChange)`` hook that re-entered
-itself on Windows — #117/#117追補).  Toasts stack upward from the corner,
+the rest of the application (a per-widget ``setStyleSheet`` would need a
+``changeEvent(PaletteChange)`` hook, which re-enters itself on Windows).
+Toasts stack upward from the corner,
 dismiss on click, fade out after ``duration_ms``, and follow their host
 window's resize/move via an event filter.  They are children of the host
 window, so they are torn down with it and never outlive it.
@@ -113,7 +112,7 @@ class Toast(QFrame):
         self.setObjectName("toast")
         # The app-wide QSS (qss.py) selects the kind's accent stripe on this
         # dynamic property; it is fixed for the toast's lifetime and set
-        # before show(), so no unpolish/repolish wiring is needed (#184).
+        # before show(), so no unpolish/repolish wiring is needed.
         self.setProperty("toastKind", self._kind)
         self.setFrameShape(QFrame.NoFrame)
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -128,8 +127,8 @@ class Toast(QFrame):
         self._label.setTextInteractionFlags(Qt.NoTextInteraction)
         layout.addWidget(self._label)
 
-        # Optional follow-up action (「ログフォルダを開く」 after a bulk delete —
-        # UIレビュー 2026-08-28 N-40).  A plain QPushButton so it inherits the
+        # Optional follow-up action (「ログフォルダを開く」 after a bulk
+        # delete).  A plain QPushButton so it inherits the
         # app-wide QSS (no colours here); its click is consumed by the button,
         # so the frame's dismiss-on-click never fires for it.  The toast is
         # dismissed explicitly afterwards — the affordance is spent.
@@ -176,7 +175,7 @@ class Toast(QFrame):
         if duration_ms > 0 and not self._sticky_important:
             self._dismiss_timer.trigger()
         # Following the host's resize / move is the *stack's* job, not each
-        # toast's: ``_ToastManager`` owns the single event filter (#186).
+        # toast's: ``_ToastManager`` owns the single event filter.
 
     # -------------------------------------------------------------- sizing
     def _max_width(self) -> int:
@@ -188,8 +187,8 @@ class Toast(QFrame):
         The width is **measured**, not left to ``QLabel``'s size hint: with
         ``wordWrap=True`` Qt's aspect-ratio heuristic settled every toast at
         137–146px even though ``_max_width()`` allowed 576, so short messages
-        wrapped onto two lines for no reason and the stack came out ragged
-        (UIレビュー 2026-08-28 N-56, 旧 N-154 統合).  Measuring the longest
+        wrapped onto two lines for no reason and the stack came out ragged.
+        Measuring the longest
         line and pinning that width fixes both at once; wrapping still kicks
         in for anything past ``_max_width()``.
         """
@@ -285,9 +284,9 @@ class Toast(QFrame):
     # the app-wide QSS (``qss.py``), which ``apply_theme`` regenerates —
     # every live toast (including a ``duration_ms=0`` sticky one) is
     # re-polished with the rest of the application on a theme switch.  The
-    # per-widget restyle hook this replaced re-entered itself on Windows
-    # (``setStyleSheet`` re-delivers ``PaletteChange``) and needed a re-entry
-    # guard to avoid an infinite recursion (#117 / #117追補 / #184).
+    # per-widget restyle hook re-enters itself on Windows
+    # (``setStyleSheet`` re-delivers ``PaletteChange``) and would need a
+    # re-entry guard to avoid an infinite recursion.
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         self.dismiss()
@@ -316,10 +315,9 @@ class _ToastManager(QObject):
 
     It also owns the **single** event filter on the host: the stack's geometry
     is a property of the stack, so one filter re-lays it out once per host
-    Resize / Move / Show.  Installing one filter per toast (as this did
-    originally) made a single window drag run ``reposition`` — itself an
-    all-toasts relayout — once per live toast, i.e. O(N²) work for one
-    event (#186).  Lifetime needs no bookkeeping either: the manager is a
+    Resize / Move / Show.  Installing one filter per toast would make a
+    single window drag run ``reposition`` — itself an all-toasts relayout —
+    once per live toast, i.e. O(N²) work for one event.  Lifetime needs no bookkeeping either: the manager is a
     child of the host and dies with it.
     """
 
@@ -404,11 +402,11 @@ class _ToastManager(QObject):
         """Stack live toasts bottom-right, newest lowest, growing upward.
 
         On a QMainWindow the stack starts above the status bar so a toast
-        never covers its path / load-status text (UIレビュー #22).  Probed
+        never covers its path / load-status text.  Probed
         via findChild — ``statusBar()`` would *create* one on windows that
         don't have it.
 
-        堅牢化 (UIレビュー 07-25 #138): 直接の子に QStatusBar が複数ある
+        堅牢化: 直接の子に QStatusBar が複数ある
         （非表示の予備バーを保持する等）構成でも、``findChildren`` から
         **可視のもの**を選ぶ — 先頭 1 個を掴んで「不可視バーの高さ 0」に
         当たると、実バーの上ではなくバーの裏側にトーストが積まれる。
@@ -471,8 +469,7 @@ def show_toast(
     until it is clicked (or the window is destroyed).
 
     ``action_text`` + ``on_action`` add **one** follow-up button beside the
-    message (「ログフォルダを開く」 after a bulk delete — UIレビュー 2026-08-28
-    N-40).  It is an optional shortcut, never the only way to reach the thing
+    message (「ログフォルダを開く」 after a bulk delete).  It is an optional shortcut, never the only way to reach the thing
     it opens: a toast is transient, so anything essential belongs in a
     persistent surface.  Give an actionable toast a longer ``duration_ms``
     than the 3 s default — the user has to notice, read and aim at it.

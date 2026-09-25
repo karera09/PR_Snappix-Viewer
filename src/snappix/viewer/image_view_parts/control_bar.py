@@ -9,7 +9,7 @@
   フィット⇄実寸 / 全画面 + ズーム率）
 
 固定の暗スクリム + 明色グリフはテーマに追従しない（画像上オーバーレイの
-固定色例外 — docs/claude/design.md）。スクリム QSS・``WA_StyledBackground``・
+固定色例外 — 画像の上では明暗テーマに関係なく読める必要がある）。スクリム QSS・``WA_StyledBackground``・
 親矩形クランプ・ボタン生成は :class:`~snappix.common.ui.overlay_chrome.OverlayCapsule`
 が持ち、ここにはフェードとアイドル消灯の方針、画像矩形への寄せだけを置く。
 
@@ -31,6 +31,10 @@ from PySide6.QtWidgets import (
 from ...common.ui import fixed_icon, overlay, overlay_chrome
 from ...common.ui.overlay_chrome import OverlayCapsule
 from ...common.ui.timers import DebounceMode, Debouncer
+from .geometry import dodge_keepout
+
+#: ミニマップを避けるときに空ける間隔（px）。
+_KEEPOUT_GAP = 6
 
 
 #: ズーム読み値の「値なし」表示（画像が無い / デコード失敗）。数字と単位だけ
@@ -77,6 +81,8 @@ class _ZoomOverlayLabel(QLabel):
         self._timer = Debouncer(
             self, self._AUTO_HIDE_MS, self.hide, mode=DebounceMode.TRAILING
         )
+        # 避ける矩形（右下のミニマップ。``set_keepout_rect``）。
+        self._keepout: QRect | None = None
 
     def show_zoom(self, percent: float) -> None:
         self.setText(f"{round(percent)}%")
@@ -85,6 +91,15 @@ class _ZoomOverlayLabel(QLabel):
         self.show()
         self.raise_()
         self._timer.trigger()
+
+    def set_keepout_rect(self, rect: QRect | None) -> None:
+        """同じ右下隅に居るミニマップの占有矩形（``None`` なら避けない）。
+
+        ピルはミニマップの**上**へ逃がす（右揃えのまま）— 左へ逃がすと下端
+        中央の操作カプセルと重なりうる。
+        """
+        self._keepout = rect
+        self.reposition()
 
     def reposition(self) -> None:
         if self.isVisible():
@@ -97,7 +112,11 @@ class _ZoomOverlayLabel(QLabel):
         margin = 10
         x = parent.width() - self.width() - margin
         y = parent.height() - self.height() - margin
-        self.move(max(0, x), max(0, y))
+        pos = dodge_keepout(
+            QRect(x, y, self.width(), self.height()), self._keepout,
+            parent.rect(), gap=_KEEPOUT_GAP, prefer_above=True,
+        )
+        self.move(max(0, pos.x()), max(0, pos.y()))
 
 
 # Fixed light colour for the on-screen control bar glyphs.  The bar is an
@@ -169,6 +188,8 @@ class _ControlBar(OverlayCapsule):
 
         # 配置の基準矩形（``set_anchor_rect``）。None の間は viewport 下端中央。
         self._anchor_rect: QRect | None = None
+        # 避ける矩形（右下のミニマップ。``set_keepout_rect``）。
+        self._keepout: QRect | None = None
 
         row = QHBoxLayout(self)
         row.setContentsMargins(6, 4, 6, 4)
@@ -282,6 +303,19 @@ class _ControlBar(OverlayCapsule):
         if self.isVisible():
             self.reposition()
 
+    def set_keepout_rect(self, rect: QRect | None) -> None:
+        """右下のミニマップの占有矩形（``None`` なら避けない）。
+
+        カプセル（下端中央）とミニマップ（右下）は互いの位置を知らずに
+        置かれるので、プレビュー幅が狭い（分割ビューの既定列 ≈ 400px）と
+        重なり、ミニマップが上に乗って読み値とフィットボタンを覆う — そこを
+        押すとフィット切替ではなくミニマップのパンになる。重なるときだけ
+        左へ（入らなければ上へ）逃がす。
+        """
+        self._keepout = rect
+        if self.isVisible():
+            self.reposition()
+
     def reposition(self) -> None:
         parent = self.parentWidget()
         if parent is None:
@@ -293,8 +327,12 @@ class _ControlBar(OverlayCapsule):
         else:
             x = (parent.width() - self.width()) // 2
             y = parent.height() - self.height() - self._MARGIN
+        pos = dodge_keepout(
+            QRect(x, y, self.width(), self.height()), self._keepout,
+            parent.rect(), gap=_KEEPOUT_GAP,
+        )
         # viewport からはみ出さないようクランプ（極小画像・極端な分割幅）。
-        self.move_clamped(x, y)
+        self.move_clamped(pos.x(), pos.y())
 
     def enterEvent(self, event) -> None:  # noqa: N802 (Qt API)
         # Cursor resting on the bar keeps it up (and fully opaque) — never

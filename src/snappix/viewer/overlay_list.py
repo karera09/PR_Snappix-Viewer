@@ -1,8 +1,8 @@
 """グリッド全面を占有する「一覧」の状態（Qt 非依存の 1 つの値）。
 
 左ペインには **グリッド全体を奪う一覧**が 2 種類ある — 横断キュレーション一覧
-（★ / あとで見る / ユーザータグ、H01）と「最近追加されたファイル」一覧
-（N-49）。どちらも同じ形をしている:
+（★ / あとで見る / ユーザータグ）と「最近追加されたファイル」一覧。
+どちらも同じ形をしている:
 
 * グリッド全体を所有する（互いに**相互排他**）
 * 母集合をメモリに持つ（``entries`` + タイル説明の ``rel_paths``）
@@ -12,12 +12,10 @@
 * 読み取り失敗を「まだありません」と言わない（``failed``）
 * 入場・退場・再ルート・窓じまいの 4 経路で同じ片付けをする
 
-にもかかわらず、以前は 13 + 9 個のフィールドが ``PostGrid`` に平置きされ、
-ライフサイクルも 4 経路 × 2 の 8 か所へ手書きで複製されていた。レビュー
-2026-09-03 の指摘 #1（チップ名の片側欠落）と #4（片方だけキャンセルトークンを
-持たない）は、どちらも「二重実装のどちらか一方にしか手が入らなかった」結果
-として実際に出た不具合で、CLAUDE.md の「同種の不具合が同じ機構の周りに固まって
-いるときは設計指摘」に当たる（項目 #97）。
+2 種類の一覧のフィールドを ``PostGrid`` に平置きし、ライフサイクルを 4 経路
+× 2 の 8 か所へ手書きで複製すると、チップ名の片側欠落や片方だけキャンセル
+トークンを持たない、といった「二重実装のどちらか一方にしか手が入らない」
+不具合が必ず出る。
 
 このモジュールはその形を **1 つの値オブジェクト** に閉じ込める。
 ``PostGrid`` が持つのは ``self._overlay: OverlayList | None`` の 1 本だけで、
@@ -71,7 +69,7 @@ class OverlayList:
     """
 
     kind: "CurationList | Path"
-    #: 入場時に奪う前の並び順（退場で返す — UIレビュー 07-25 #59）。
+    #: 入場時に奪う前の並び順（退場で返す）。
     saved_sort: str | None = None
     #: 解決 / 走査の中止（所有ストリームの ``cancel``）。
     cancel: Callable[[], None] | None = None
@@ -79,14 +77,14 @@ class OverlayList:
     #: 解決 / 走査が返した母集合と、そのタイル説明（ライブラリ基準の相対パス）。
     entries: "list[FolderEntry]" = field(default_factory=list)
     rel_paths: dict[str, str] = field(default_factory=dict)
-    #: 読めずに落ちた行のプレースホルダ (#133 項目 3 — 横断一覧のみ)。
+    #: 読めずに落ちた行のプレースホルダ (横断一覧のみ)。
     ghosts: "list[FolderEntry]" = field(default_factory=list)
     ghost_keys: set[str] = field(default_factory=set)
     #: そのうち **確実に消えた**（missing）行の鍵。「この一覧から外す」は
     #: 無確認で印を恒久削除するので、読めなかっただけの行（共有が落ちて
     #: いる / 権限が外れている）には出さない。
     ghost_missing_keys: set[str] = field(default_factory=set)
-    #: 確実に消えた行 / 読めなかった行の数（N-09 — 分けて数える）。
+    #: 確実に消えた行 / 読めなかった行の数（分けて数える）。
     missing: int = 0
     unreadable: int = 0
     #: 解決 / 走査が**全滅**した（「まだありません」と言ってはいけない）。
@@ -99,8 +97,8 @@ class OverlayList:
     #: N 件」/「N 件は見つかりませんでした（移動または削除済み）」など）。
     #: 出したときの文言をそのまま覚えておく **復元の単一情報源** — 一覧の上に
     #: 載せた条件の解除 (``clear_search_state``) は状態行を無条件に空へ倒すので、
-    #: これが無いと「一覧に留まったまま件数行だけ消えて二度と戻らない」
-    #: （レビュー 2026-08-27 #62 / 2026-09-03 項目 #252）。母集合の再解決で
+    #: これが無いと「一覧に留まったまま件数行だけ消えて二度と戻らない」。
+    #: 母集合の再解決で
     #: 作り直されるので :meth:`reset_population` は触らない。
     status: str = ""
 
@@ -133,7 +131,7 @@ class OverlayList:
         return folder.name or str(folder)
 
     def crumb(self) -> str:
-        """入場中のパンくずに差し替える単一クラム (07-25 #60)。"""
+        """入場中のパンくずに差し替える単一クラム。"""
         cur = self.curation
         if cur is not None:
             return cur.label()
@@ -160,7 +158,7 @@ class OverlayList:
         return t(key) if key is not None else ""
 
     def sort_axis(self) -> str:
-        """入場時に奪う並び順 — 一覧が *about* にしている軸 (07-25 #59)。"""
+        """入場時に奪う並び順 — 一覧が *about* にしている軸。"""
         cur = self.curation
         return cur.sort_mode() if cur is not None else "mtime_desc"
 

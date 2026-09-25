@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFontMetrics, QPalette
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -338,6 +338,9 @@ def build_popover(ctl) -> None:
     ctl.tag_input.setPlaceholderText(ctl._dynamic_tag_placeholder())
     ctl.tag_input.setToolTip(t("viewer.advanced_search.ai_tag_tooltip"))
     ctl.tag_input.textChanged.connect(ctl._on_tag_input_changed)
+    # チップの折返しで増えた高さはトップレベルの Popup へ伝わらないので、
+    # 新しいチップが表示された後（遅延 show の後）に測り直す。
+    ctl.tag_input.textChanged.connect(lambda _text: QTimer.singleShot(0, pop, pop.adjustSize))
     if has_index:
         ctl._install_tag_completer()
     row_a.addWidget(ctl.tag_input, 1)

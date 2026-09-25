@@ -1,6 +1,6 @@
 [project]
 name = "snappix-viewer"
-version = "0.0.4"
+version = "0.0.5"
 description = "Snappix Viewer — high-performance local/NAS image library viewer + AI tag scanner"
 # 公開ソースのライセンス（本体規約第8条の「ソースライセンス」）。plugins/ は
 # 本プロジェクトの配布物に含まれず、この許諾の対象外（各プラグインの README 参照）。

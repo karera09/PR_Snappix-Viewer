@@ -46,7 +46,7 @@ from ..common.ui import (
     rgba,
 )
 # 条件チップ列の折返しは検索欄のチップ入力と同じ実装を再利用する
-# （Qt にフローレイアウトが無いため — UIレビュー 07-25 #28）。
+# （Qt にフローレイアウトが無いため）。
 from .qimage_decode import enable_clear_button
 from .tag_chips import FlowLayout
 
@@ -83,8 +83,7 @@ class _ReadOnlyChip(QLabel):
 
     Mirrors ``tag_chips._TagChip``'s token-derived tinting (accent = include,
     danger = exclude) without any of its interaction (no ×, no drag) — this
-    strip only *reports* the conditions the dialog has pushed into the search
-    (UIレビュー 07-25 #28).
+    strip only *reports* the conditions the dialog has pushed into the search.
     """
 
     def __init__(self, term: str, *, exclude: bool) -> None:
@@ -105,9 +104,9 @@ class _ReadOnlyChip(QLabel):
             self.setStyleSheet(css)
 
     def changeEvent(self, event) -> None:  # type: ignore[override]
-        # UIレビュー07-25 追修: トークン由来の色を作成時に焼き込んでいたため、
-        # このダイアログ（セッション中使い回される）はテーマを切り替えても
-        # 古いパレットのチップを出し続けていた。``_TagChip`` と同じ再着色を
+        # トークン由来の色を作成時に焼き込むと、このダイアログ（セッション中
+        # 使い回される）はテーマを切り替えても古いパレットのチップを出し続ける。
+        # ``_TagChip`` と同じ再着色を
         # パレット変更イベントで行う（``StyleChange`` は setStyleSheet 自身が
         # 発火させるので拾わない — 無限再帰になる）。
         if event.type() in (
@@ -142,8 +141,8 @@ class TagBrowserDialog(QDialog):
         self._tag_index = tag_index
         self._rows: list[tuple[str, int]] = []
         # 追加先のタグ入力欄（ポップオーバー）が閉じていて反映が見えないので、
-        # 積算した条件をダイアログ内で読み取れるようにする
-        # (UIレビュー 07-25 #28)。順序を保った重複なしの積算リスト。
+        # 積算した条件をダイアログ内で読み取れるようにする。順序を保った
+        # 重複なしの積算リスト。
         self._include_terms: list[str] = []
         self._exclude_terms: list[str] = []
         # Whether the default (count-descending) sort has been applied.  After
@@ -174,7 +173,7 @@ class TagBrowserDialog(QDialog):
         self._table.setHorizontalHeaderLabels(
             [t("common.label.tag"), t("viewer.tag_browser.col_image_count")]
         )
-        # 見出しの揃えは内容の揃えに合わせる (UIレビュー 07-25 #97) —
+        # 見出しの揃えは内容の揃えに合わせる —
         # 画像数（列1）は _CountItem が右揃えなので見出しも右。
         align_header(self._table, right=(1,))
         self._table.verticalHeader().setVisible(False)
@@ -184,13 +183,13 @@ class TagBrowserDialog(QDialog):
         self._table.setSortingEnabled(True)
         self._table.itemDoubleClicked.connect(self._on_row_double_clicked)
         # 未選択時に押しても無反応な 2 ボタンを無効化してフィードバック欠如を
-        # 防ぐ（UIレビュー #4）。
+        # 防ぐ。
         self._table.itemSelectionChanged.connect(self._sync_controls)
         hdr = self._table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.Stretch)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         # Qt 既定の並び順インジケータは昇順=▼ / 降順=▲ と描くため、既定の
-        # 「画像数 降順」が ▲ に見えていた (UIレビュー 07-25 #120)。既定描画は
+        # 「画像数 降順」が ▲ に見えていた。既定描画は
         # 止め、見出し文字列側に自前の矢印を出して明示制御する。
         hdr.setSortIndicatorShown(False)
         hdr.sortIndicatorChanged.connect(self._sync_sort_indicator)
@@ -201,7 +200,7 @@ class TagBrowserDialog(QDialog):
         outer.addWidget(self._status_label)
 
         # 現在の検索条件（読み取り専用チップ列）— このダイアログから追加した
-        # 積算状態がここで完結する (UIレビュー 07-25 #28)。
+        # 積算状態がここで完結する。
         terms_row = QHBoxLayout()
         terms_row.setSpacing(6)
         terms_caption = QLabel(t("viewer.tag_browser.current_terms_label"))
@@ -224,13 +223,12 @@ class TagBrowserDialog(QDialog):
             localize_buttons(QDialogButtonBox(QDialogButtonBox.Close))
         )
         # The Close button carries RejectRole, so clicking it fires ``rejected``
-        # — connecting only that avoids calling ``close()`` twice per click
-        # (#181).
+        # — connecting only that avoids calling ``close()`` twice per click.
         buttons.rejected.connect(self.close)
         button_row.addWidget(buttons)
         outer.addLayout(button_row)
 
-        # 初期状態は無選択なので 2 ボタンは無効から始める（UIレビュー #4）。
+        # 初期状態は無選択なので 2 ボタンは無効から始める。
         self._sync_controls()
         self._rebuild_term_chips()
 
@@ -266,7 +264,7 @@ class TagBrowserDialog(QDialog):
             self._table.setItem(r, 1, _CountItem(count))
         self._table.setSortingEnabled(sorting_was_on or not self._sorted_once)
         # ``setSortingEnabled`` は内部で ``setSortIndicatorShown(True)`` を呼ぶ
-        # ので、明示制御 (UIレビュー 07-25 #120) をここで掛け直す。
+        # ので、明示制御をここで掛け直す。
         self._table.horizontalHeader().setSortIndicatorShown(False)
         if not self._sorted_once:
             # First population only: establish the default (image count desc)
@@ -280,7 +278,7 @@ class TagBrowserDialog(QDialog):
 
     def _update_status(self, shown: int) -> None:
         if not shown:
-            # 0 件には 2 つの理由がある（UIレビュー 09-11 N-102）: 統計そのもの
+            # 0 件には 2 つの理由がある: 統計そのもの
             # が無いのか、絞り込み語に一致しなかったのか。``_reload`` は
             # ``_filter_edit`` の prefix を ``top_tags`` に渡すので、後者は
             # 統計が正常でも日常的に起こる — 一律に「タグ統計がありません。」と
@@ -296,15 +294,14 @@ class TagBrowserDialog(QDialog):
             count_text = t("viewer.tag_browser.showing_n_top", n=shown)
         else:
             count_text = t("viewer.tag_browser.showing_n", n=shown)
-        # 追加導線の常時ヒントを件数の隣に添える（UIレビュー #4 — 初見ユーザーが
+        # 追加導線の常時ヒントを件数の隣に添える（初見ユーザーが
         # 行き止まりに入るのを防ぐ）。
         self._status_label.setText(
             f"{count_text} ・ {t('viewer.tag_browser.select_hint')}"
         )
 
     def _sync_controls(self) -> None:
-        # 未選択で「検索に追加 / 除外に追加」を押しても無反応なのを防ぐ
-        # （UIレビュー #4）。
+        # 未選択で「検索に追加 / 除外に追加」を押しても無反応なのを防ぐ。
         has_selection = bool(self._table.selectionModel().selectedRows())
         self._add_btn.setEnabled(has_selection)
         self._exclude_btn.setEnabled(has_selection)
@@ -325,7 +322,7 @@ class TagBrowserDialog(QDialog):
     def set_current_terms(
         self, include: list[str] | None, exclude: list[str] | None,
     ) -> None:
-        """Seed / replace the read-only condition strip (UIレビュー 07-25 #28).
+        """Seed / replace the read-only condition strip.
 
         Optional: the dialog keeps its own accumulation of everything it has
         pushed out, so the strip is meaningful even when nothing calls this.
@@ -364,7 +361,7 @@ class TagBrowserDialog(QDialog):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
-        # 再オープン時にもチップを貼り直す（UIレビュー07-25 追修 — このダイアログは
+        # 再オープン時にもチップを貼り直す（このダイアログは
         # セッション中使い回されるので、閉じている間のテーマ変更に対する保険）。
         for i in range(self._terms_layout.count()):
             item = self._terms_layout.itemAt(i)
@@ -375,7 +372,7 @@ class TagBrowserDialog(QDialog):
     # ------------------------------------------------------ sort indicator
 
     def _sync_sort_indicator(self, section: int, order) -> None:
-        """並び順の矢印を見出し文字列で明示する (UIレビュー 07-25 #120).
+        """並び順の矢印を見出し文字列で明示する.
 
         Qt 既定描画は昇順=▼ / 降順=▲ と逆に見えるため ``setSortIndicatorShown``
         を切り、降順は ▼・昇順は ▲ を見出しに添える。
@@ -388,7 +385,7 @@ class TagBrowserDialog(QDialog):
         ]
         self._table.setHorizontalHeaderLabels(labels)
         # setHorizontalHeaderLabels は見出しアイテムごと作り直すため、
-        # 揃えの指定もここで貼り直す (UIレビュー 07-25 #97)。
+        # 揃えの指定もここで貼り直す。
         align_header(self._table, right=(1,))
 
     # ------------------------------------------------------------- signals

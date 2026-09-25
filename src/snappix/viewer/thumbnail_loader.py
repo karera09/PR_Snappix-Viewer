@@ -33,7 +33,12 @@ from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, Signal
 from PySide6.QtGui import QImage, QPainter
 
 from ..common.ui.timers import DebounceMode, Debouncer
-from .folder_scan import PDF_SUFFIXES, VIDEO_SUFFIXES, read_folder_preview_cached
+from .folder_scan import (
+    PDF_SUFFIXES,
+    VIDEO_SUFFIXES,
+    read_folder_preview_cached,
+    select_thumbnail,
+)
 from .image_scale import pil_to_qimage, qimage_to_pil, smooth_downscale
 from .perf import measure, recorder
 from .qimage_decode import (
@@ -64,7 +69,7 @@ _WEBP_QUALITY = 88
 # ``round(row_height × aspect)``, PIL/Qt round the fitted edge again) — such
 # a near-miss must NOT be treated as "the source can't do better", or every
 # later upgrade request is silently swallowed and the tile stays blurry
-# until the cache clears (#18).  2 px covers both rounding stages.
+# until the cache clears.  2 px covers both rounding stages.
 _SOURCE_LIMIT_SLACK = 2
 
 
@@ -106,6 +111,45 @@ class _PendingSpec:
     # Folder mtime for the preview-cache key (only meaningful when
     # ``resolve_in_folder`` is True); 0 means "don't cache the resolution".
     folder_mtime: float = 0.0
+    # ``resolve_in_folder`` の代表選びで ``#thumb#`` マーカーを避けるか
+    # （``folder_scan.select_thumbnail`` と同じ規則）。
+    exclude_thumb_marker: bool = False
+
+    def source(self) -> tuple[str, bool, bool]:
+        """このデコードが**何を**描くか（タイルキーとは独立な出所の識別子）.
+
+        ローダーの LRU / 飛行中判定はタイルキー（フォルダならフォルダパス）で
+        引くので、同じキーでも出所（遅延解決かファイル直指定か・マーカーを
+        避けるか）が変われば別物として扱う — 付け替え前のデコードを新しい
+        要求への答えとして返さないために使う。
+        """
+        return (
+            str(self.path),
+            self.resolve_in_folder,
+            self.resolve_in_folder and self.exclude_thumb_marker,
+        )
+
+
+@dataclass(frozen=True)
+class _Cached:
+    """One LRU entry.  Sizes are physical px on BOTH axes (a list-row box is
+    bound by its short side, so one longest-edge ruler would misjudge it);
+    ``src`` is :meth:`_PendingSpec.source` — another source is a miss."""
+
+    image: QImage
+    produced: QSize
+    requested: QSize
+    src: tuple[str, bool, bool]
+
+
+@dataclass(frozen=True)
+class _Flight:
+    """A running viewport decode; ``epoch`` = clear_cache generation at dispatch."""
+
+    src: tuple[str, bool, bool]
+    epoch: int
+    requested: QSize
+
 
 class _Signals(QObject):
     loaded = Signal(str, QImage)  # (key, image)
@@ -126,10 +170,12 @@ class _ThumbnailTask(QRunnable):
         folder_cache=None,
         folder_mtime: float = 0.0,
         cancel_event: threading.Event | None = None,
+        exclude_thumb_marker: bool = False,
     ) -> None:
         super().__init__()
         self.key = key
         self.path = path
+        self.exclude_thumb_marker = exclude_thumb_marker
         # size is the *physical*-pixel target (caller has already multiplied
         # by dpr); dpr is stamped on the resulting QImage so that
         # ``QPixmap.fromImage()`` on the GUI thread produces a hi-DPI pixmap
@@ -185,7 +231,14 @@ class _ThumbnailTask(QRunnable):
                         path, self.folder_mtime, self._folder_cache,
                         should_cancel=self._cancelled,
                     )
-                resolved = marker if marker is not None else non_marker
+                # 代表選びは一覧側（``_reapply_thumbnail`` / メタデータ経路）と
+                # 同じ ``select_thumbnail`` で — ここだけ常にマーカーを優先すると、
+                # 「クリエイターアイコンを隠す」が ON でも遅延解決が先着した
+                # タイルにマーカー画像が残る。
+                resolved, _is_fallback = select_thumbnail(
+                    marker, non_marker,
+                    exclude_thumb_marker=self.exclude_thumb_marker,
+                )
                 if resolved is None:
                     rec.record("thumb_failed", 0.0, f"resolve_in_folder None: {path}")
                     self.signals.failed.emit(self.key)
@@ -272,7 +325,7 @@ class _ThumbnailTask(QRunnable):
                 # — for a corrupt / unsupported clip that means paying the
                 # ``_decode_video`` 8 s QEventLoop timeout twice, occupying one
                 # of the 4 worker threads for 16 s per file and jamming the
-                # whole pool when several broken videos are on screen (#90).
+                # whole pool when several broken videos are on screen.
                 # The fallback below exists for *images* Pillow can't open
                 # (AVIF without the plugin), which the ladder inside
                 # ``_decode`` can still handle.
@@ -350,7 +403,7 @@ class _ThumbnailTask(QRunnable):
         keeps the source's channel layout.  ``max_edge`` is the master edge
         the caller (:meth:`_decode_master_pil`) shrinks to anyway, so Pillow
         can ``draft()`` a JPEG down at decode time instead of materialising
-        the full-resolution buffer first (#48).
+        the full-resolution buffer first.
 
         Returns ``(image, data)``: the bytes are returned alongside so a
         failed decode doesn't force the fallback path to re-read the file.
@@ -368,9 +421,9 @@ class _ThumbnailTask(QRunnable):
         must not use the image afterwards (both call sites hand over a master
         whose lifetime ends here — the WebP encode already happened, and the
         cache-hit path closes its handle right after).  The defensive
-        ``copy()`` this used to make was a full-master pixel copy per
+        ``copy()`` would be a full-master pixel copy per
         thumbnail (~2.4 MB / 0.6 ms for a 1024 px master) that nothing ever
-        read back (#146); if a future caller needs the master intact, it
+        read back; if a future caller needs the master intact, it
         should copy at the call site.
         """
         tw = self.size.width()
@@ -436,8 +489,8 @@ class _ThumbnailTask(QRunnable):
         "fast-scroll freeze"), and ``QImageReader`` + ``QBuffer`` is the
         fallback ladder for formats Pillow can't handle (e.g. AVIF without
         ``pillow-avif-plugin``).  See that module's docstrings for the
-        diagnostic history; keeping one implementation there is what stops
-        those workaround fixes drifting apart (#98).
+        diagnostic details; keeping one implementation there is what stops
+        those workarounds drifting apart.
 
         *data* short-circuits the file read for callers that already hold the
         bytes (the master-decode fallback), so an image Pillow can't open is
@@ -544,7 +597,7 @@ class _ThumbnailTask(QRunnable):
           worker for the full timeout below, and a wait that straddled app
           teardown could deadlock the worker inside ``loop.exec()`` forever,
           keeping the (non-daemon) pool thread alive and blocking process
-          exit (#69),
+          exit,
         * the owning loader's cancel event being set (polled from a coarse
           timer) — ``request_shutdown()`` unblocks the wait from outside so
           ``closeEvent``'s bounded drain actually converges,
@@ -694,8 +747,8 @@ class ThumbnailLoader(QObject):
 
     loaded = Signal(str, QImage)
     failed = Signal(str)
-    #: Outstanding thumbnail work changed — payload is :meth:`pending_count`
-    #: (UIレビュー 07-25 #75).  Emitted only when the number actually moves,
+    #: Outstanding thumbnail work changed — payload is :meth:`pending_count`.
+    #: Emitted only when the number actually moves,
     #: so a status-bar consumer can bind straight to it without debouncing
     #: and without polling on a timer.
     pending_changed = Signal(int)
@@ -706,21 +759,11 @@ class ThumbnailLoader(QObject):
                  cache_edge: int = _DEFAULT_CACHE_EDGE,
                  folder_cache: FolderPreviewCache | None = None) -> None:
         super().__init__(parent)
-        self._cache: OrderedDict[str, QImage] = OrderedDict()
-        # Per-cached-key (produced_size, requested_size) in physical px so the
-        # cache is size-aware: a request for MORE pixels than the cached copy
-        # holds re-decodes (crisp), while a request the cache can already
-        # satisfy — or that is source-resolution-limited — is served as-is.
-        # BOTH axes are kept: the decode fits the image inside the requested
-        # box, so an anisotropic box (a list row: full width × ~24 px) is
-        # constrained by its SHORT side and a longest-edge ruler would record
-        # a resolution that was never asked of the source (#F1D-1).
-        self._cache_edges: dict[str, tuple[QSize, QSize]] = {}
+        # Size- and source-aware LRU (see :meth:`request`).
+        self._cache: OrderedDict[str, _Cached] = OrderedDict()
         self._cache_size = cache_size
-        self._inflight: set[str] = set()
-        # Physical box each in-flight task was dispatched for (read back in
-        # the completion slot to record the cached copy's requested size).
-        self._inflight_req: dict[str, QSize] = {}
+        self._inflight: dict[str, _Flight] = {}
+        self._epoch = 0  # bumped by clear_cache
         # Two-tier pending queue: ``_pending_visible`` for keys the
         # caller last tagged as in-viewport, ``_pending_other`` for the
         # rest.  OrderedDict preserves submission order so that within a
@@ -768,19 +811,19 @@ class ThumbnailLoader(QObject):
 
         # One-way teardown flag shared with every dispatched task.  Set by
         # :meth:`request_shutdown`; running video decodes poll it so their
-        # bounded event-loop wait can be released from outside (#69).
+        # bounded event-loop wait can be released from outside.
         self._cancel_event = threading.Event()
 
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(max_threads)
 
     def pending_count(self) -> int:
-        """Thumbnails still to come: queued + currently decoding (#75).
+        """Thumbnails still to come: queued + currently decoding.
 
-        The status bar used to say 「読み込み完了」 the moment the *directory
-        scan* finished, while a cold NAS folder still had hundreds of tiles
+        Without it the status bar would say 「読み込み完了」 the moment the *directory
+        scan* finished, while a cold NAS folder can still have hundreds of tiles
         left to decode — minutes of grey placeholders with no channel saying
-        whether to keep waiting (UIレビュー 07-25 #75).  This is that channel:
+        whether to keep waiting.  This is that channel:
         the number drops to 0 exactly when the last tile lands, so a consumer
         bound to :data:`pending_changed` clears itself with no extra
         bookkeeping.
@@ -818,7 +861,7 @@ class ThumbnailLoader(QObject):
 
         The 0↔nonzero edges are emitted synchronously — the consumer's label
         appears the instant a burst starts and clears the instant the last
-        tile lands (#75 の契約).  Everything in between (2→3→4…) is deferred
+        tile lands.  Everything in between (2→3→4…) is deferred
         to a zero-interval single-shot so a submission burst costs one
         emission at the edge plus one with the settled total.
         """
@@ -859,7 +902,7 @@ class ThumbnailLoader(QObject):
 
         Qt has no API to cancel a running ``QRunnable``, but the video
         decoder's event-loop wait — the one code path that can park a worker
-        for seconds (or, across app teardown, forever: #69) — polls this
+        for seconds (or, across app teardown, forever) — polls this
         flag and bails within ~100 ms.  Not-yet-started tasks return
         immediately.  Call it right before :meth:`wait_for_done` during
         shutdown so the bounded drain actually converges; there is no undo —
@@ -888,19 +931,24 @@ class ThumbnailLoader(QObject):
         holds the decode — the size-aware serve path stays SILENT for a
         source-limited key on re-request (assuming the caller already holds
         the image), so without this a tile hidden by a filter and shown
-        again would wait for a ``loaded`` emit that never comes (#10).
+        again would wait for a ``loaded`` emit that never comes.
         """
-        return self._cache.get(key)
+        entry = self._cache.get(key)
+        return None if entry is None else entry.image
 
     def clear_cache(self) -> None:
-        # ``_inflight`` / ``_inflight_req`` are deliberately kept: running
-        # QRunnables can't be cancelled, and forgetting them here would let
-        # ``_pump`` over-dispatch past the pool ceiling and an immediate
-        # re-request start a duplicate decode of a key already in flight.
-        # The running task lands normally; a size mismatch is healed by the
-        # host's box check re-requesting once it does.
+        # ``_inflight`` is deliberately kept: running QRunnables can't be
+        # cancelled, and forgetting them here would let ``_pump`` over-dispatch
+        # past the pool ceiling and start a duplicate decode of a key already
+        # in flight.  Their landings are stale, though — a decode dispatched
+        # before the clear may have read the bytes the clear exists to forget
+        # (same path, new content after an in-place overwrite).  Bumping the
+        # epoch makes every post-clear request a different flight identity in
+        # :meth:`request` (queued behind the running task, not folded into it)
+        # and makes :meth:`_land` discard the old landing.  The cost is one
+        # extra decode per key running at clear time (at most ``max_threads``).
+        self._epoch += 1
         self._cache.clear()
-        self._cache_edges.clear()
         self._pending_visible.clear()
         self._pending_other.clear()
         # Warm submissions are dropped for the same reason: they are queued
@@ -920,8 +968,7 @@ class ThumbnailLoader(QObject):
         """
         self._cache_size = max(1, int(cache_size))
         while len(self._cache) > self._cache_size:
-            evicted, _ = self._cache.popitem(last=False)
-            self._cache_edges.pop(evicted, None)
+            self._cache.popitem(last=False)
         self._max_threads = max(1, int(max_threads))
         self._pool.setMaxThreadCount(self._max_threads)
         self._pump()
@@ -935,15 +982,14 @@ class ThumbnailLoader(QObject):
         and then stall the main thread in ``_flush_icon_updates``.  Keys
         already being decoded (``_inflight``) are untouched — Qt has no
         cancel API for running ``QRunnable``\\s — but the 4-wide pool is
-        small enough that those finish quickly and stop crowding.
+        small enough that those finish quickly and stop crowding.  A queued
+        request for a key that is in flight is kept too: it is what marks the
+        running landing stale (:meth:`_land`).
         """
-        keep = set(keep_keys)
-        for k in list(self._pending_visible.keys()):
-            if k not in keep:
-                del self._pending_visible[k]
-        for k in list(self._pending_other.keys()):
-            if k not in keep:
-                del self._pending_other[k]
+        keep = set(keep_keys) | self._inflight.keys()
+        for queue in (self._pending_visible, self._pending_other):
+            for k in [k for k in queue if k not in keep]:
+                del queue[k]
         self._notify_pending()
 
     def mark_visible(self, keys: Iterable[str]) -> None:
@@ -977,6 +1023,7 @@ class ThumbnailLoader(QObject):
         resolve_in_folder: bool = False,
         dpr: float = 1.0,
         folder_mtime: float = 0.0,
+        exclude_thumb_marker: bool = False,
     ) -> bool:
         """Request a thumbnail for *path*.
 
@@ -986,7 +1033,14 @@ class ThumbnailLoader(QObject):
         passes ``self.devicePixelRatioF()`` as *dpr*.
 
         If *resolve_in_folder* is ``True``, *path* is treated as a directory
-        and the worker picks the alphabetically-first image inside it.
+        and the worker picks its representative image
+        (``folder_scan.select_thumbnail`` — *exclude_thumb_marker* chooses
+        whether a ``#thumb#`` marker is avoided).
+
+        The in-memory LRU and the in-flight fold are keyed by *key* but also
+        compare the request's **source** (:meth:`_PendingSpec.source`): a
+        cached copy or a running decode for a different source is never
+        handed out as the answer to this request.
 
         The cache is **size-aware** on BOTH axes: re-requesting a key at a box
         the cached copy would have to be upscaled into re-decodes it (the disk
@@ -1010,15 +1064,25 @@ class ThumbnailLoader(QObject):
                 max(1, round(size.height() * dpr)),
             )
         else:
-            # Copy: the box is recorded in ``_cache_edges`` / ``_inflight_req``
-            # and must not alias a QSize the caller may reuse.
+            # Copy: the box is recorded in ``_Cached`` / ``_Flight`` and must
+            # not alias a QSize the caller may reuse.
             phys_size = QSize(size)
 
+        spec = _PendingSpec(
+            path=path, phys_size=phys_size,
+            resolve_in_folder=resolve_in_folder, dpr=dpr,
+            folder_mtime=folder_mtime,
+            exclude_thumb_marker=exclude_thumb_marker,
+        )
+        src = spec.source()
         cached = self._cache.get(key)
+        if cached is not None and cached.src != src:
+            # Same tile, different source: the cached copy shows what the tile
+            # USED to point at — drop it and decode the new source.
+            del self._cache[key]
+            cached = None
         if cached is not None:
-            produced, prev_req = self._cache_edges.get(
-                key, (phys_size, phys_size)
-            )
+            produced, prev_req = cached.produced, cached.requested
             if fitted_edge(produced, phys_size) <= max(
                 produced.width(), produced.height()
             ):
@@ -1026,7 +1090,7 @@ class ThumbnailLoader(QObject):
                 # ``KeepAspectRatio`` the cached copy fills it without being
                 # stretched (it already covers the binding axis).
                 self._cache.move_to_end(key)
-                self.loaded.emit(key, cached)
+                self.loaded.emit(key, cached.image)
                 return True
             if (
                 produced.width() + _SOURCE_LIMIT_SLACK < prev_req.width()
@@ -1043,7 +1107,7 @@ class ThumbnailLoader(QObject):
                 # 400×900 original in a 53×120 justified box produces 119 <
                 # 120).  Treating that near-miss as source-limited would
                 # silently swallow every future upgrade request and pin the
-                # tile to a blurry upscale until the loader cache clears (#18).
+                # tile to a blurry upscale until the loader cache clears.
                 # A genuinely source-limited image within the slack merely
                 # re-decodes once per box growth — bounded, no per-scroll churn
                 # (the host only re-requests when the box outgrows the pixmap).
@@ -1059,20 +1123,26 @@ class ThumbnailLoader(QObject):
             # Cache holds a smaller copy than needed and the source can do
             # better → drop and re-decode below.
             del self._cache[key]
-            self._cache_edges.pop(key, None)
 
-        spec = _PendingSpec(
-            path=path, phys_size=phys_size,
-            resolve_in_folder=resolve_in_folder, dpr=dpr,
-            folder_mtime=folder_mtime,
-        )
-        if key in self._inflight:
-            # A decode is already running.  If it was dispatched for a smaller
-            # box, the host's box check re-requests once it lands; cheap,
-            # since the disk master serves the larger downscale locally.
+        flight = self._inflight.get(key)
+        if flight is not None and (flight.src, flight.epoch) == (src, self._epoch):
+            # A decode for this very source is already running.  If it was
+            # dispatched for a smaller box, the host's box check re-requests
+            # once it lands (the disk master serves the larger downscale
+            # locally).  A request queued meanwhile for another source is
+            # dropped: the tile points back at the running source (A→B→A).
+            dropped = self._pending_visible.pop(key, None) or self._pending_other.pop(key, None)
+            if dropped is not None:
+                self._notify_pending_lazy()
             return False
+        # A running decode (if any) is for another source or epoch: queue this
+        # request behind it — being queued is what makes its landing stale.
         for queue in (self._pending_visible, self._pending_other):
             existing = queue.get(key)
+            if existing is not None and existing.source() != src:
+                # A queued request for the old source: replace it outright.
+                queue[key] = spec
+                return True
             if existing is not None:
                 # Upgrade an already-queued request to the larger size.  The
                 # per-axis maximum, so a re-request with a differently shaped
@@ -1143,7 +1213,7 @@ class ThumbnailLoader(QObject):
 
         The dispatch itself lives in :meth:`_dispatch_pending`; this wrapper
         exists so **every** path that changes the queues ends with a
-        :data:`pending_changed` emission (#75) — ``_pump`` is already the
+        :data:`pending_changed` emission — ``_pump`` is already the
         single funnel called from :meth:`request`, :meth:`mark_visible`,
         :meth:`apply_settings` and both task-completion slots.  The lazy
         flavour keeps a submission burst from emitting once per request.
@@ -1163,10 +1233,12 @@ class ThumbnailLoader(QObject):
         """
         while len(self._inflight) + self._inflight_warm < self._max_threads:
             warm = False
-            if self._pending_visible:
-                key, spec = self._pending_visible.popitem(last=False)
-            elif self._pending_other:
-                key, spec = self._pending_other.popitem(last=False)
+            picked = (
+                self._pop_dispatchable(self._pending_visible)
+                or self._pop_dispatchable(self._pending_other)
+            )
+            if picked is not None:
+                key, spec = picked
             elif self._pending_warm:
                 key, spec = self._pending_warm.popleft()
                 warm = True
@@ -1175,8 +1247,7 @@ class ThumbnailLoader(QObject):
             if warm:
                 self._inflight_warm += 1
             else:
-                self._inflight.add(key)
-                self._inflight_req[key] = spec.phys_size
+                self._inflight[key] = _Flight(spec.source(), self._epoch, spec.phys_size)
             task = _ThumbnailTask(
                 key, spec.path, spec.phys_size,
                 self._warm_signals if warm else self._signals,
@@ -1184,28 +1255,53 @@ class ThumbnailLoader(QObject):
                 disk_cache=self._disk_cache, cache_edge=self._cache_edge,
                 folder_cache=self._folder_cache, folder_mtime=spec.folder_mtime,
                 cancel_event=self._cancel_event,
+                exclude_thumb_marker=spec.exclude_thumb_marker,
             )
             self._pool.start(task)
 
+    def _pop_dispatchable(
+        self, queue: OrderedDict[str, _PendingSpec],
+    ) -> tuple[str, _PendingSpec] | None:
+        """Pop the oldest queued request whose key has no decode running.
+
+        A key is only queued while in flight when a request for another source
+        (or a later :meth:`clear_cache` epoch) arrived meanwhile; it waits for
+        that landing so one key never has two decodes racing to the same slot.
+        """
+        for key in queue:
+            if key not in self._inflight:
+                return key, queue.pop(key)
+        return None
+
     # ------------------------------------------------------------------ slots
 
+    def _land(self, key: str) -> _Flight | None:
+        """Retire *key*'s flight; ``None`` when it predates a clear_cache or a
+        request for another source is queued behind it (the next pump runs it)."""
+        flight = self._inflight.pop(key, None)
+        if (
+            flight is None
+            or flight.epoch != self._epoch
+            or key in self._pending_visible
+            or key in self._pending_other
+        ):
+            return None
+        return flight
+
     def _on_task_loaded(self, key: str, image: QImage) -> None:
-        self._inflight.discard(key)
-        produced = QSize(image.width(), image.height())
-        req_size = self._inflight_req.pop(key, produced)
-        self._cache[key] = image
-        self._cache_edges[key] = (produced, req_size)
-        self._cache.move_to_end(key)
-        while len(self._cache) > self._cache_size:
-            evicted, _ = self._cache.popitem(last=False)
-            self._cache_edges.pop(evicted, None)
-        self.loaded.emit(key, image)
+        flight = self._land(key)
+        if flight is not None:
+            produced = QSize(image.width(), image.height())
+            self._cache[key] = _Cached(image, produced, flight.requested, flight.src)
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
+            self.loaded.emit(key, image)
         self._pump()
 
     def _on_task_failed(self, key: str) -> None:
-        self._inflight.discard(key)
-        self._inflight_req.pop(key, None)
-        self.failed.emit(key)
+        if self._land(key) is not None:
+            self.failed.emit(key)
         self._pump()
 
     def _on_warm_loaded(self, key: str, image: QImage) -> None:

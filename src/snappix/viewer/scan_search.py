@@ -166,10 +166,10 @@ class _RecursiveSearchTask(QRunnable):
         # ``query_filenames`` below takes no cancel token and cannot be
         # abandoned mid-flight, so without this guard a stale task runs the
         # whole index query only to drop it at the check further down —
-        # delaying the *current* query's seed by that much (#159).
+        # delaying the *current* query's seed by that much.
         if self.cancel.is_cancelled():
             return
-        # Phase 1: cache seed (index query → convert), off-thread.
+        # Step 1: cache seed (index query → convert), off-thread.
         if self.search_index is not None and (self.includes or self.or_terms):
             try:
                 rows = self.search_index.query_filenames(
@@ -185,9 +185,9 @@ class _RecursiveSearchTask(QRunnable):
             if seed:
                 self.signals.results_ready.emit(self.generation, seed, True)
 
-        # Phase 2: authoritative live walk, filtered on this worker thread.
+        # Step 2: authoritative live walk, filtered on this worker thread.
         # 列挙できなかったディレクトリを数える — 0 件を「該当なし」と断定
-        # させないため（レビュー 2026-09-03 項目 #64。最近追加一覧の
+        # させないため（最近追加一覧の
         # ``RecentFilesScan.unreadable_dirs`` と同じ趣旨）。
         unreadable = 0
 
@@ -297,11 +297,10 @@ class RecursiveSearchScanner(QObject):
         self._signals.walk_truncated.connect(self._forward_walk_truncated)
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(1)
-        # 世代とキャンセルのペアは SessionOwner が 1 箇所で持つ（項目#35 /
-        # #61 付随）: ``start()`` = 旧セッション cancel + 世代++、``cancel()``
+        # 世代とキャンセルのペアは SessionOwner が 1 箇所で持つ:
+        # ``start()`` = 旧セッション cancel + 世代++、``cancel()``
         # = cancel + 世代++（キャンセル済みタスクが emit 済みの結果を消費側の
-        # ``generation == latest_generation()`` ガードで確実に落とす — 旧
-        # 手書きペアが先駆けた挙動そのもの）。
+        # ``generation == latest_generation()`` ガードで確実に落とす）。
         self._sessions = SessionOwner()
         # Optional SearchIndex: seeds the instant cache phase AND receives a
         # write-back of the live walk's descendants so a searched-but-
@@ -369,7 +368,7 @@ def _existing_paths(
     AND stays correct).  Only the *queried* members are ``DirEntry.stat``-ed —
     unrelated entries sharing the folder are skipped, so a folder full of
     non-image files doesn't pay per-entry stats (on POSIX/SMB each
-    ``DirEntry.stat`` can be a round-trip; #95) — and that stat data is
+    ``DirEntry.stat`` can be a round-trip) — and that stat data is
     surfaced as the ``(mtime, size)`` value so the phase-2 re-emit can replace
     the placeholder zeros on file entries.  Mere *presence* in the listing is
     not enough to prove existence-as-a-file, but every queried member was a
@@ -379,13 +378,13 @@ def _existing_paths(
     sibling differs from it by **case only**, the recorded path is ``os.stat``
     -ed once — on a case-insensitive volume (NTFS) a case-only rename leaves it
     readable and pruning it would drop a live hit, while a case-sensitive
-    volume answers ``ENOENT`` and the stale row stays pruned (#101).  A folder
+    volume answers ``ENOENT`` and the stale row stays pruned.  A folder
     whose ``os.scandir`` *itself* fails is only pruned wholesale when the failure
     proves it is gone (``FileNotFoundError`` / ``NotADirectoryError`` = ENOENT);
     any other ``OSError`` (NAS disconnect, share reconnect, transient access
     denial) leaves the folder *unknown* — its queried members are kept with
     placeholder stats rather than dropped, so a momentary I/O blip can't wipe
-    live phase-1 hits (#60, same rule as the tagdb prune's "un-enumerable =
+    live seed-pass hits (same rule as the tagdb prune's "un-enumerable =
     unknown, not empty").  Runs on the worker thread (never the GUI thread) and
     polls the ``_CancelToken`` once per folder so a superseded query
     short-circuits.
@@ -395,7 +394,7 @@ def _existing_paths(
     folders already being scandir-ed here).  Collapsed folder tiles seed their
     ``FolderEntry.mtime`` from it so the thumbnail loader's ``resolve_in_folder``
     path can hit the FolderPreviewCache on revisit instead of skipping it with a
-    ``folder_mtime=0`` live resolve (see #138).
+    ``folder_mtime=0`` live resolve.
     """
     by_parent: dict[str, list[str]] = {}
     for p in paths:
@@ -412,7 +411,7 @@ def _existing_paths(
             # ``with``: an iteration that raises midway (the transient-failure
             # branch below is exactly that case) must not leave the directory
             # handle open until GC — on Windows an open handle also blocks
-            # renaming / deleting the folder (#60 の付随指摘).
+            # renaming / deleting the folder.
             with os.scandir(parent) as it:
                 for e in it:
                     if e.name not in wanted:
@@ -421,7 +420,7 @@ def _existing_paths(
                             # resolved (with an identity check) in the miss
                             # path below.
                             case_variants.add(e.name.casefold())
-                        continue  # unrelated sibling — don't pay its stat (#95)
+                        continue  # unrelated sibling — don't pay its stat
                     try:
                         st = e.stat()
                         stats[e.name] = (st.st_mtime, st.st_size)
@@ -439,7 +438,7 @@ def _existing_paths(
             # scandir never reached, real stats preserved for any it did.  This
             # mirrors the per-file stat-failure branch above (a stat failure is
             # kept, not pruned) and the tagdb prune rule "an un-enumerable
-            # folder is unknown, not empty" (#183/#3): only ENOENT /
+            # folder is unknown, not empty": only ENOENT /
             # NotADirectory above are treated as "gone".
             for name in wanted:
                 stats.setdefault(name, (0.0, 0))
@@ -454,8 +453,8 @@ def _existing_paths(
             if st_pair is None and name.casefold() in case_variants:
                 # Case-only rename on a case-INSENSITIVE volume (NTFS: tagged
                 # as ``IMG001.jpg``, renamed to ``img001.jpg``): the recorded
-                # path still opens, so pruning it would drop a live hit
-                # (review #101).  Ask the filesystem itself rather than
+                # path still opens, so pruning it would drop a live hit.
+                # Ask the filesystem itself rather than
                 # assuming — on a case-sensitive volume those are two
                 # different files and the stat fails, keeping the stale row
                 # pruned.  Only paid when a case variant is actually sitting
@@ -485,17 +484,17 @@ def _posted_at_map(
     ``get_many`` — one ``os.stat`` per folder is the only filesystem touch.
     Cache-cold folders fall back to one **bounded head** ``post.md`` read each
     via :func:`post_md.read_post_meta` (the meta block is always at the top, so
-    the body is never transferred — #74).  Only called when the
+    the body is never transferred).  Only called when the
     active query has posted-date bounds (see ``want_posted_at``), so queries
     without a date filter pay zero extra I/O.  Polls the ``_CancelToken``
     once per folder; a cancelled call returns the partial map (the caller
     bails out right after).
 
     *known* is a set of folder keys whose ``posted_at`` was already resolved
-    (e.g. by phase 1); those folders are skipped entirely — no ``os.stat``, no
+    (e.g. by the seed pass); those folders are skipped entirely — no ``os.stat``, no
     cache hit, no ``post.md`` re-read.  This is what stops the vector worker's
-    top-k expansion from re-reading a cold folder's ``post.md`` that phase 1
-    already read (#146).
+    top-k expansion from re-reading a cold folder's ``post.md`` that the seed pass
+    already read.
     """
     folders: list[Path] = []
     seen: set[str] = set()
@@ -503,7 +502,7 @@ def _posted_at_map(
         folder = entry.path if entry.is_dir else entry.path.parent
         key = str(folder)
         if known is not None and key in known:
-            continue  # already resolved (phase 1) — don't stat / re-read
+            continue  # already resolved (seed pass) — don't stat / re-read
         if key not in seen:
             seen.add(key)
             folders.append(folder)
@@ -534,8 +533,8 @@ def _posted_at_map(
             return out
         # Only ``posted_at`` is wanted and the meta block is always at the top
         # of post.md (docs/formats/post-md.md §2), so read a bounded head
-        # instead of the whole file — the same reader folder_scan already uses
-        # (#88/#74).  A multi-MB body would otherwise cross the NAS in full for
+        # instead of the whole file — the same reader folder_scan already uses.
+        # A multi-MB body would otherwise cross the NAS in full for
         # a few hundred bytes of meta.  ``None`` covers both "unreadable" and
         # "no meta block" → date unknown.
         parsed = read_post_meta(folder / "post.md")
@@ -576,7 +575,7 @@ def _maybe_seed_posted_at(
     if not want:
         return results
     # Pass the already-resolved keys as *known* so a second seeding pass (the
-    # vector worker's top-k expansion) skips folders phase 1 already read (#146).
+    # vector worker's top-k expansion) skips folders the seed pass already read.
     posted.update(_posted_at_map(results, folder_cache, cancel, known=posted))
     return _apply_posted_at(results, posted)
 
@@ -603,7 +602,7 @@ def emit_with_existence_check(
     ``tags.db`` (tag + vector queries) is not revalidated by a live walk, so a
     row whose image was deleted / moved after tagging would otherwise stay a
     broken tile.  Rather than make the user wait for the existence check, the
-    caller has already emitted *phase1* (every match, zero filesystem I/O unless
+    caller has already emitted the seed result (every match, zero filesystem I/O unless
     a posted-date filter is active).  This helper then:
 
     1. collects candidate paths from *live_paths* and runs
@@ -611,7 +610,7 @@ def emit_with_existence_check(
        capturing folder mtimes for the loader cache).  *live_paths* is either
        a plain list (the single-round sources: tag-coverage / tag-strict) or —
        for sources whose candidate set must **grow** until enough live hits
-       are collected (the vector path's top-k widening, 項目#61) — a callable
+       are collected (the vector path's top-k widening) — a callable
        receiving the live-so-far ``{path: (mtime, size)}`` map and returning
        the next batch of candidate paths, or ``None`` to stop.  Batches may
        overlap: already-checked paths are skipped, so a widening query can
@@ -621,11 +620,11 @@ def emit_with_existence_check(
        map so it can fill real stats,
     3. re-seeds ``posted_at`` itself via :func:`_maybe_seed_posted_at` (pass
        ``want_posted_at`` / *folder_cache*): rows that *appeared* after
-       phase-1 seeding (a widened candidate set) get their dates resolved,
-       while folders phase 1 already resolved are skipped through the shared
-       *posted* map (#146) — a source that only shrinks pays no extra I/O,
-    4. re-emits the rebuilt set **only if it differs** from *phase1* — when
-       nothing was pruned and no stats were gained the phase-1 result was
+       the seed pass (a widened candidate set) get their dates resolved,
+       while folders the seed pass already resolved are skipped through the shared
+       *posted* map — a source that only shrinks pays no extra I/O,
+    4. re-emits the rebuilt set **only if it differs** from the seed result — when
+       nothing was pruned and no stats were gained the seed result was
        already final and the redundant re-emit / re-paint is skipped.
 
     Cancellation is polled after each existence-check round and before the

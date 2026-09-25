@@ -5,7 +5,7 @@ stored as a compact WebP on disk (under the portable ``data/`` tree), so
 revisiting a folder — or restarting the app — paints from local disk
 instead of re-reading (and re-decoding) originals over a NAS share.
 
-Design (see ``docs/claude/viewer.md`` and the plan):
+Design:
 
 * **One master thumbnail per image**, longest edge ``cache_edge`` (default
   1024, configurable).  The cache is *downscale-only*: the view scales the
@@ -357,7 +357,7 @@ class ThumbDiskCache(SqliteCacheBase):
         "Nothing is referenced" holds only for the instant of the ``DELETE``:
         the loader pool keeps decoding through the sweep, so a worker's
         :meth:`store` can write a fresh blob **and its row** while the sweep
-        walks (#95).  Unlinking that blob would leave a dangling row (a lookup
+        walks.  Unlinking that blob would leave a dangling row (a lookup
         miss + needless re-decode) or break an in-flight ``os.replace``, so the
         sweep skips (a) blobs a re-read of the ``thumb`` table says are
         referenced again and (b) ``*.webp.tmp`` temps owned by *this* process
@@ -378,8 +378,8 @@ class ThumbDiskCache(SqliteCacheBase):
     def _start_guarded_sweep(self, thread_name: str) -> None:
         """Daemon sweep of ``blob_dir`` that spares blobs rows point at.
 
-        Shared by :meth:`clear` and :meth:`sweep_orphans_async` — one guard
-        (#95), not two hand-written copies.
+        Shared by :meth:`clear` and :meth:`sweep_orphans_async` — one guard,
+        not two hand-written copies.
         """
         blob_dir = self._blob_dir
 
@@ -418,7 +418,7 @@ class ThumbDiskCache(SqliteCacheBase):
         replaced a corrupt index with an empty one): every blob is an orphan
         at that instant, but this store is already open and the loader pool
         starts :meth:`store` ing fresh blobs while the sweep walks — the same
-        race :meth:`clear` guards (#95).  Unlinking a freshly stored blob would
+        race :meth:`clear` guards.  Unlinking a freshly stored blob would
         leave a dangling row (lookup miss + needless re-decode), so the sweep
         re-reads the ``thumb`` table and skips anything referenced again.
         """
@@ -446,7 +446,7 @@ class ThumbDiskCache(SqliteCacheBase):
         ``unlink`` of already-dereferenced blob files is deferred — and because
         a concurrent :meth:`store` of the same ``(path, mtime, size)`` rewrites
         the very blob queued for deletion, the sweep re-checks each queued row
-        by PK and keeps whatever became referenced again (#95).
+        by PK and keeps whatever became referenced again.
 
         The lock is taken **once per 64-row pass** and released in between
         (not held across the whole sweep), so concurrent loader-pool
@@ -460,7 +460,7 @@ class ThumbDiskCache(SqliteCacheBase):
         removed = 0
         to_unlink: list[tuple[str, str]] = []
         with self._lock:
-            # Startup corruption probe, run explicitly (レビュー 08-27 #52):
+            # Startup corruption probe, run explicitly:
             # the base class's ``_prune_lru`` probes before its own budget
             # short-circuit, but this override keeps its own loop and would
             # otherwise return without touching a single page when the budget
@@ -500,7 +500,7 @@ class ThumbDiskCache(SqliteCacheBase):
                 # A worker can re-``store`` an evicted (path, mtime, size)
                 # while the sweep runs; the blob name is a hash of that key, so
                 # it rewrites the very file queued here and the async unlink
-                # would delete a *referenced* blob (#95).  Re-check each queued
+                # would delete a *referenced* blob.  Re-check each queued
                 # row by PK (batched) and keep anything referenced again.
                 for i in range(0, len(to_unlink), _UNLINK_CHUNK):
                     batch = to_unlink[i : i + _UNLINK_CHUNK]

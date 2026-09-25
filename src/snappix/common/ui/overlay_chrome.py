@@ -1,12 +1,12 @@
 """Structural base widgets for chrome drawn ON TOP OF image content.
 
 Companion module to :mod:`overlay`, which owns the **colours** of that
-chrome.  This one owns the **structure** those overlays kept re-writing by
-hand (UIレビュー 2026-08-28 N-111): the control capsule of the stage
+chrome.  This one owns the **structure** those overlays would otherwise
+re-write by hand: the control capsule of the stage
 preview (``viewer/image_view_parts/control_bar.py::_ControlBar``), the lightbox's capsule
 (``viewer/lightbox_parts/overlays.py::LightboxControlCapsule``) and the two
 auto-hiding pill labels (``_HintOverlay`` / ``CenterMessageOverlay``) all
-repeated the same four mechanisms independently:
+need the same four mechanisms:
 
 * the ``Qt.WA_StyledBackground`` attribute a **QWidget subclass** needs
   before Qt paints its stylesheet background at all,
@@ -14,17 +14,17 @@ repeated the same four mechanisms independently:
 * a single-shot auto-hide timer,
 * the scrim / button / label QSS built from the :mod:`overlay` palette.
 
-Duplicating the structure duplicated its defects: the missing
-``WA_StyledBackground`` of N-18 (capsule scrims not painted at all, leaving
-the buttons invisible on bright photos) existed in *both* capsules in
-exactly the same shape.  Everything here is therefore set up in the base
+Duplicating the structure duplicates its defects: a missing
+``WA_StyledBackground`` (capsule scrims not painted at all, leaving the
+buttons invisible on bright photos) would recur in every copy in exactly
+the same shape.  Everything here is therefore set up in the base
 ``__init__`` so a new overlay cannot forget it.
 
 **Colours stay in :mod:`overlay`** — this module only takes them as
 arguments (the two capsules deliberately differ by 5 in button-hover alpha,
 so the palette constant is a parameter, never a default baked into the QSS
 text).  Nothing here follows the theme: that is the registered
-image-overlay exception of docs/claude/design.md 使用ルール 2.
+image-overlay exception to the theme-token rule.
 """
 
 from __future__ import annotations
@@ -145,9 +145,8 @@ class OverlayCapsule(QWidget):
 
     * ``Qt.WA_StyledBackground`` — **mandatory** on a ``QWidget`` subclass
       whose background comes from a stylesheet.  Without it Qt paints
-      nothing and the scrim silently disappears (N-18); a bare ``QWidget``
-      *instance* does not need it, which is why the omission survived review
-      for so long.
+      nothing and the scrim silently disappears; a bare ``QWidget``
+      *instance* does not need it, which makes the omission easy to miss.
     * the capsule / button / label QSS, generated once by :func:`capsule_qss`
       from :mod:`overlay` constants passed in by the subclass.
     * uniform button construction (:meth:`make_button`) and the parent-rect

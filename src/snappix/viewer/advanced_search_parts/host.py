@@ -7,7 +7,7 @@
 コントローラ側が触ってよいホストの面をこの 1 ファイルに閉じる。
 
 規約: コントローラはホストの ``_`` 付き属性を触らない。増やしたくなったら
-まずここへ 1 行足す（= 境界が広がったことがレビューに見える）。
+まずここへ 1 行足す（= 境界が広がったことが差分に見える）。
 """
 
 from __future__ import annotations
@@ -41,10 +41,9 @@ class SearchHost(Protocol):
     :meth:`set_search_status` / :meth:`sorted_dir_first` /
     :meth:`drop_thumb_markers` / :meth:`update_filter_bar` /
     :meth:`sync_search_mode_chips` / :meth:`set_breadcrumb_count_text` /
-    :meth:`strip_filter_control_field` / :meth:`batched_condition_clear` /
-    :meth:`set_hide_nsfw` / :meth:`clear_filter_text` /
-    :meth:`set_locked_only_checked` / :meth:`exit_overlay` /
-    :meth:`maybe_start_recursive_scan` / :meth:`on_date_filter_changed` /
+    :meth:`clear_condition_dimension` / :meth:`batched_condition_clear` /
+    :meth:`set_hide_nsfw` / :meth:`exit_overlay` /
+    :meth:`maybe_start_recursive_scan` /
     :meth:`set_search_indexes` / :meth:`request_tag_db_reload`。
     """
 
@@ -182,8 +181,12 @@ class SearchHost(Protocol):
     def set_breadcrumb_count_text(self, text: str) -> None:
         """パンくずの件数テキストを差し替える。"""
 
-    def strip_filter_control_field(self, field: str) -> None:
-        """絞り込み欄からコントロールトークン 1 軸（``score:`` 等）を落とす。"""
+    def clear_condition_dimension(self, dim_id: str) -> None:
+        """条件チップの × と同じ経路で *dim_id* の 1 軸だけを中立化する。
+
+        0 件カードの緩和はこれを呼ぶ（× と 2 実装を持たない）。*dim_id* は
+        ``condition_chips.ACTION_IDS`` の鍵。
+        """
 
     def batched_condition_clear(self) -> AbstractContextManager[None]:
         """複数次元の中立化を 1 回の引き直しへ畳むコンテキストマネージャ。
@@ -196,20 +199,11 @@ class SearchHost(Protocol):
     def set_hide_nsfw(self, band: str) -> None:
         """「年齢制限を隠す」の帯を設定する（メニュー同期 + 再構築込み）。"""
 
-    def clear_filter_text(self) -> None:
-        """絞り込み欄を正規の signal 経路で空にする。"""
-
-    def set_locked_only_checked(self, checked: bool) -> None:
-        """🔒 のみ表示を正規の経路で切り替える。"""
-
     def exit_overlay(self) -> None:
         """占有一覧から退場する（AI 検索がグリッドの単一所有者になる）。"""
 
     def maybe_start_recursive_scan(self) -> None:
         """再帰ファイル名検索が再び適格になったかを評価して蹴る。"""
-
-    def on_date_filter_changed(self) -> None:
-        """投稿日コンボの正規ハンドラ（軸の中立化 + アクセント同期）。"""
 
     def set_search_indexes(self, tag_index, vector_index) -> None:
         """ホストが握る索引ハンドルを差し替える（再読み込みの反映）。"""

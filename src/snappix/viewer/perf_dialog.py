@@ -94,9 +94,8 @@ _CATEGORY_LABELS = {
     "folder_preview_scandir": "  └ os.scandir(subfolder)",
     "post_md_read": "  └ post.md read_text",
     "post_md_parse": "  └ post.md parse",
-    # UIレビュー 07-25 #82: 07-19 High#1 で「右ペイン」→「情報パネル」へ用語
-    # 統一した際の置換漏れ（perf の内部カテゴリ名は i18n を通らないため
-    # grep 一括置換の対象から漏れていた）。
+    # 用語は「情報パネル」に揃える（perf の内部カテゴリ名は i18n を通らないため
+    # 文言の一括置換の対象にならない）。
     "list_files": "list_files (info panel)",
     "list_files_scandir": "  └ os.scandir",
     "recursive_search": "recursive name search (worker)",
@@ -168,8 +167,8 @@ class PerfDialog(QDialog):
         # enabled) since new events only ever append.
         self._last_render_key: tuple[int, bool] | None = None
 
-        # 実際に表示されている間だけ回す（``showEvent`` / ``hideEvent``）—
-        # レビュー 2026-07-31 #66。このダイアログは main_window が単一
+        # 実際に表示されている間だけ回す（``showEvent`` / ``hideEvent``）。
+        # このダイアログは main_window が単一
         # インスタンスを使い回す（WA_DeleteOnClose 無し）ので、無条件に
         # start すると閉じた後もセッション終了まで 500ms ごとに
         # ``recorder().snapshot()``（ロック保持下で最大 4000 件の
@@ -209,8 +208,8 @@ class PerfDialog(QDialog):
         self._status_label.setStyleSheet(hint_style())
         ctrl.addWidget(self._status_label, 1)
 
-        # UIレビュー 07-25 #82: メニュー「表示 ▸ 診断 ▸ 計測結果をクリア」
-        # (viewer.main_window.perf_clear, main_window.py — 今回の編集対象外)
+        # メニュー「表示 ▸ 診断 ▸ 計測結果をクリア」
+        # (viewer.main_window.perf_clear)
         # と同じ操作なので、専用キーを持たずそのキーを直接再利用して名称の
         # ドリフトを構造的に防ぐ（表記揺れガード test_no_duplicate_values 対応）。
         self._clear_btn = QPushButton(t("viewer.main_window.perf_clear"))
@@ -220,9 +219,9 @@ class PerfDialog(QDialog):
         self._copy_btn = QPushButton(t("viewer.perf_dialog.copy_stats"))
         self._copy_btn.clicked.connect(self._on_copy)
         ctrl.addWidget(self._copy_btn)
-        # UIレビュー 2026-09-11 N-30: 「計測結果をクリア」は確認の無い破棄
+        # 「計測結果をクリア」は確認の無い破棄
         # なのに、``QDialog`` の中の ``QPushButton`` は既定で
-        # ``autoDefault`` — 表を眺めていて Enter を押しただけで消えていた。
+        # ``autoDefault`` — 表を眺めていて Enter を押しただけで消えてしまう。
         # 下の ``demote_close_default`` は ``QDialogButtonBox`` の中しか見ない
         # ので、ボックス外のこの 2 本は自分で降格する（先行例は
         # ``plugin_host/dialog.py``）。
@@ -278,20 +277,19 @@ class PerfDialog(QDialog):
         self._events_table.horizontalHeader().setSectionResizeMode(
             2, QHeaderView.Stretch
         )
-        # UIレビュー 07-25 #140: カテゴリ列（インデント付きの長いラベルを持つ）
+        # カテゴリ列（インデント付きの長いラベルを持つ）
         # が ResizeToContents のまま実測 130px 前後まで縮み、詳細列（Stretch）
-        # が残り全部（実測 750px 超）を持っていく配分になっていた。カテゴリ
+        # が残り全部（実測 750px 超）を持っていく配分になる。カテゴリ
         # 列が過度に狭くならないよう幅を与える。
-        # (UIレビュー07-25 追修) 以前は setMinimumSectionSize(160) だったが、
-        # これはヘッダ全体の下限なので短い「時刻」列まで 160px 以上に膨らませ、
-        # コメントの意図（カテゴリ列だけ）と食い違っていた。列単位で幅を決める。
+        # setMinimumSectionSize はヘッダ全体の下限なので短い「時刻」列まで
+        # 膨らませてしまう。列単位で幅を決める。
         self._events_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.Interactive
         )
         self._events_table.horizontalHeader().resizeSection(0, 160)
         self._events_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        # (UIレビュー 07-25 #97) 見出しの寄せを列の中身に合わせる — 右寄せの
-        # 数値・時刻セルの上で見出しだけが中央のままだった。
+        # 見出しの寄せを列の中身に合わせる — 右寄せの
+        # 数値・時刻セルの上で見出しだけが中央に残らないように。
         align_header(self._stats_table, right=range(1, 7))
         align_header(self._events_table, right=(1,))
         outer.addWidget(self._events_table, 2)
@@ -300,7 +298,7 @@ class PerfDialog(QDialog):
             localize_buttons(QDialogButtonBox(QDialogButtonBox.Close))
         )
         # Close は RejectRole なので ``rejected`` だけが発火する
-        # （``accepted`` への配線は死に配線だった — レビュー 2026-07-31 #66）。
+        # （``accepted`` への配線は発火しない）。
         buttons.rejected.connect(self.close)
         outer.addWidget(buttons)
 
@@ -318,7 +316,7 @@ class PerfDialog(QDialog):
     def _on_copy(self) -> None:
         text = self._format_snapshot_as_text()
         QGuiApplication.clipboard().setText(text)
-        # UIレビュー 07-25 #38: クリップボードは不可視なので、成功トースト
+        # クリップボードは不可視なので、成功トースト
         # （design.md の「成功 = 非モーダル」）が唯一の完了フィードバック。
         show_toast(self, t("viewer.perf_dialog.copy_stats_done_toast"), kind="success")
 

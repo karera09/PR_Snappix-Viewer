@@ -86,14 +86,13 @@ def classify_post_links(
     that self-link always resolves (the post is, by definition, downloaded —
     it's the one on screen), so every post's card would sprout a local-copy pill
     + 📁 that just re-opens the folder already showing, drowning out the
-    signal for genuine links to *other* downloaded posts (レビュー
-    2026-08-27 #66/#78). A link resolving to ``self_folder`` is therefore
+    signal for genuine links to *other* downloaded posts. A link resolving to ``self_folder`` is therefore
     treated the same as an unresolved one — left untouched, no key emitted.
 
     *resolve* is called once per anchor and results are **not** cached here
     (this module is stateless): the caller re-runs classification on every
     ``setHtml``, so it owns the memo whose lifetime matches the shown post —
-    see ``MarkdownView._post_link_cache`` (レビュー 2026-07-31 #23).
+    see ``MarkdownView._post_link_cache``.
     """
     targets: dict[str, Path] = {}
     n = 0

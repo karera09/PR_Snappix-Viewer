@@ -12,8 +12,7 @@ the source of truth" contract the caches use:
   (``scan_search._node_row_to_entry``) does no filesystem I/O at all, so a row
   whose file changed or vanished is surfaced as-is until the live walk below
   corrects it.  The authority for staleness is that walk, never a per-hit
-  re-``stat`` (the same stale policy ``docs/claude/viewer/scanning.md``
-  records for the other index-seeded listings).
+  re-``stat`` (the same stale policy as the other index-seeded listings).
 * The viewer always runs a **live walk in parallel** (stale-while-revalidate):
   the index gives instant results, the live walk fills anything the index is
   missing (un-indexed sub-trees) and corrects anything stale.  So a cold or
@@ -34,7 +33,7 @@ caches follow):
 A third table, ``post`` (one row per ``post.md`` holding its full text for the
 standalone full-text search dialog), existed up to schema version 2.  That
 dialog was retired in favour of the filter box's ``body:`` syntax, which reads
-``post.md`` lazily from the filesystem (issue #81), so version 3 **drops** the
+``post.md`` lazily from the filesystem, so version 3 **drops** the
 table: an index built by an older version sheds its stored bodies on first
 open (the file is not ``VACUUM``-ed — freed pages are reused by later writes).
 
@@ -65,7 +64,7 @@ from pathlib import Path
 from loguru import logger
 
 from ..common.post_meta import KEY_POST_ID, KEY_SERVICE
-from ._sqlite_cache import SqliteCacheBase
+from ._sqlite_cache import SqliteCacheBase, encodable_rows
 
 # Approximate fixed bytes charged per row on top of measured text lengths
 # (integer/real columns, PK + LRU index entries, sqlite row overhead).
@@ -79,11 +78,11 @@ _NODE_SIZE_SQL = (
     "+LENGTH(CAST(cpath AS BLOB))"
 )
 # Rowid window per locked chunk of the root-case candidate scan
-# (``_canonicalize_root`` phase 1).  That scan has no usable index (a
+# (``_canonicalize_root`` step 1).  That scan has no usable index (a
 # casefolded range / ``LOWER()`` cannot seek), so it walks the table — chunking
 # it by rowid bounds the time the index lock is held per statement, letting the
 # GUI's ``resolve_postref`` interleave instead of waiting out a whole-table
-# sweep (#92).
+# sweep.
 _SCAN_WINDOW = 20000
 # Upper-bound sentinel for a prefix range scan: the highest legal Unicode
 # scalar (U+10FFFF, UTF-8 ``F4 8F BF BF``) so ``path < lo + _HI`` captures
@@ -94,7 +93,7 @@ _SCAN_WINDOW = 20000
 # sentinel (``tagger/tagdb.py``).
 _HI = "\U0010FFFF"
 # Cap on the number of seed-hit rows whose ``used_at`` a single
-# ``query_filenames`` call refreshes (項目54).  A 1-character query can hit
+# ``query_filenames`` call refreshes.  A 1-character query can hit
 # the 50 000-row limit; touching *every* hit inside the query executed a
 # ~50 000-row ``UPDATE`` while holding the index lock (~0.8 s measured on a
 # 120k-node index), stalling the GUI's ``resolve_postref`` and the scan
@@ -165,9 +164,9 @@ class SearchIndex(SqliteCacheBase):
     SCHEMA_TABLES = ("node", "postref")
     # Only ``node`` is LRU-touched: ``postref`` is never pruned
     # (their ``used_at`` is set at upsert time and left alone), so the base
-    # class's touch buffer is wired to the ``node`` table alone (#178).
+    # class's touch buffer is wired to the ``node`` table alone.
     # A node's ``used_at`` means "recently *served to the UI* as a seed hit"
-    # (only the first TOUCH_USED_LIMIT hits per query are touched — 項目54),
+    # (only the first TOUCH_USED_LIMIT hits per query are touched),
     # not "matched by some query at some point".
     _TOUCH_SQL = "UPDATE node SET used_at=? WHERE path=?"
 
@@ -244,7 +243,7 @@ class SearchIndex(SqliteCacheBase):
                 self._conn.commit()
                 ver = 2
             if ver < 3:
-                # The standalone full-text search dialog is gone (issue #81);
+                # There is no standalone full-text search dialog;
                 # its ``post`` table (full ``post.md`` bodies, never pruned —
                 # hundreds of MB on a big library) has no reader left.  Drop
                 # it so an index built by an older version stops carrying the
@@ -264,7 +263,9 @@ class SearchIndex(SqliteCacheBase):
         if not rows:
             return
         now = time.time()
-        params = [
+        # 符号化できないパス（孤立サロゲート）の行は executemany をその行以降
+        # 全滅させるので、その行だけ落とす（索引から漏れるだけで誤答はしない）。
+        params = encodable_rows(
             (
                 str(r.path),
                 r.name,
@@ -275,7 +276,7 @@ class SearchIndex(SqliteCacheBase):
                 now,
             )
             for r in rows
-        ]
+        )
         with self._lock:
             self._conn.executemany(
                 "INSERT OR REPLACE INTO node"
@@ -298,7 +299,7 @@ class SearchIndex(SqliteCacheBase):
         but it does so in **bounded ``rowid`` windows, taking the lock once per
         window and releasing it in between**, so a big library's scan no longer
         blocks the GUI's ``resolve_postref`` (or the search worker) for the
-        whole sweep (#92).  ``substr`` isolates the stored root prefix so rows
+        whole sweep.  ``substr`` isolates the stored root prefix so rows
         already at the current case are skipped.
         """
         if cf_col is not None:
@@ -393,7 +394,7 @@ class SearchIndex(SqliteCacheBase):
             return lo, hi
         lo_cf = lo.casefold()
         n = len(lo)
-        # Phase 1 (in-DB only — no filesystem I/O): collect the distinct
+        # Step 1 (in-DB only — no filesystem I/O): collect the distinct
         # *stored spellings* of this root's prefix that differ from the current
         # one.  Each table is walked in rowid windows that take the lock one
         # window at a time (see :meth:`_collect_root_variants`).
@@ -406,7 +407,7 @@ class SearchIndex(SqliteCacheBase):
             ("postref", "folder", None),
         ):
             cands |= self._collect_root_variants(table, col, cf_col, n, lo, hi)
-        # Phase 2 (UNLOCKED): vet each candidate.  ``os.path.samefile`` stats
+        # Step 2 (UNLOCKED): vet each candidate.  ``os.path.samefile`` stats
         # the directory (the NAS round-trip) — kept out of the lock so an
         # offline share cannot stall other index users.
         variants: list[str] = []
@@ -426,7 +427,7 @@ class SearchIndex(SqliteCacheBase):
             except (OSError, ValueError):
                 continue
             variants.append(v)
-        # Phase 3 (locked): rewrite the confirmed variants, preferring the
+        # Step 3 (locked): rewrite the confirmed variants, preferring the
         # row with the newer ``mtime`` on any primary-key collision.
         with self._lock:
             if lo in self._root_case_done:
@@ -459,7 +460,7 @@ class SearchIndex(SqliteCacheBase):
                     # sitting directly in the root it equals the root itself
                     # (no trailing separator, sorting *below* the range bound
                     # ``v``), so that exact value is matched and mapped
-                    # separately rather than spliced (#93).
+                    # separately rather than spliced.
                     self._conn.execute(
                         "UPDATE OR REPLACE postref"
                         " SET folder = CASE WHEN folder = ?"
@@ -497,14 +498,14 @@ class SearchIndex(SqliteCacheBase):
         1–2 char terms).  Excludes are applied in Python only — an exclude
         term that happens to sit in *root*'s own prefix must not drop rows.
 
-        *or_terms* is the Danbooru-style ``~`` pool (#3): when non-empty, a
+        *or_terms* is the Danbooru-style ``~`` pool: when non-empty, a
         row must additionally contain at least ONE member in ``rel``.  Pool
         members deliberately stay OUT of the ``instr`` prefilter (an AND
         there would drop legitimate single-alternative matches — the
         prefilter must remain a superset), so a pool-only query scans the
         subtree range and filters strictly in Python: correctness first.
 
-        **LRU semantics (項目54):** ``used_at`` marks rows *served to the UI
+        **LRU semantics:** ``used_at`` marks rows *served to the UI
         as a seed*, not every row a query ever matched — only the first
         :data:`TOUCH_USED_LIMIT` hits are touched, and the touch happens in
         its own short lock acquisition after the query lock is released, so
@@ -525,7 +526,7 @@ class SearchIndex(SqliteCacheBase):
         # so a term spanning path components ("sub/name") must have its ``/``
         # mapped to ``os.sep`` for the prefilter — on Windows the raw term
         # would match zero ``cpath`` rows and silently kill the instant seed
-        # phase (#14).  Windows file names cannot contain ``/``, and on POSIX
+        # phase.  Windows file names cannot contain ``/``, and on POSIX
         # the replace is a no-op, so this stays a strict superset.
         for inc in includes:
             sql += " AND instr(cpath, ?) > 0"
@@ -559,7 +560,7 @@ class SearchIndex(SqliteCacheBase):
                 )
                 touched.append(path_s)
         # Apply the LRU touch OUTSIDE the query's lock hold, and only for the
-        # first TOUCH_USED_LIMIT rows actually returned to the UI (項目54).
+        # first TOUCH_USED_LIMIT rows actually returned to the UI.
         # Re-acquiring the lock gives a waiting resolve_postref / upsert_nodes
         # a chance to run in between; the bounded executemany then costs
         # milliseconds instead of ~0.8 s for a 50 000-hit query.
@@ -582,11 +583,11 @@ class SearchIndex(SqliteCacheBase):
         if not rows:
             return
         now = time.time()
-        params = [
+        params = encodable_rows(
             (service, post_id, str(folder), float(mtime), now)
             for (service, post_id, folder, mtime) in rows
             if service and post_id
-        ]
+        )
         if not params:
             return
         with self._lock:
@@ -666,7 +667,7 @@ class SearchIndex(SqliteCacheBase):
         governs the cheaply regenerable ``node`` index alone.  Eviction order
         is ``used_at`` ascending, where ``used_at`` means "recently served to
         the UI as a seed hit" — a query touches only its first
-        :data:`TOUCH_USED_LIMIT` hits (項目54), so rows merely *matched* by a
+        :data:`TOUCH_USED_LIMIT` hits, so rows merely *matched* by a
         huge query keep their old stamp and are evicted first, which is the
         intended bias: the rows the user actually saw stay warm.
 
@@ -676,8 +677,8 @@ class SearchIndex(SqliteCacheBase):
         Like the base class's :meth:`._sqlite_cache.SqliteCacheBase._prune_lru`,
         the running total is **decremented by each deleted row's measured
         bytes instead of re-measured per pass** — re-running the ``SUM`` over
-        the whole ``node`` table every pass turned a large overshoot into a
-        dozen-plus full-table scans, each holding the lock (#94).  Rows written
+        the whole ``node`` table every pass would turn a large overshoot into a
+        dozen-plus full-table scans, each holding the lock.  Rows written
         concurrently between passes are simply caught by the next prune (the
         budget is soft).
 

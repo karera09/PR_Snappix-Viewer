@@ -106,12 +106,12 @@ class ParsedPost:
     def thumbnail(self) -> str | None:
         """First body image ref's decoded filename (e.g. ``"絵.jpg"``), lazily.
 
-        (項目#174) 製品コードにこのヒントの消費者は居ない（サムネイル解決は
-        常に ``folder_scan.find_first_image`` — apply_metadata / apply_preview
-        の docstring 参照）のに、``parse_post_md`` が毎回本文全体へ正規表現を
-        掛けていた。``parse_post_md`` はキャッシュ構築の最重量経路で全文
-        （64 KiB 上限なし）を受け取るため、実測で parse 時間の約 25% が
-        誰も読まない抽出に消えていた — 初アクセス時に 1 回だけ評価する
+        製品コードにこのヒントの消費者は居ない（サムネイル解決は常に
+        ``folder_scan.find_first_image`` — apply_metadata / apply_preview の
+        docstring 参照）。``parse_post_md`` はキャッシュ構築の最重量経路で全文
+        （64 KiB 上限なし）を受け取るため、毎回本文全体へ正規表現を掛けると
+        実測で parse 時間の約 25% が誰も読まない抽出に消える — 初アクセス時に
+        1 回だけ評価する
         （``cached_property``。dataclass のフィールドではないので等価比較や
         repr には関与しない）。
         """
@@ -125,7 +125,7 @@ def _decode_ref(encoded: str) -> str:
 def extract_thumbnail_candidate(text: str) -> str | None:
     """Return the first ``![](./...)`` filename (URL-decoded), or None.
 
-    (項目#174) 戻り値は**単一のファイル名コンポーネント**に正規化する:
+    戻り値は**単一のファイル名コンポーネント**に正規化する:
     復号結果が区切り文字（``/`` / ``\\``）を含む・``.`` / ``..`` である・
     空である場合は ``None``。``decode_md_ref``（= ``urllib.parse.unquote``）は
     ``..%2F..%2Fsecret.jpg`` を素通しでパス脱出値へ復号してしまうため、
@@ -158,7 +158,7 @@ def _parse_posted_at(value: str) -> datetime | None:
     if not value:
         return None
     try:
-        # ISO 8601 with timezone, as written by orchestrator
+        # ISO 8601, usually with a timezone (docs/formats/post-md.md §3)
         return datetime.fromisoformat(value)
     except ValueError:
         return None
@@ -215,8 +215,7 @@ def read_post_meta(md_path: Path) -> ParsedPost | None:
     Returns ``None`` when the file is unreadable (``OSError``) or yields
     neither meta lines nor a title (a plain ``.md`` with no ``- key:`` lines
     and no ``# heading``) — the caller treats both as "no post metadata to
-    show".  A ``post.md`` carrying **only a title** is still returned (項目
-    #169): the spec (docs/formats/post-md.md §3/§8) makes every meta key
+    show".  A ``post.md`` carrying **only a title** is still returned: the spec (docs/formats/post-md.md §3/§8) makes every meta key
     optional and promises the title still displays, and the grid tile path
     (``folder_scan`` → ``parse_post_md``) already shows such a title — the
     info panel / stage header, which go through this reader, must agree
@@ -229,7 +228,7 @@ def read_post_meta(md_path: Path) -> ParsedPost | None:
 
 
 def read_post_meta_checked(md_path: Path) -> "tuple[ParsedPost | None, bool]":
-    """:func:`read_post_meta` + a *transient-failure* flag (issue #94).
+    """:func:`read_post_meta` + a *transient-failure* flag.
 
     Returns ``(parsed, retryable)``.  ``retryable`` is ``True`` only when the
     read failed with an :class:`OSError` **other than** "the file genuinely
@@ -260,12 +259,11 @@ def parse_post_md(text: str) -> ParsedPost:
     A leading UTF-8 BOM is stripped: several callers read the file themselves
     with plain ``utf-8`` (folder scan / search / cache builder), and a BOM
     left on line 1 would make it match neither the title nor the meta regex —
-    silently demoting the whole head to body (#24, code review 2026-07-31).
+    silently demoting the whole head to body.
 
     The head boundary itself (which lines are title / meta / body) is decided
     by the shared ``common.post_meta.scan_head`` — the single implementation
-    of the public rule in docs/formats/post-md.md §2 (レビュー 2026-09-03 項目
-    #111).  Only the value → type conversions below are this parser's own.
+    of the public rule in docs/formats/post-md.md §2.  Only the value → type conversions below are this parser's own.
     """
     text = text.lstrip("﻿")
     head = scan_head(text)
@@ -273,7 +271,7 @@ def parse_post_md(text: str) -> ParsedPost:
     parsed = ParsedPost()
     parsed.title = head.title
     # A malformed head that repeats a key keeps the **last** occurrence
-    # (``head_meta`` agrees, so a reader and the parser can't disagree — #107).
+    # (``head_meta`` agrees, so a reader and the parser can't disagree).
     for _i, key, value in head.meta:
         parsed.meta[key] = value.strip()
     body_start = head.body_start
@@ -302,6 +300,5 @@ def parse_post_md(text: str) -> ParsedPost:
         parsed.plan_price = parsed.meta[KEY_PLAN_PRICE].strip()
 
     parsed.body = "\n".join(lines[body_start:]).lstrip("\n")
-    # ``parsed.thumbnail`` is a lazy ``cached_property`` over the body (項目
-    # #174) — no eager regex sweep of the (possibly unbounded) full text here.
+    # ``parsed.thumbnail`` is a lazy ``cached_property`` over the body — no eager regex sweep of the (possibly unbounded) full text here.
     return parsed

@@ -36,7 +36,7 @@ commit, against one.
 
 The search index (``viewer_search_index.db``) deliberately stays separate: it
 is a prefix-*enumerable* index with a different stale policy
-(stale-while-revalidate, see ``docs/claude/viewer/scanning.md``), not a point
+(stale-while-revalidate: stale rows are served at once and refreshed behind), not a point
 lookup, and it is the one store whose rows are read by a query planner rather
 than by primary key.
 
@@ -261,7 +261,7 @@ class ViewerCacheStore(SqliteStoreBase):
 
         The attached caches' own ``close`` only flushes (the handle is not
         theirs), so this is the single close the window's shutdown budget
-        schedules — 詳細は ``docs/claude/viewer/scanning.md`` の終了処理節。
+        schedules — 終了時は窓の有界な終了予算の中でこれ 1 回だけを閉じる。
         """
         for cache in self.caches():
             cache.close()

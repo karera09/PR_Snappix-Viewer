@@ -1,11 +1,9 @@
-"""省略表示ラベル（デザインシステム共有部品 — 項目#195）.
+"""省略表示ラベル（デザインシステム共有部品）.
 
 「_full 保持 / minimumSizeHint=(0, fm.height()) / paintEvent で elidedText」
-の同型実装がリポジトリに 3 つあった（viewer の ``_ElidedLabel`` / AI プラグ
-インの ``_ElidedPathLabel`` / tagger の ``ElidingLabel``）。修正が 1 コピー
-にしか当たらない事故（#141: ツールチップ欠落が 1 実装だけ直った）を繰り返さ
-ないため、``snappix`` を import できる 2 本（viewer 本体・AI プラグインの
-ビューア側）はこの 1 実装へ寄せる。tagger サブツリーは snappix 非依存の
+の同型実装を複製すると、修正が 1 コピーにしか当たらない（ツールチップ
+欠落が 1 実装だけ直る）。そこで ``snappix`` を import できる側（viewer
+本体・AI プラグインのビューア側）はこの 1 実装を使う。tagger サブツリーは snappix 非依存の
 鉄則があるため自前コピーを維持する（tagger/_widgets.py::ElidingLabel）。
 """
 
@@ -26,12 +24,12 @@ class ElidedLabel(QLabel):
     paint an elided form based on the current widget width.
 
     * フルテキストは**常に**ツールチップに出す（初期テキスト・``setText``
-      とも — #141 でコピーごとに直ったり直らなかったりした点を契約にする）。
+      とも。これを部品の契約にする）。
       呼び出し側が ``setToolTip`` で上書きするのは自由（例: 表示はファイル名・
       ツールチップはフルパス）。
-    * ``TextSelectableByMouse`` は立てない（項目#195 — paintEvent を全面
-      上書きしているため選択ハイライトが描画されず、「選べるのに見えない」
-      振る舞いになっていた。見た目を優先し選択は外す）。
+    * ``TextSelectableByMouse`` は立てない（paintEvent を全面上書きしている
+      ため選択ハイライトが描画されず、「選べるのに見えない」振る舞いになる。
+      見た目を優先し選択は外す）。
     """
 
     def __init__(

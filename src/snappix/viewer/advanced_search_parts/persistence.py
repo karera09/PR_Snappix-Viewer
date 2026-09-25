@@ -147,11 +147,14 @@ def save(ctl, state) -> None:
     # 精度は tags.db があるときだけ復元される（無ければスライダは既定値の
     # まま）ので、無条件に書き戻すと非対称になる — tags.db の無いライブラリで
     # 開いたセッションが、以前保存した精度を既定値で潰してしまう。復元側と
-    # 同じ条件でだけ永続化する。
-    if (
-        host.tag_index is not None
-        and ctl._deferred_threshold_restore is None
-    ):
+    # 同じ条件でだけ永続化する。繰り延べ中（tags.db 未オープン）は種別と
+    # 同じく繰り延べ値そのものを書く — 何も書かないと、新品のスクラッチ
+    # state へ書く履歴スナップショット（``capture_search_state``）が既定値を
+    # 持ち、「戻る」の復元が繰り延べを既定値へ差し替えて保存精度を失う。
+    deferred_threshold = ctl._deferred_threshold_restore
+    if deferred_threshold is not None:
+        state.tag_search_threshold = float(deferred_threshold)
+    elif host.tag_index is not None:
         state.tag_search_threshold = float(ctl.tag_threshold_slider.value())
     # provider が一度も点灯しなかったセッション（素の配布・activate 失敗）では
     # 繰り延べ復元が未適用のままなので、コンボの "all" ではなく保存値をその

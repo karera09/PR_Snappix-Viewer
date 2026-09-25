@@ -46,9 +46,8 @@ class Segment:
 
 #: パンくず / ナビレール / 全文検索ダイアログ / 横断キュレーション一覧が共有する
 #: 「ライブラリ基準の選び方」と相対成分計算。実体は Qt 非依存の
-#: :mod:`snappix.common.fsutil` にあり（UIレビュー 2026-08-28 N-49 —
-#: ``user_meta`` がワーカースレッドから同じ規則を使うため）、ここは歴史的な
-#: import 経路を保つための再エクスポート。
+#: :mod:`snappix.common.fsutil` にあり（``user_meta`` がワーカースレッドから
+#: 同じ規則を使うため）、ここは既存の import 経路を保つための再エクスポート。
 _relative_parts = relative_parts
 
 
@@ -62,16 +61,16 @@ def path_segments(
     of them is an ancestor-or-self of *root*, the trail is shown **relative to
     that library root**: the first segment is the library root itself (rendered
     with *display_label* — e.g. the Japanese 「ライブラリ」 for the default
-    library, UIレビュー #6) and the following segments descend to *root*.  The
-    **shallowest (outermost)** matching base wins when several nest
-    (UIレビュー 07-25 #54): 登録ライブラリのサブフォルダもライブラリ登録
+    library) and the following segments descend to *root*.  The
+    **shallowest (outermost)** matching base wins when several nest.
+    登録ライブラリのサブフォルダもライブラリ登録
     されている構成で最も深い基準を採ると、そこへ入った瞬間にパンくずが
     「ここが最上位」へ再ルート化し、外側のライブラリへ戻る道筋が画面から
     消えていた — 外側基準なら道筋が連続する（閉じ込め方針は下記のまま）。
     This keeps
     the out-of-library system ancestors (``/`` … ``/home`` …) out of the trail
     and the ``…`` overflow menu, so a click can never wander outside the
-    library (UIレビュー #5).
+    library.
 
     When no base matches (the current folder sits outside every library root),
     it falls back to the absolute trail: the first segment is the filesystem
@@ -83,8 +82,8 @@ def path_segments(
     testable (a ``PurePosixPath`` stays POSIX even when run on Windows).
     """
     if library_bases:
-        # 基準の選び方は :func:`pick_library_base` に一本化（UIレビュー07-25
-        # 追修 — 検索ダイアログの「検索対象」表記と規則を共有する）。
+        # 基準の選び方は :func:`pick_library_base` に一本化（検索ダイアログの
+        # 「検索対象」表記と規則を共有する）。
         best = pick_library_base(root, library_bases)
         if best is not None:
             base, label, rel = best
@@ -193,13 +192,13 @@ class BreadcrumbBar(QWidget):
         self._segments: list[Segment] = []
         self._count_text = ""
         self._full_path = ""
-        # Library roots to relativise the trail against (UIレビュー #5/#6).
+        # Library roots to relativise the trail against.
         # Each ``(base_path, display_label)``; the window keeps this in sync via
         # :meth:`set_library_bases`.  ``_root_path`` is the last path handed to
         # :meth:`set_path`, so a bases change can re-render the current trail.
         self._library_bases: list[tuple[Path, str]] = []
         self._root_path: Path | None = None
-        # Non-path "current location" label (UIレビュー 07-25 #60).  When set, the
+        # Non-path "current location" label.  When set, the
         # bar renders this single crumb instead of a filesystem trail — see
         # :meth:`set_virtual_crumb`.
         self._virtual_label: str | None = None
@@ -211,7 +210,7 @@ class BreadcrumbBar(QWidget):
         self._seg_widths: list[int] = []
         self._ellipsis_width = 0
         self._sep_width = 0
-        # Signature of what the row currently renders (#68).  ``_relayout`` is
+        # Signature of what the row currently renders.  ``_relayout`` is
         # called on every resizeEvent tick of a splitter drag, but the rendered
         # row only changes when the collapse plan / elided label / count / font
         # / palette changes — when the signature is unchanged the existing
@@ -244,7 +243,7 @@ class BreadcrumbBar(QWidget):
         self._relayout()
 
     def set_virtual_crumb(self, label: str, count_text: str = "") -> None:
-        """Show *label* as the sole, non-navigable crumb (UIレビュー 07-25 #60).
+        """Show *label* as the sole, non-navigable crumb.
 
         For a "current location" that is not a folder — the cross-library
         スター付き一覧 / あとで見る一覧.  Those overlays used to leave the trail of
@@ -263,7 +262,7 @@ class BreadcrumbBar(QWidget):
         self._relayout()
 
     def set_library_bases(self, bases: list[tuple[Path, str]]) -> None:
-        """Set the library roots the trail is shown relative to (UIレビュー #5/#6).
+        """Set the library roots the trail is shown relative to.
 
         Each entry is ``(base_path, display_label)``.  Re-renders the current
         trail in place so a change (registering / managing libraries) takes
@@ -278,7 +277,7 @@ class BreadcrumbBar(QWidget):
 
         The trail is the single owner of this list on the pane side — anything
         else that needs to render a path *relative to a library* (the
-        cross-library curation tile captions, UIレビュー 2026-08-28 N-49) reads
+        cross-library curation tile captions) reads
         it from here instead of keeping a second copy that the next
         「ライブラリを管理…」 would silently leave stale.
         """
@@ -289,7 +288,7 @@ class BreadcrumbBar(QWidget):
 
         ``set_plain_text`` (transient 「読み込み中…」 states) clears both, so
         callers can use this to avoid stomping the transient text with a
-        count-only update.  A virtual crumb (UIレビュー 07-25 #60) counts: it is a
+        count-only update.  A virtual crumb counts: it is a
         settled current location, and its count must stay live.
         """
         return bool(self._segments) or self._virtual_label is not None
@@ -297,9 +296,9 @@ class BreadcrumbBar(QWidget):
     def count_text(self) -> str:
         """The trailing count suffix currently rendered (``""`` when none).
 
-        UIレビュー07-25 追修: 詳細検索側が件数表記を書き直すとき、ホストが
-        付けた「(… N 件を非表示中)」等の付記を取りこぼさずに引き継げるように
-        読み取り口を公開する（以前は非公開属性を覗くしかなかった）。
+        詳細検索側が件数表記を書き直すとき、ホストが付けた
+        「(… N 件を非表示中)」等の付記を取りこぼさずに引き継げるように
+        読み取り口を公開する（非公開属性を覗かせない）。
         """
         return self._count_text
 
@@ -380,7 +379,7 @@ class BreadcrumbBar(QWidget):
         self._ellipsis_width = fm.horizontalAdvance(" … ") + 8
 
     def _style_key(self) -> tuple:
-        """Font / palette inputs the rendered row depends on (#68).
+        """Font / palette inputs the rendered row depends on.
 
         Part of ``_render_key`` so a theme or font change still rebuilds the
         row (the current segment pins a bold font and the separators bake the
@@ -399,7 +398,7 @@ class BreadcrumbBar(QWidget):
                 return
             self._clear_row()
             # 単一クラム（横断一覧など）— 末尾セグメントと同じ「現在地」の
-            # 見た目にし、クリックできないことも同じ手段で示す (#60)。
+            # 見た目にし、クリックできないことも同じ手段で示す。
             btn = self._seg_button(
                 Segment(self._virtual_label, Path(self._virtual_label)),
                 current=True,
@@ -429,8 +428,8 @@ class BreadcrumbBar(QWidget):
         )
         final = self._segments[-1]
         # When even the kept trailing segments overflow (the plan's keep-1
-        # fallback), the row used to clip at the widget edge and the current
-        # folder name became unreadable (UIレビュー #2).  Middle-elide the
+        # fallback), clipping at the widget edge would make the current
+        # folder name unreadable.  Middle-elide the
         # final segment's label instead so its head and tail stay visible;
         # the tooltip still carries the full path.
         used = self._ellipsis_width + self._sep_width if plan.collapsed else 0
@@ -445,7 +444,7 @@ class BreadcrumbBar(QWidget):
                 final.label, Qt.ElideMiddle, max(40, room_for_final - pad),
             )
         # Nothing visible would change → keep the existing widgets instead of
-        # destroying and rebuilding the whole row (#68): resizeEvent fires per
+        # destroying and rebuilding the whole row: resizeEvent fires per
         # tick of a splitter drag and only the width feeds the plan.
         key = (
             "trail",
@@ -508,10 +507,8 @@ class BreadcrumbBar(QWidget):
         btn.setAutoRaise(True)
         btn.setToolTip(t("viewer.breadcrumb.ancestor_folders"))
         menu = QMenu(btn)
-        # QMenu の toolTipsVisible は既定 false — これが無いと下の
-        # setToolTip は 1 つも表示されない（折り畳まれた祖先はパス成分 1 個
-        # ずつでしか区別できないので、フルパスのツールチップが要る）。
-        menu.setToolTipsVisible(True)
+        # 折り畳まれた祖先はパス成分 1 個ずつでしか区別できないので、フルパスの
+        # ツールチップが要る（QMenu の可視化は theme の全域フィルタが立てる）。
         for seg in collapsed:
             act = menu.addAction(seg.label or str(seg.path))
             act.setToolTip(str(seg.path))
@@ -539,7 +536,7 @@ class BreadcrumbBar(QWidget):
             self._relayout()
             return
         # テーマ切替はパレット・QSS を差し替えるがアプリフォントは変えないので
-        # FontChange は飛ばない（レビュー 2026-08-27 #113）。``_sep_label`` は
+        # FontChange は飛ばない。``_sep_label`` は
         # 区切り記号の色をその時点のパレットから rgba へ焼き込むため、再構築が
         # 走らないとダークの地色の上に旧テーマ（ライト）の色が残り、コントラスト
         # 比 1.17:1 で事実上見えなくなっていた。幅は変わらないので ``_remeasure``

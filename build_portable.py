@@ -1,6 +1,6 @@
 """Build the portable Snappix distributions (plain viewer + plugin packs).
 
-This script is the **host** build orchestrator: it builds and verifies the
+This script is the **host** build driver: it builds and verifies the
 plain (plugin-free) viewer, and drives each repo plugin's own **build hook**
 (``plugins/<id>/build_hook.py``) for the plugin packs.  The split mirrors the
 repo's public-split rule — the public repository receives a snapshot of
@@ -65,7 +65,7 @@ Steps:
   4. Assemble THIRD_PARTY_LICENSES.txt (viewer-only dependency closure) +
      licenses/ + 利用規約・免責事項.txt + the user docs + the plugins/
      folder (with PLUGIN_DEVELOPMENT.md) + the Explorer shell-integration
-     scripts (シェル統合を登録.bat / …を解除.bat, L08) into the plain dist.
+     scripts (シェル統合を登録.bat / …を解除.bat) into the plain dist.
   5. Verify the plain dist (completeness, no GPL-only Qt DLL, no plugin
      payload) + each hook's plain-dist negatives (``check_plain_dist``) +
      each hook's own pack (``check_dist``).
@@ -106,8 +106,8 @@ host writes from it: ``verify_archive_matches_tree`` pins the two together,
 so ``check_zip`` is for content rules the staged tree cannot express, not for
 re-running what ``check_dist`` already proved.  Every pack-wide discipline lives there as ONE host
 implementation so a new plugin gets it by calling ``api.*`` instead of
-copying it (the path-length guard existed only inside the AI hook until
-review 2026-09-03 item #10 promoted it).  Build hooks and
+copying it (a guard that lives inside one hook silently leaves every other
+pack unguarded).  Build hooks and
 plugin tests are dev-only files: they are excluded from source zips here and
 must be excluded from staged packs by the hooks themselves.
 """
@@ -157,7 +157,7 @@ README_ASSETS_NAME = "README-assets.txt"
 
 #: The PUBLIC release's manifest pair (same two names, viewer-only content).
 #: The public repository's release carries the plain viewer and nothing else
-#: (plugins are distributed separately — CLAUDE.md 公開リポジトリ分離), and
+#: (plugins are distributed separately from the public viewer), and
 #: its manifests must not even NAME a plugin pack, so the pair is rendered
 #: from the viewer asset alone by the same two renderers.  A sibling folder
 #: because both files keep their names (a release asset is named after its
@@ -166,6 +166,16 @@ README_ASSETS_NAME = "README-assets.txt"
 #: the viewer zip it built; the local build's copy is the self-check that the
 #: pair never names a plugin.
 PUBLIC_DIR = DIST_ROOT / "public"
+
+#: The manifest pair for a release that leaves the plain zip OUT (same two
+#: names, content drawn from everything but the viewer).  A final version's
+#: plain zip is built and attached by the public repository's workflow, so the
+#: local build's release attaches only the plugin packs — and the manifests it
+#: attaches must describe exactly those (the full pair next to the assets
+#: would list the locally built viewer zip, whose hash never matches the
+#: publicly distributed one).  ``tools/release_assets.py`` attaches this pair
+#: instead of the full one whenever it leaves the viewer out.
+WITHOUT_VIEWER_DIR = DIST_ROOT / "without-viewer"
 
 #: Split threshold for a release asset (MiB).  GitHub refuses a single release
 #: asset over 2 GiB; 1900 MiB leaves room without making the part count silly.
@@ -184,7 +194,7 @@ VIEWER_ZIP_COMPRESSLEVEL = 6
 #: a source zip built here nor in a staged pack — the hooks mirror this).
 #: The human-authored dev-only dirs/files are bounded to the plugin's OWN top
 #: level (a same-named directory deeper in shipped content — e.g.
-#: ``vendor/greenlet/tests/`` — must survive, #42), so both tuples are
+#: ``vendor/greenlet/tests/`` — must survive), so both tuples are
 #: consumed by _iter_plugin_zip_files / check_plugin_zips against the FIRST
 #: path segment only.  Adding an entry here really does change what ships.
 PLUGIN_DEV_ONLY_DIRS = ("tests",)
@@ -223,7 +233,7 @@ README_DIST_NAME = "はじめにお読みください.txt"
 PLUGIN_DOC_NAME = "PLUGIN_DEVELOPMENT.md"
 PLUGIN_DOC_SRC = ROOT / "docs" / PLUGIN_DOC_NAME
 
-#: Optional Explorer shell-integration scripts written to the dist root (L08).
+#: Optional Explorer shell-integration scripts written to the dist root.
 #: They call ``reg add`` / ``reg delete`` on the exact HKCU keys the in-app
 #: dialog uses (via ``snappix.viewer.shell_integration``), so either path can
 #: register and the other can fully unregister.
@@ -231,13 +241,13 @@ SHELL_REGISTER_BAT = "シェル統合を登録.bat"
 SHELL_UNREGISTER_BAT = "シェル統合を解除.bat"
 
 # ---------------------------------------------------------------------------
-# Qt runtime DLL policy (allowlist-first — review 2026-08-27 item #91).
+# Qt runtime DLL policy (allowlist-first).
 #
 # THIRD_PARTY_LICENSES.txt states the application uses Qt under the LGPL v3
-# and *enumerates* the shipped Qt modules — an allowlist claim.  Three review
-# rounds of denylist patching (item 14: Qt6Location; item 38: whole-tree scan;
-# item #91: Qt3D wheel names + qml/plugin companion binaries) showed a
-# denylist can never enumerate everything Qt ships, so the primary gate is now
+# and *enumerates* the shipped Qt modules — an allowlist claim.  A denylist
+# keeps missing something (Qt6Location, DLLs outside the PySide6 root, Qt3D
+# wheel names, qml/plugin companion binaries) because it can never enumerate
+# everything Qt ships, so the primary gate is
 # the same shape as the legal claim: a ``Qt6*.dll`` may ship ONLY if its stem
 # is on :data:`ALLOWED_QT_DLL_STEMS`; anything else fails the build.  The
 # denylists below remain as the SECOND layer: they identify components that
@@ -363,7 +373,7 @@ GPL_ONLY_QT_PLUGIN_NAME_SUBSTRINGS: tuple[str, ...] = (
     # plugins/geoservices/qtgeoservices_osm.dll, qml/Qt3D/*/quick3d*plugin.dll),
     # so the prefix denylist alone cannot see them.  PyInstaller's QtQml hook
     # collects the qml/ tree without a per-module filter, so one transitive
-    # QtQml import is enough to drag these in (review 2026-08-27 item #91).
+    # QtQml import is enough to drag these in.
     "qt3d",
     "qtcharts",
     "datavisualization",
@@ -427,7 +437,7 @@ def frozen_stdlib_module_names() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Frozen-package reconciliation (#38 / #41).
+# Frozen-package reconciliation.
 #
 # The hand-maintained negatives in check_dist_complete (no numpy dir, no GPL Qt
 # DLL, no Tcl/Tk) only catch leaks someone already thought to name.  This
@@ -465,7 +475,7 @@ FROZEN_STDLIB_NAME_GAPS: frozenset[str] = frozenset({"_wmi"})
 #: module names: a bare ``pyi`` prefix also matched unrelated third-party
 #: distributions whose name merely starts with those three letters (``pyicu``,
 #: ``pyinstrument``), silently exempting them from the unlicensed-package
-#: reconciliation this whole check exists for (#151).
+#: reconciliation this whole check exists for.
 FROZEN_INFRA_PREFIXES: tuple[str, ...] = (
     "pyiboot", "pyimod", "pyi_", "_pyi_", "PyInstaller",
 )
@@ -512,7 +522,7 @@ def unlicensed_frozen_toplevels(present: set[str], allowed: set[str]) -> list[st
     that may legitimately be there (stdlib + license-notice closure +
     :data:`FROZEN_ALLOWED_EXTRA_TOPLEVELS`).  A name in neither — and not part
     of PyInstaller's own infra (:data:`FROZEN_INFRA_PREFIXES`) — is an
-    unlicensed bundled package (issue #38 / #41).  Pure function so tests need
+    unlicensed bundled package.  Pure function so tests need
     no real build."""
     return sorted(
         name
@@ -623,8 +633,8 @@ def _pyz_toc_toplevels(toc_path: Path) -> set[str]:
     """Top-level module names in a PyInstaller ``PYZ-*.toc``.
 
     The toc lists every pure-Python module baked into the embedded PYZ
-    archive — where a pure-Python leak (rich / pygments / python-dotenv,
-    issue #38) shows up, since it never materialises as an ``_internal``
+    archive — where a pure-Python leak (rich / pygments / python-dotenv)
+    shows up, since it never materialises as an ``_internal``
     directory.
 
     PyInstaller 6.x writes the toc as a Python literal — either a bare list of
@@ -999,7 +1009,7 @@ def prune_gpl_qt_tree(internal: Path) -> None:
     Shared with the plugin build hooks (via :class:`HookApi`) for their own
     frozen PySide6 apps.
 
-    DELIBERATE ASYMMETRY (item #91): a ``Qt6*.dll`` that is neither on
+    DELIBERATE ASYMMETRY: a ``Qt6*.dll`` that is neither on
     :data:`ALLOWED_QT_DLL_STEMS` nor known-unwanted is NOT deleted — the
     build fast-fails here instead.  Silently deleting an unknown Qt DLL that
     a new PySide6 release made a real link dependency of a shipped module
@@ -1085,9 +1095,8 @@ def _iter_qt_component_violations(
 
     The ONE predicate both ``prune_gpl_qt_tree`` (deletion / fast-fail) and
     ``_check_no_gpl_qt`` (verification) consume, so the two can never drift
-    apart again (item #91: prune used to sweep only the PySide6 root plus
-    three fixed virtualkeyboard paths while the check scanned the whole
-    tree — and neither knew the qml/plugin companion binaries).  Flags:
+    apart (two separate lists let prune sweep a narrower set than the check
+    scans, and neither learns about a new companion binary).  Flags:
 
     - ``prunable=True`` — KNOWN-unwanted, safe to delete:
       * ``Qt6*.dll`` whose name starts with a denylisted prefix
@@ -1095,7 +1104,7 @@ def _iter_qt_component_violations(
       * any directory named ``qml`` — the viewer and the tagger use no QML,
         so a collected qml/ tree is unexpected wholesale (PyInstaller's
         QtQml hook collects it without a per-module filter, dragging in the
-        GPL-only modules' qml plugin binaries, item #91);
+        GPL-only modules' qml plugin binaries);
       * binaries (.dll/.pyd/.so) and DIRECTORIES whose name contains a
         denylisted substring (:data:`GPL_ONLY_QT_PLUGIN_NAME_SUBSTRINGS`,
         case-insensitive).  Non-binary auxiliary files (e.g. metatypes JSON)
@@ -1159,7 +1168,7 @@ def _check_no_gpl_qt(internal: Path, problems: list[str]) -> None:
             "check cannot run (did the PyInstaller output layout change?)"
         )
         return
-    # Same predicate as prune_gpl_qt_tree (item 38 / item #91): whatever prune
+    # Same predicate as prune_gpl_qt_tree: whatever prune
     # would have deleted (or fast-failed on) must fail verification if it is
     # still present, so a PySide6/PyInstaller upgrade that relocates or
     # renames a component cannot slip past the check just because prune ran
@@ -1194,13 +1203,12 @@ def _check_no_gpl_qt(internal: Path, problems: list[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Pack-relative path length (Windows MAX_PATH — #134).
+# Pack-relative path length (Windows MAX_PATH).
 #
 # 出荷する zip を**どのプラグインが作っても**同じ規律に掛けたいので、判定は
 # ホスト側に 1 実装だけ置き、各フックは :class:`HookApi` 経由で呼ぶ
 # （``prune_gpl_qt_tree`` / ``check_no_gpl_qt`` と同じ受け皿パターン）。
-# 元は AI パックのフック内 private だったが、他のパックには丸ごと欠落して
-# いたため昇格した（レビュー 2026-09-03 項目 #10）。
+# 1 つのフック内に閉じた判定は、他のパックを丸ごと無検査のまま残すため。
 
 #: パック内相対パス長の上限。
 #:
@@ -1395,7 +1403,7 @@ def _file_fingerprint(path: Path) -> tuple[int, int]:
 
     CRC-32 rather than a cryptographic digest: the comparison is between an
     archive and the very tree it was written from moments earlier, so what it
-    has to catch is an archiver bug, not a forgery.  Taking the archive's half
+    has to catch is an archiver fault, not a forgery.  Taking the archive's half
     from the central directory costs nothing, so verifying a multi-gigabyte
     pack never decompresses it.
     """
@@ -1496,7 +1504,7 @@ def verify_archive_matches_tree(
 #
 # The product ships bytecode (the frozen viewer / tagger PYZ) and, for the
 # in-process plugins, plain .py sources.  Neither may carry the development
-# history written into comments and docstrings (issue numbers, review items,
+# history written into comments and docstrings (ticket numbers, audit labels,
 # past-defect narratives): the frozen apps compile with ``optimize=2`` (their
 # specs), the staged plugin sources go through :func:`strip_python_sources`,
 # and the verifications below prove both held on the produced artefacts.
@@ -1826,7 +1834,7 @@ class HookApi:
     version_info_env = VERSION_INFO_ENV
     gpl_only_qt_dll_prefixes = GPL_ONLY_QT_DLL_PREFIXES
     allowed_qt_dll_stems = ALLOWED_QT_DLL_STEMS
-    # Pack-relative path length (MAX_PATH #134) — ONE call per tree for every
+    # Pack-relative path length (MAX_PATH) — ONE call per tree for every
     # pack; each hook supplies its own measured PACK_RELPATH_BASELINE_LEN.
     # A hook checks its STAGED pack only: the host pins the shipped zip to
     # that pack entry-for-entry, so the budget carries over to the artefact.
@@ -1946,7 +1954,7 @@ def write_terms_document() -> None:
     print(f"[build] Wrote {dst.name} into dist/")
 
 
-#: Markdown → プレーンテキストの整形規則 (UIレビュー 08-28 N-114)。
+#: Markdown → プレーンテキストの整形規則。
 #: 「はじめにお読みください.txt」はメモ帳で開かれる前提の**テキスト**なので、
 #: README.md を逐語コピーすると ``### 見出し`` / ``**強調**`` / `` `コード` `` が
 #: そのまま見える。変換は**ビルド時のみ**で README.md 自体は不変（公開リポジトリ
@@ -2022,7 +2030,7 @@ def rewrite_shipped_doc_links(text: str) -> str:
         # ビルドは緑のまま）。前後を「パス片の途中ではない」に限定する。
         # ``./docs/formats/post-md.md``（明示的な相対形式）も書き換える —
         # 素の lookbehind だけだと先頭の ``.`` に弾かれて、その表記だけが
-        # repo レイアウトのまま配布物に残っていた（issue #130-7）。``./`` は
+        # repo レイアウトのまま配布物に残る。``./`` は
         # 保ってパス部分だけ平坦化する。``../docs/…`` は対象外のまま（README
         # は dist 直下・docs/ はその隣なので、親参照は配布物では意味を
         # 持たない）。
@@ -2072,13 +2080,13 @@ def write_plugins_dir() -> None:
 
 
 def write_shell_integration_scripts() -> None:
-    """Write シェル統合を登録.bat / …を解除.bat into the dist root (L08).
+    """Write シェル統合を登録.bat / …を解除.bat into the dist root.
 
     The script bodies come from ``snappix.viewer.shell_integration`` so they
     target byte-for-byte the same HKCU keys as the in-app dialog — the single
     source of truth for the registry layout.  Written UTF-8 **without** a BOM:
     cmd.exe doesn't strip the BOM, so it fuses with the first line's command
-    token (``@echo off`` becomes unrecognised — issue #113). The scripts'
+    token (``@echo off`` becomes unrecognised). The scripts'
     own ``chcp 65001`` (as their second line) switches the console to UTF-8
     before any Japanese text is echoed, which is enough since ``@echo off``
     and the ``rem`` lines that precede it are ASCII-only / never displayed.
@@ -2254,7 +2262,7 @@ def check_dist_complete(hooks: list[tuple[str, object]] = ()) -> None:
     problems: list[str] = []
     _check_no_gpl_qt(DIST_DIR / "_internal", problems)
     _check_frozen_metadata_is_minimal(problems)
-    # Qt's Japanese catalog for its own standard dialogs (N-01).  Searched
+    # Qt's Japanese catalog for its own standard dialogs.  Searched
     # recursively so a PyInstaller/PySide6 layout change relocates it without
     # a silent regression to English dialogs; the spec is what puts it there.
     _src = ROOT / "src"
@@ -2279,14 +2287,14 @@ def check_dist_complete(hooks: list[tuple[str, object]] = ()) -> None:
     # No plugin payload anywhere in the plain dist.  The shipped zip inherits
     # this (and every hook's own plain-dist negative) through
     # verify_archive_matches_tree, which pins the archive to this same tree.
-    # MAX_PATH (#134) applies here exactly as it does to a pack: README-
+    # MAX_PATH applies here exactly as it does to a pack: README-
     # assets.txt tells the buyer to extract somewhere shallow, and this is the
     # check that makes that promise mean something.
     dist_names = check_tree_path_lengths(
         DIST_DIR, problems, baseline_len=PLAIN_DIST_RELPATH_BASELINE_LEN
     )
     problems.extend(f"{DIST_DIR}: {p}" for p in plugin_trace_offenders(dist_names))
-    # Mechanical reconciliation (#38 / #41): every top-level package/module
+    # Mechanical reconciliation: every top-level package/module
     # frozen into the plain viewer must be stdlib, a THIRD_PARTY_LICENSES.txt
     # closure member, or allowed infra/first-party — otherwise it is an
     # unlicensed bundled package the hand-maintained negatives above would miss
@@ -2370,7 +2378,7 @@ def zip_tree(
     path.
 
     The names are asserted against :func:`zip_entry_name_problems` before any
-    of them is written, so a mapping bug fails the build here rather than
+    of them is written, so a mapping mistake fails the build here rather than
     leaving a malformed archive for a later check to find.
     """
     entries: list[tuple[Path, str]] = []
@@ -2462,13 +2470,13 @@ def _iter_plugin_zip_files(base: Path, *, raw: bool) -> Iterator[tuple[Path, str
     pack, so re-filtering here would drop legitimately-shipped files whose path
     merely contains a ``tests`` segment or a ``.pyc`` suffix deep inside a
     frozen/vendored subtree (``tagger/_internal/torch/fx/passes/tests/``,
-    ``vendor/greenlet/tests/``) — exactly the #42 staged-vs-shipped divergence.
+    ``vendor/greenlet/tests/``) — a staged-vs-shipped divergence.
     The zip then equals the verified staged pack byte-for-name (check_plugin_
     zips reconciles the two).
 
     not *raw* (a committed-source zip, for a future hookless plugin): apply the
     dev-only exclusion, but bound the human-authored dev-only entries (a
-    ``tests`` dir and ``build_hook.py`` / ``CLAUDE.md``) to the plugin's OWN
+    ``tests`` dir, ``build_hook.py`` and the plugin's dev notes) to the plugin's OWN
     top level, so a same-named directory deeper in shipped content is not
     dropped.  ``__pycache__`` / ``*.pyc`` are categorically build artefacts and
     are dropped at any depth (a dev working tree accrues them under any
@@ -2501,7 +2509,7 @@ def plugin_shipped_files(
 
     A hook with ``staged_pack_root`` ships that folder's contents RAW (the
     hook already produced the exact shipping tree, so no further filtering
-    runs — #42); anything else ships its committed source under
+    runs); anything else ships its committed source under
     ``plugins/<id>/`` with the plugin-level dev-only entries removed.
     """
     staged = (
@@ -2597,7 +2605,7 @@ def check_installed_plugins(hooks: list[tuple[str, object]] = ()) -> None:
     ``check_plugin_zips`` applies to the zip, so the two cannot drift), and no
     dist-relative path exceeds :data:`MAX_PACK_RELPATH_LEN` — the installed
     depth is the same ``plugins/<id>/…`` a user extracts, so the MAX_PATH
-    budget (#134) applies to the installed folder exactly as it does to the
+    budget applies to the installed folder exactly as it does to the
     pack zip.
 
     On top of that, the installed folder's file set reconciles EXACTLY with
@@ -2689,7 +2697,7 @@ def check_plugin_zips(hooks: list[tuple[str, object]] = ()) -> None:
             names = set(zf.namelist())
         problems.extend(plugin_dropin_problems(plugin_id, names, out))
         hook = hook_by_id.get(plugin_id)
-        # For a staged pack the archive must be a FAITHFUL copy (#42), so the
+        # For a staged pack the archive must be a FAITHFUL copy, so the
         # zip is pinned to the pack the hook's check_dist verified — same
         # names, same recorded size/CRC-32.  Every pack-side negative (the
         # MAX_PATH budget and the hook's own) then holds for the artefact, so
@@ -2880,6 +2888,9 @@ def render_assets_readme(assets: list[ReleaseAsset]) -> str:
         lines.append("      プラグイン。必要なものだけダウンロードしてください。")
     if not viewer and not plugins:
         lines.append("  (アセットがありません)")
+    if not viewer:
+        lines.append(f"  ※ 本体（{viewer_name}）はこの配布に含まれません。")
+        lines.append("     同じ版数の本体を別途入手してください。")
     lines.append(f"  {SUMS_NAME}  (各ファイルの SHA-256)")
     lines.append(f"  {README_ASSETS_NAME}  (このファイル)")
     lines.append("")
@@ -2955,20 +2966,29 @@ def public_release_assets(assets: list[ReleaseAsset]) -> list[ReleaseAsset]:
     return [a for a in assets if a.name == viewer_name]
 
 
-def write_release_manifest(assets: list[ReleaseAsset]) -> None:
-    """Write SHA256SUMS.txt + README-assets.txt next to the assets, and the
-    viewer-only pair for the public release into :data:`PUBLIC_DIR`.
+def without_viewer_assets(assets: list[ReleaseAsset]) -> list[ReleaseAsset]:
+    """The subset of *assets* a release without the plain zip carries."""
+    viewer_name = viewer_zip_path().name
+    return [a for a in assets if a.name != viewer_name]
 
-    Both pairs come from the same *assets* list and the same two renderers in
-    the same step, so the public pair can never describe a different build
-    than the full one.
+
+def write_release_manifest(assets: list[ReleaseAsset]) -> None:
+    """Write SHA256SUMS.txt + README-assets.txt next to the assets, the
+    viewer-only pair for the public release into :data:`PUBLIC_DIR`, and the
+    pair without the viewer into :data:`WITHOUT_VIEWER_DIR`.
+
+    Every pair comes from the same *assets* list and the same two renderers in
+    the same step, so no pair can describe a different build than the full one.
     """
     _write_manifest_pair(DIST_ROOT, assets)
     PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
     _write_manifest_pair(PUBLIC_DIR, public_release_assets(assets))
+    WITHOUT_VIEWER_DIR.mkdir(parents=True, exist_ok=True)
+    _write_manifest_pair(WITHOUT_VIEWER_DIR, without_viewer_assets(assets))
     print(
-        f"[build] Wrote {SUMS_NAME} + {README_ASSETS_NAME} into dist/ "
-        f"and dist/{PUBLIC_DIR.name}/ (viewer only)"
+        f"[build] Wrote {SUMS_NAME} + {README_ASSETS_NAME} into dist/, "
+        f"dist/{PUBLIC_DIR.name}/ (viewer only) and "
+        f"dist/{WITHOUT_VIEWER_DIR.name}/ (everything but the viewer)"
     )
 
 
@@ -3023,50 +3043,53 @@ def split_sequence_offenders(names: Iterable[str]) -> list[str]:
     return offenders
 
 
-def public_manifest_offenders(
-    viewer_files: set[str], plugin_files: list[str]
+def manifest_pair_offenders(
+    folder: Path,
+    files: set[str],
+    rejoined: set[str],
+    forbidden: Iterable[str] = (),
 ) -> list[str]:
-    """Negatives for the public release's manifest pair in :data:`PUBLIC_DIR`.
+    """Negatives for a sibling manifest pair (:data:`PUBLIC_DIR` /
+    :data:`WITHOUT_VIEWER_DIR`).
 
-    The pair is attached to the PUBLIC repository's release, so it must hold
-    exactly the two manifests, its hash list must name exactly the viewer's
-    downloadable files, and neither file may name a plugin pack (the public
-    side must not learn which plugins exist — CLAUDE.md 公開リポジトリ分離).
+    The folder must hold exactly the two manifests, its hash list must name
+    exactly *files* (plus *rejoined* — the whole of each split asset), and
+    neither file may name anything in *forbidden*.
     """
     problems: list[str] = []
-    if not PUBLIC_DIR.is_dir():
-        return [f"{PUBLIC_DIR}: missing from the release layout"]
+    if not folder.is_dir():
+        return [f"{folder}: missing from the release layout"]
     expected = {SUMS_NAME, README_ASSETS_NAME}
-    present = {p.name for p in PUBLIC_DIR.iterdir()}
+    present = {p.name for p in folder.iterdir()}
     for name in sorted(expected - present):
-        problems.append(f"{PUBLIC_DIR / name}: missing from the release layout")
+        problems.append(f"{folder / name}: missing from the release layout")
     for name in sorted(present - expected):
         problems.append(
-            f"{PUBLIC_DIR / name}: unexpected entry — only the two manifests "
-            "belong in the public release folder"
+            f"{folder / name}: unexpected entry — only the two manifests "
+            f"belong in dist/{folder.name}/"
         )
-    sums = PUBLIC_DIR / SUMS_NAME
+    sums = folder / SUMS_NAME
     if sums.is_file():
         listed = _sums_names(sums)
-        # A split viewer contributes its parts AND the re-joined whole.
-        rejoined = {viewer_zip_path().name} if any(
-            _PART_SUFFIX_RE.match(n) for n in viewer_files
-        ) else set()
-        for name in sorted(viewer_files - listed):
-            problems.append(f"{PUBLIC_DIR.name}/{SUMS_NAME}: no hash listed for {name}")
-        for name in sorted(listed - viewer_files - rejoined):
+        for name in sorted(files - listed):
+            problems.append(f"{folder.name}/{SUMS_NAME}: no hash listed for {name}")
+        for name in sorted(listed - files - rejoined):
             problems.append(
-                f"{PUBLIC_DIR.name}/{SUMS_NAME}: lists {name}, which is not a "
-                "public release asset"
+                f"{folder.name}/{SUMS_NAME}: lists {name}, which is not an "
+                "asset of this release"
             )
+    banned = list(forbidden)
     for manifest in sorted(present & expected):
-        text = (PUBLIC_DIR / manifest).read_text(encoding="utf-8")
-        for name in plugin_files:
+        text = (folder / manifest).read_text(encoding="utf-8")
+        for name in banned:
             if name in text:
-                problems.append(
-                    f"{PUBLIC_DIR.name}/{manifest}: names the plugin asset {name}"
-                )
+                problems.append(f"{folder.name}/{manifest}: names the asset {name}")
     return problems
+
+
+def _rejoined_names(files: Iterable[str]) -> set[str]:
+    """The re-joined whole of every split asset among *files*."""
+    return {m["stem"] for n in files if (m := _PART_SUFFIX_RE.match(n)) is not None}
 
 
 def check_release_layout() -> None:
@@ -3075,8 +3098,9 @@ def check_release_layout() -> None:
     ``dist/`` is what ``tools/release_assets.py upload`` enumerates, so a
     stray file there would be attached to the GitHub release.  Expected:
     the viewer folder, the plain zip, plugins/ (one zip or one complete part
-    run per plugin), the two manifest files, and public/ with the viewer-only
-    manifest pair for the public repository's release.
+    run per plugin), the two manifest files, public/ with the viewer-only
+    manifest pair for the public repository's release, and without-viewer/
+    with the pair for a release that leaves the plain zip out.
     """
     problems: list[str] = []
 
@@ -3101,8 +3125,8 @@ def check_release_layout() -> None:
             f"{viewer_zip}: neither the zip nor its split parts are present"
         )
     expected_top = {
-        DIST_DIR.name, PLUGIN_ZIP_DIR.name, PUBLIC_DIR.name, SUMS_NAME,
-        README_ASSETS_NAME,
+        DIST_DIR.name, PLUGIN_ZIP_DIR.name, PUBLIC_DIR.name,
+        WITHOUT_VIEWER_DIR.name, SUMS_NAME, README_ASSETS_NAME,
     }
     for entry in sorted(DIST_ROOT.iterdir()):
         if entry.name in expected_top:
@@ -3133,7 +3157,18 @@ def check_release_layout() -> None:
         listed = _sums_names(sums)
         for name in sorted((viewer_files | set(plugin_files)) - listed):
             problems.append(f"{SUMS_NAME}: no hash listed for {name}")
-    problems.extend(public_manifest_offenders(viewer_files, plugin_files))
+    # The public pair must not even NAME a plugin pack (the public side must
+    # not learn which plugins exist).
+    problems.extend(
+        manifest_pair_offenders(
+            PUBLIC_DIR, viewer_files, _rejoined_names(viewer_files), plugin_files
+        )
+    )
+    problems.extend(
+        manifest_pair_offenders(
+            WITHOUT_VIEWER_DIR, set(plugin_files), _rejoined_names(plugin_files)
+        )
+    )
     if problems:
         raise SystemExit(
             "[build] release layout verification failed:\n"
@@ -3239,6 +3274,9 @@ def main(argv: list[str] | None = None) -> int:
     ]
     outputs += [f"dist/{SUMS_NAME}", f"dist/{README_ASSETS_NAME}"]
     outputs += [f"dist/{PUBLIC_DIR.name}/ (viewer-only manifests for the public release)"]
+    outputs += [
+        f"dist/{WITHOUT_VIEWER_DIR.name}/ (manifests for a release without the viewer)"
+    ]
     print("[build] Done. Output: " + " + ".join(outputs))
     return 0
 

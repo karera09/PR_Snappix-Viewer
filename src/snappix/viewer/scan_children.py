@@ -16,7 +16,7 @@ Both panes share a single :class:`ChildrenScanner` driven by a
   the files".  Metadata pass is skipped entirely.
 
 Each scan request is one :class:`~.cancel_token.ScanSession` minted by the
-scanner's :class:`~.cancel_token.SessionOwner` (#35): the session's
+scanner's :class:`~.cancel_token.SessionOwner`: the session's
 *generation* is stamped on every emission — when the user navigates again
 before a scan finishes, the in-flight task still completes and emits its
 result, but the consumer compares the emitted generation against
@@ -112,7 +112,7 @@ class _ScanChildrenTask(SessionRunnable):
     ``scan_done``.
 
     ``session`` fuses the generation stamped on every emission with the
-    cooperative cancel flag the task polls (項目#35) — the base class's
+    cooperative cancel flag the task polls — the base class's
     ``run()`` already skips a task whose session was cancelled while it sat
     queued (a queued task cannot be pulled back out of a ``QThreadPool``,
     and ``scan_children`` only polls the token *after* ``os.scandir`` +
@@ -158,8 +158,8 @@ class _ScanChildrenTask(SessionRunnable):
         build + sqlite ``executemany`` + commit (fsync) costs tens to hundreds
         of ms.  Always call this **after** ``scan_done`` has been emitted so
         the index write never sits in front of the grid's first paint — the
-        whole point of the shallow scan is Explorer-grade initial response
-        (#89).  Same "display first, index warm second" ordering as
+        whole point of the shallow scan is Explorer-grade initial response.
+        Same "display first, index warm second" ordering as
         ``_RecursiveSearchTask``.  Best-effort: index failures never break the
         scan.
 
@@ -184,7 +184,7 @@ class _ScanChildrenTask(SessionRunnable):
 
     def _run(self) -> None:
         # NOTE: the queued-while-cancelled early return lives in
-        # ``SessionRunnable.run`` (項目#35) — emitting nothing is the
+        # ``SessionRunnable.run`` — emitting nothing is the
         # existing cancellation contract (see the check after the scan).
         try:
             with measure("scan_children", str(self.root)):
@@ -208,11 +208,10 @@ class _ScanChildrenTask(SessionRunnable):
         # failure: an unreachable root (offline NAS, unplugged drive, a share
         # that started denying access) never reaches the except above, it comes
         # back as a *reason* alongside an empty list.  Raise the I01 error card
-        # for it instead of the misleading empty/welcome state.  This used to
-        # be a second is_dir()+scandir probe of the same root, which could not
-        # see a transient failure (an SMB share that dropped mid-enumeration
-        # and recovered) — a folder with contents was then announced as
-        # 「このフォルダは空です」 (レビュー 2026-09-03 項目 #216).
+        # for it instead of the misleading empty/welcome state.  A second
+        # is_dir()+scandir probe of the same root could not see a transient
+        # failure (an SMB share that dropped mid-enumeration and recovered) and
+        # would announce a folder with contents as 「このフォルダは空です」.
         if reason is not None and not self.cancel.is_cancelled():
             logger.warning(
                 "scan_children could not list {}: {}", self.root, reason,
@@ -291,11 +290,11 @@ class _ScanChildrenTask(SessionRunnable):
                 logger.debug("search index upsert_postrefs failed: {}", exc)
             postref_rows.clear()
 
-        # 温かいフォルダは executor に載せず、``get_many`` 1 回で一括解決する
-        # （#37）。従来は全 pending を無差別に 6 並列スレッドへ投げ、キャッシュ
-        # 判定を各ワーカー内（``read_folder_preview_cached`` 先頭）で 1 件ずつ
-        # 行っていたため、全ヒットでもスレッドプールを立てて
-        # ``FolderPreviewCache.get`` を RLock 越しに直列化していた。ここは
+        # 温かいフォルダは executor に載せず、``get_many`` 1 回で一括解決する。
+        # 全 pending を無差別に 6 並列スレッドへ投げ、キャッシュ判定を各
+        # ワーカー内（``read_folder_preview_cached`` 先頭）で 1 件ずつ行うと、
+        # 全ヒットでもスレッドプールを立てて ``FolderPreviewCache.get`` を
+        # RLock 越しに直列化することになる。ここは
         # スキャンワーカースレッド上（GUI スレッドではない）なので、バッチ
         # 解決しても scanning.md の「左ペインでメインスレッド・シードしない」
         # 不変条件（右ペイン ``_seed_folder_resolution`` 限定）とは衝突しない
@@ -314,8 +313,7 @@ class _ScanChildrenTask(SessionRunnable):
             if hits:
                 misses: list[FolderEntry] = []
                 for entry in pending:
-                    # キャンセルはループ**内**でも見る（レビュー 2026-09-03
-                    # 項目 #82）。``get_many`` の手前の 1 回きりだと、走行中に
+                    # キャンセルはループ**内**でも見る。``get_many`` の手前の 1 回きりだと、走行中に
                     # 届いたキャンセルに反応できず、全ヒット分の変換と 8 件
                     # ごとの ``metadata_batch`` emit を最後まで走らせてしまう
                     # — live 読みの as_completed ループ・全ヒット経路と同じ
@@ -349,7 +347,7 @@ class _ScanChildrenTask(SessionRunnable):
 
         if not pending:
             # 全件キャッシュヒット: executor（ワーカースレッド）を一切立てずに
-            # 端数バッチを流して閉じる（#37）。
+            # 端数バッチを流して閉じる。
             if self.cancel.is_cancelled():
                 return
             if batch:
@@ -486,7 +484,7 @@ class ChildrenScanner(QObject):
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(2)
         # 世代とキャンセルのペアリングは SessionOwner が 1 箇所で持つ
-        # （項目#35 — 旧 ``_generation`` + ``_current_cancel`` の手同期を排除）。
+        # （世代とキャンセルを別々に手で同期させない）。
         self._sessions = SessionOwner()
         # Runtime-tunable via :meth:`set_metadata_parallelism` — applies to
         # the *next* scan; scans already in flight keep their original value.
@@ -530,7 +528,7 @@ class ChildrenScanner(QObject):
         # of a folder with tens of thousands of entries keeps its stat loop +
         # 6-way metadata pool running on the NAS long after the user has
         # navigated elsewhere, stealing SMB credits from the new scan and
-        # making the UI feel frozen — and issues the next generation (#35).
+        # making the UI feel frozen — and issues the next generation.
         session = self._sessions.start()
         task = _ScanChildrenTask(
             session,
@@ -547,12 +545,11 @@ class ChildrenScanner(QObject):
     def cancel(self) -> None:
         """Cancel the in-flight scan without starting a new one.
 
-        ``SessionOwner.cancel`` bumps the generation too (#35): an emit
-        already sitting in the queued-connection pipeline cannot be recalled,
-        so the bump is what makes it stale for consumers comparing against
-        :meth:`latest_generation` — previously only
-        ``RecursiveSearchScanner`` did this, and ``ChildrenGrid`` compensated
-        with a hand-rolled ``_pending_scan_generation = -1``.
+        ``SessionOwner.cancel`` bumps the generation too: an emit already
+        sitting in the queued-connection pipeline cannot be recalled, so the
+        bump is what makes it stale for consumers comparing against
+        :meth:`latest_generation` (the same contract as
+        ``RecursiveSearchScanner``, so consumers need no hand-rolled reset).
         """
         self._pool.clear()
         self._sessions.cancel()

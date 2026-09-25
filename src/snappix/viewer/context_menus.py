@@ -1,9 +1,8 @@
 """右クリックメニューの**動詞レジストリ** — 4 席が同じ表から同じ並びで組む。
 
 席（左グリッド / 右一覧 / プレビュー列の各ビュー / 全画面の画像）ごとに
-builder が別々に育ち、キュレーション節が無い席・コピー項目の有無が違う席・
-類似検索の位置が違う席が生まれていた（UIレビュー 2026-09-11 N-19 / E4）。
-以後は :data:`VERBS` の 1 表が「どの動詞が・どの条件で・どの節に」を持ち、
+builder を別々に育てると、キュレーション節が無い席・コピー項目の有無が違う席・
+類似検索の位置が違う席が生まれる。そこで :data:`VERBS` の 1 表が「どの動詞が・どの条件で・どの節に」を持ち、
 :func:`append_entry_verbs` がその順で足す:
 
     [対象名の見出し]
@@ -19,7 +18,7 @@ builder が別々に育ち、キュレーション節が無い席・コピー項
 **先に**足し、その後ろに共通ブロックが同じ順で続く — 「完全に同じでなくても
 似た配置」の規則。見出しは ``QMenu`` の先頭へ差し込むので、席固有の項目が
 先にあっても一番上に来る（キーボードで開いたメニューでも「どれに効くか」が
-読める — N-88）。
+読める）。
 
 書き手は 1 本のまま: 印の動詞は :class:`CurationHooks.request` へ
 ``(path, kind, value)`` を渡すだけで、永続化・トースト・3 面再描画は
@@ -100,7 +99,7 @@ def copy_file_to_clipboard(path: Path, window=None) -> None:
     Ctrl+C (CF_HDROP equivalent), so pasting into Explorer, chat clients, or
     file pickers works.  Works for every entry kind, not just images.
 
-    成功トーストは内側のここで出す (UIレビュー 07-25 #73 — 画像コピーと同じ
+    成功トーストは内側のここで出す (画像コピーと同じ
     方針: クリップボードは不可視なので通知が唯一の成功確認手段)。
     """
     mime = QMimeData()
@@ -112,8 +111,7 @@ def copy_file_to_clipboard(path: Path, window=None) -> None:
 def copy_path_to_clipboard(path: Path, window=None) -> None:
     """Put *path* on the clipboard as plain text（フルパスをコピー）.
 
-    画像 / ファイルのコピーと同じく、成功トーストを内側で出す
-    (UIレビュー 07-25 #73)。
+    画像 / ファイルのコピーと同じく、成功トーストを内側で出す。
     """
     QGuiApplication.clipboard().setText(str(path))
     _notify_copied(window, t("viewer.context_menus.copy_path_done"))
@@ -201,10 +199,10 @@ class EntryMenuContext:
     is_dir: bool
     seat: str = ""
     #: フォルダを**このビューアで**開く（左グリッドの活性化と同じ着地）。
-    #: 渡せるのは移動を持つ席（左グリッド / 右一覧）だけ (N-84)。
+    #: 渡せるのは移動を持つ席（左グリッド / 右一覧）だけ。
     navigate: Callable[[Path], None] | None = None
-    #: ファイルのある**フォルダをこのビューアで開いて選択**する
-    #: (UI08-28 N-64 / 2026-09-11 N-40)。横断一覧・検索ヒットから実体の
+    #: ファイルのある**フォルダをこのビューアで開いて選択**する。
+    #: 横断一覧・検索ヒットから実体の
     #: 場所へ戻る唯一のアプリ内導線。``navigate`` と違い**席の制限は無い** —
     #: 渡さなかった席は :func:`reveal_hook_from_ancestors` が祖先の窓から
     #: 拾うので、自前の配線を持たない葉ビュー（プレビュー列 / 全画面）でも
@@ -217,7 +215,7 @@ class EntryMenuContext:
     #: 「開く / エクスプローラ / 印」系は全部空振りするので、この軸が真の
     #: ときは通常の動詞を全部落とし、救済の動詞だけを出す。軸を
     #: :data:`VERBS` の側に持たせるのが要点 — 席で手書きに分岐すると
-    #: 対象名見出し（N-88）も ``verb:`` 命名も付いてこない。
+    #: 対象名見出しも ``verb:`` 命名も付いてこない。
     ghost: bool = False
     #: ゴースト行の張り替え（「現在の場所を指定…」）。
     rebind: Callable[[Path], None] | None = None
@@ -265,9 +263,9 @@ def _add_action(
 
 
 def _add_open_here(menu: QMenu, ctx: EntryMenuContext) -> None:
-    # UIレビュー 2026-09-11 N-84: フォルダの右クリックは「既定アプリで開く」
-    # 「エクスプローラで開く」= どちらもアプリ**外**しか無く、ダブルクリック
-    # (= このビューアで中を開く) と同じことをメニューから頼めなかった。
+    # フォルダの右クリックが「既定アプリで開く」「エクスプローラで開く」
+    # = どちらもアプリ**外**だけだと、ダブルクリック
+    # (= このビューアで中を開く) と同じことをメニューから頼めない。
     # 「まずアプリ内、次に OS」の並びで先頭に立てる。図像を持つのは OS へ出る
     # 2 動詞だけ、という既存の暗黙規則に従い icon_name は渡さない。
     cb = ctx.navigate
@@ -285,10 +283,9 @@ def _reveal_hook(ctx: EntryMenuContext) -> Callable[[Path], None] | None:
 
 
 def _add_reveal_in_app(menu: QMenu, ctx: EntryMenuContext) -> None:
-    # UIレビュー 08-28 N-64 / 2026-09-11 N-40: 横断一覧・検索ヒットの行から
-    # 「実体がどこにあるか」へ戻る手段がエクスプローラ経由しか無かった。
+    # 横断一覧・検索ヒットの行から「実体がどこにあるか」へアプリ内で戻る。
     # 親フォルダをこのビューアで開いて当の項目を選ぶ。``open_in_explorer``
-    # との差はツールチップで言う（N-90 の型）。ここでは FS I/O をしない
+    # との差はツールチップで言う。ここでは FS I/O をしない
     # （メニュー構築は NAS-free）。
     cb = _reveal_hook(ctx)
     assert cb is not None  # applies() が保証（型絞り込みのみ）
@@ -298,9 +295,8 @@ def _add_reveal_in_app(menu: QMenu, ctx: EntryMenuContext) -> None:
 
 
 def _add_open_default(menu: QMenu, ctx: EntryMenuContext) -> None:
-    # UIレビュー 07-25 #74: 右クリック経路だけが openUrl の戻り値を捨てて
-    # 失敗を握りつぶしていた。共通ヘルパ ``open_with_default`` に集約し、
-    # どの入口でも失敗が通知される。
+    # openUrl の戻り値を捨てると失敗が握りつぶされるので、共通ヘルパ
+    # ``open_with_default`` に集約し、どの入口でも失敗が通知される。
     act = _add_action(
         menu, "open_default", t("common.action.open_with_default"),
         icon_name="external-link",
@@ -312,7 +308,7 @@ def _add_open_default(menu: QMenu, ctx: EntryMenuContext) -> None:
 
 
 def _add_open_in_explorer(menu: QMenu, ctx: EntryMenuContext) -> None:
-    # UIレビュー 07-25 #56: OS のファイラ起動は folder-output（箱から出る矢印）。
+    # OS のファイラ起動は folder-output（箱から出る矢印）。
     # 右クリックで図像を持つのは OS へ出る 2 動詞だけ、という暗黙規則。
     act = _add_action(
         menu, "open_in_explorer", t("common.action.open_in_explorer"),
@@ -326,8 +322,8 @@ def _add_open_in_explorer(menu: QMenu, ctx: EntryMenuContext) -> None:
 
 def _add_copy_path(menu: QMenu, ctx: EntryMenuContext) -> None:
     act = _add_action(menu, "copy_path", t("viewer.context_menus.copy_full_path"))
-    # N-90: 「ファイルをコピー」との差がラベルから読めないので、両方に用途を
-    # ツールチップで添える（メニューは ``setToolTipsVisible``）。
+    # 「ファイルをコピー」との差がラベルから読めないので、両方に用途を
+    # ツールチップで添える（メニューの可視化は theme の全域フィルタが立てる）。
     act.setToolTip(t("viewer.context_menus.copy_full_path_hint"))
     host = _host(menu, ctx)
     act.triggered.connect(
@@ -381,8 +377,8 @@ def _curation_state(ctx: EntryMenuContext) -> tuple[int, bool]:
 def _add_star_submenu(menu: QMenu, ctx: EntryMenuContext) -> None:
     cur_star, _ = _curation_state(ctx)
     request = ctx.curation.request  # type: ignore[union-attr]
-    # UIレビュー 2026-09-11 N-116: 見出しは現在値を出す（サブメニューを開いて
-    # チェック位置を探さないと今いくつか分からなかった）。0 のときは従来文言。
+    # 見出しは現在値を出す（サブメニューを開いてチェック位置を探さずに
+    # 今いくつか分かる）。0 のときは値なしの文言。
     star_menu = menu.addMenu(
         t("viewer.post_grid.star_menu_keys_value", n=cur_star) if cur_star
         else t("viewer.post_grid.star_menu_keys")
@@ -469,7 +465,7 @@ def _is_image(ctx: EntryMenuContext) -> bool:
 #: 無い行では「開く / エクスプローラ / 印」は全部空振りするので落ち、代わりに
 #: 救済の動詞（張り替え / 同じ根の一括張り替え / フルパスをコピー /
 #: この一覧から外す）が出る。席側で
-#: 手書きに分岐すると、対象名見出し（N-88）も ``verb:`` 命名も付いてこない。
+#: 手書きに分岐すると、対象名見出しも ``verb:`` 命名も付いてこない。
 VERBS: tuple[VerbSpec, ...] = (
     # アプリ内で動く 2 動詞が先（フォルダ = 中を開く / ファイル = 場所を開く。
     # ``is_dir`` で排他なので 1 つの対象に両方は出ない）、その後ろに OS へ
@@ -560,7 +556,7 @@ _HEADER_MAX_PX = 320
 
 
 def _insert_target_header(menu: QMenu, ctx: EntryMenuContext) -> None:
-    """対象名の無効見出しをメニューの**先頭**へ差し込む（N-88 案B）。
+    """対象名の無効見出しをメニューの**先頭**へ差し込む。
 
     右クリックは選択を動かさない（選択がプレビューのデコードを駆動するため
     意図した設計）ので、押した先がどれかはメニュー自身が名乗るしかない。
@@ -594,7 +590,6 @@ def append_entry_verbs(menu: QMenu, ctx: EntryMenuContext) -> None:
     席固有の項目は呼び出し側が**先に**足しておく。見出し（``ctx.header``）は
     それらより上、メニュー先頭に差し込まれる。
     """
-    menu.setToolTipsVisible(True)
     if ctx.header:
         _insert_target_header(menu, ctx)
     section: str | None = None

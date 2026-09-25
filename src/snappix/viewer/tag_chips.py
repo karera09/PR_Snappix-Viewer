@@ -199,9 +199,9 @@ class _TagChip(QWidget):
         self._apply_style()
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setContextMenuPolicy(Qt.DefaultContextMenu)
-        # 掴めることをカーソルで予告する（N-70）: チップの主操作は「ドラッグで
+        # 掴めることをカーソルで予告する: チップの主操作は「ドラッグで
         # 並べ替え」で、``PointingHandCursor`` は押下（リンク / ボタン）の図像
-        # なのでそれが読めなかった。掴む前 = OpenHand / 掴んでいる間 =
+        # なので使わない。掴む前 = OpenHand / 掴んでいる間 =
         # ClosedHand（``image_view`` のパンと同じ対）。× ボタンは押下対象なので
         # ``PointingHandCursor`` のまま。
         self.setCursor(Qt.OpenHandCursor)
@@ -221,7 +221,7 @@ class _TagChip(QWidget):
             self.setStyleSheet(css)
 
     def changeEvent(self, event) -> None:  # type: ignore[override]
-        # #191: チップは ``ViewerState.tag_search_query`` から復元され、
+        # チップは ``ViewerState.tag_search_query`` から復元され、
         # ポップオーバーを閉じている間も生き続けるので "transient" ではない。
         # インライン stylesheet に焼き込んだ色はテーマ切替で取り残されるため、
         # 兄弟の ``tag_browser._ReadOnlyChip`` と同じくパレット変更で塗り直す
@@ -331,7 +331,7 @@ class TagChipsInput(QWidget):
         #: candidates the window is *possibly truncated* — a longer tag sharing
         #: the prefix could be sunk below the cap (the count-ordered suggest
         #: window), so :meth:`_should_auto_chip` refuses to auto-chip on such a
-        #: saturated window to avoid stealing a still-in-progress token (#177).
+        #: saturated window to avoid stealing a still-in-progress token.
         self._suggest_window_cap = 20
         self._layout = FlowLayout(self, spacing=4)
         self._edit = _ChipLineEdit()
@@ -348,7 +348,7 @@ class TagChipsInput(QWidget):
         self._edit_index = 0
         # Accept internal chip-reorder drops.
         self.setAcceptDrops(True)
-        # フォーカスはこのコンテナで止まらず内側のエディタへ抜ける（N-85）。
+        # フォーカスはこのコンテナで止まらず内側のエディタへ抜ける。
         # 素の ``QWidget`` は ``Qt.NoFocus`` なので ``setFocus()`` が無視され、
         # Ctrl+Shift+T / ツールバーの AIタグチップ / チップのクリックといった
         # 全入口が「ポップオーバーは開くがカーソルは入らない」になっていた。
@@ -394,7 +394,7 @@ class TagChipsInput(QWidget):
         ``window_cap`` is the maximum number of candidates *provider* returns
         for a prefix (its ``LIMIT``).  Auto-chipping is suppressed when a prefix
         returns exactly that many candidates, since a longer prefix-sharing tag
-        may have been truncated out of the count-ordered window (#177).
+        may have been truncated out of the count-ordered window.
         """
         self._suggest = provider
         if window_cap is not None and window_cap > 0:
@@ -511,7 +511,7 @@ class TagChipsInput(QWidget):
         # A saturated window may hide a longer prefix-sharing tag below its cap
         # (candidates are ordered by count, not length), so refuse to auto-chip
         # — the user can still commit with space/Enter.  Errs toward NOT
-        # stealing an in-progress token (#177).
+        # stealing an in-progress token.
         if len(candidates) >= self._suggest_window_cap:
             return False
         exact = False
@@ -632,7 +632,7 @@ class TagChipsInput(QWidget):
             return
         menu = QMenu(self)
         # 「削除」(``common.action.delete``) はブックマーク等の**実体削除**と
-        # 同じキーで、検索条件から 1 語外すだけの操作には強すぎた（N-103）。
+        # 同じキーで、検索条件から 1 語外すだけの操作には強すぎる。
         remove_act = menu.addAction(t("viewer.tag_chips.remove"))
         if chip.exclude:
             toggle_act = menu.addAction(t("viewer.tag_chips.toggle_to_include"))

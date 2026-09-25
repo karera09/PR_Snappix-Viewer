@@ -1,7 +1,6 @@
 """Backwards-compatible façade for the viewer's off-thread scanners.
 
-The scanners were originally all defined here; #141 split them into two
-focused modules:
+The scanners live in two focused modules:
 
 * :mod:`scan_children` — :class:`ChildrenScanner` (the shallow + progressive
   ``post.md`` two-stage children scan shared by both panes).

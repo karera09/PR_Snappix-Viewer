@@ -145,7 +145,7 @@ class WheelNavGate:
             # 猶予 0 は「最初の端ホイールで即ナビ」という設定の契約
             # （view_prefs の既定値コメント / 設定ダイアログのヒント文言）。
             # アームだけして False を返すと 2 ノッチ目まで切り替わらず、
-            # 文言と実挙動が食い違っていた（レビュー 2026-07-31 #74）。
+            # 文言と実挙動が食い違う。
             return view_prefs._WHEEL_NAV_GRACE_SEC <= 0
         self._last_ts = now
         if now - self._first_ts < view_prefs._WHEEL_NAV_GRACE_SEC:

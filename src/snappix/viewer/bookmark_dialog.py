@@ -73,7 +73,7 @@ class BookmarkDialog(QDialog):
         # "unknown / not yet probed" and paints as existing.
         self._exists: dict[str, bool] = {}
         # Parent the relay to self so a pooled worker mid-``emit`` can't be
-        # GC'd during teardown (exit-139), matching image_view/markdown_view (#8).
+        # GC'd during teardown (exit-139), matching image_view/markdown_view.
         self._probe_signals = GuardedSignals(self)
         self._probe_signals.done.connect(self._on_existence_probed)
         self._build_ui()
@@ -90,8 +90,7 @@ class BookmarkDialog(QDialog):
         if not isinstance(result, dict):
             return  # ``run_detached`` は work の例外を None payload で報せる
         self._exists = dict(result)
-        # 行は作り直さず色/ツールチップだけを塗り替える（レビュー
-        # 2026-07-31 #65）。``_reload_rows`` の ``setItem`` はモデルデータを
+        # 行は作り直さず色/ツールチップだけを塗り替える。``_reload_rows`` の ``setItem`` はモデルデータを
         # 差し替えるので、開いているセルエディタの未確定入力（``_commit_name_edits``
         # は確定済みテキストしか拾えない）が無言で消えていた。到達不能な
         # NAS では probe が数十秒ブロックしうる = ユーザーが名前を編集し始めた
@@ -108,8 +107,7 @@ class BookmarkDialog(QDialog):
         self._table.setHorizontalHeaderLabels(
             [t("common.label.name"), t("common.label.path")]
         )
-        # 見出しの揃え = 内容の揃え（どちらもテキスト = 左）
-        # — UIレビュー 07-25 #97。
+        # 見出しの揃え = 内容の揃え（どちらもテキスト = 左）。
         align_header(self._table)
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -120,7 +118,7 @@ class BookmarkDialog(QDialog):
         self._table.setColumnWidth(0, NAME_COLUMN_WIDTH)
         self._table.itemSelectionChanged.connect(self._sync_controls)
         # 空のときは大きな空テーブルではなく中央寄せの案内に切り替える
-        # （UIレビュー #15 — detail_window のタグ表と同じ見せ方に統一）。
+        # （detail_window のタグ表と同じ見せ方）。
         self._stack, self._empty_label = empty_state_stack(
             self._table, icon_name="bookmark"
         )
@@ -133,7 +131,7 @@ class BookmarkDialog(QDialog):
         self._down_btn = QPushButton(t("common.action.move_down"))
         self._down_btn.clicked.connect(lambda: self._move_selected(1))
         btn_row.addWidget(self._down_btn)
-        # 名前セルはダブルクリックで編集できるが手がかりが無い（UIレビュー #5）
+        # 名前セルはダブルクリックで編集できるが手がかりが無い
         # — 選択行の編集をボタンからも明示的に開始できるようにする。
         self._rename_btn = QPushButton(t("common.action.rename"))
         self._rename_btn.clicked.connect(self._rename_selected)
@@ -145,7 +143,7 @@ class BookmarkDialog(QDialog):
         outer.addLayout(btn_row)
 
         # 追加はメニュー側にしかない — その導線をダイアログ内でも案内し、
-        # 空のときは空である旨も添える（UIレビュー #15, #28。メニューの
+        # 空のときは空である旨も添える（メニューの
         # 「(ブックマークなし)」表示との整合）。
         self._hint = QLabel("")
         self._hint.setWordWrap(True)
@@ -186,10 +184,10 @@ class BookmarkDialog(QDialog):
         but leave the decision to them (see module docstring).  Existence comes
         from the cached async probe (``_exists``); a path not yet probed
         (missing key) is treated as existing so we never block the GUI thread
-        with a per-row ``is_dir()`` (see #167).
+        with a per-row ``is_dir()``.
 
         行を作り直さないので、非同期プローブの着地が編集中のセルエディタを
-        壊さない（レビュー 2026-07-31 #65）。
+        壊さない。
         """
         for row in range(self._table.rowCount()):
             name_item = self._table.item(row, 0)
@@ -209,7 +207,7 @@ class BookmarkDialog(QDialog):
 
     def _sync_controls(self) -> None:
         # 未選択（や先頭/末尾）で押しても無反応なボタンは無効化して
-        # フィードバック欠如を防ぐ（UIレビュー #14）。
+        # フィードバック欠如を防ぐ。
         row = self._selected_row()
         n = len(self._paths)
         self._up_btn.setEnabled(row > 0)
@@ -221,7 +219,7 @@ class BookmarkDialog(QDialog):
             else t("viewer.bookmark_dialog.add_hint")
         )
         # 空: 案内は中央のスタックへ昇格し、下端ヒントは隠して二重表示を避ける
-        # （UIレビュー #15）。項目あり: 表を出し下端に追加導線ヒントを残す。
+        # 項目あり: 表を出し下端に追加導線ヒントを残す。
         if n == 0:
             self._empty_label.setText(t("viewer.bookmark_dialog.empty_hint"))
             self._stack.setCurrentWidget(self._empty_label)
@@ -262,7 +260,7 @@ class BookmarkDialog(QDialog):
         self._table.selectRow(target)
 
     def _rename_selected(self) -> None:
-        """選択行の名前セルの編集を明示的に開始する（UIレビュー #5）。"""
+        """選択行の名前セルの編集を明示的に開始する。"""
         row = self._selected_row()
         if row < 0:
             return

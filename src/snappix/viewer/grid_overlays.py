@@ -74,18 +74,10 @@ def curation_pool_paths(
         meta_map.items() if hasattr(meta_map, "items")
         else meta_map  # type: ignore[assignment]
     )
-    if kind == "later":
-        return [p for p, m in items if m.later]
-    if kind == "starred":
-        return [p for p, m in items if m.star >= 1]
-    tag = CurationList.tag_of(kind)
-    if tag is None:
+    view = CurationList.from_kind(kind)
+    if view is None:
         return None
-    needle = tag.casefold()
-    return [
-        p for p, m in items
-        if any(x.casefold() == needle for x in m.tags)
-    ]
+    return [p for p, m in items if view.contains(m)]
 
 
 @dataclass(frozen=True)
@@ -450,22 +442,12 @@ def meta_targets(
 
 def ghost_unmark(
     view: CurationList, tags: "Sequence[str] | None" = None,
-) -> tuple[str, object] | None:
+) -> tuple[str, object]:
     """「この一覧から外す」で書く印 ``(kind, value)``（*view* の軸だけ）。
 
     外すのは**その一覧が about な軸だけ**: 他の軸の表明は別の一覧にまだ属して
     いるかもしれないので巻き添えにしない。タグ一覧では *tags* からその 1 つ
-    だけを大文字小文字無視で抜いた残りを返す。軸が引けないときは ``None``。
+    だけを大文字小文字無視で抜いた残りを返す。軸の対応は台帳
+    (:meth:`~.curation_list.CurationList.unmark`) が持つ。
     """
-    if view.axis == "later":
-        return ("later", False)
-    if view.axis == "starred":
-        return ("star", 0)
-    tag = view.tag
-    if tag is None:
-        return None
-    needle = tag.casefold()
-    return (
-        "tags",
-        [x for x in (tags or ()) if x.casefold() != needle],
-    )
+    return view.unmark(tags)

@@ -5,7 +5,7 @@ reused by any tool in the repo.  All colours are ``#rrggbb`` hex strings;
 use :func:`rgba` when a translucent CSS value is needed and
 ``QColor(token)`` when painting.
 
-Rules (see docs/claude/design.md):
+Rules:
 
 - Widgets must NOT hardcode colours.  Take them from here (directly via
   ``current_tokens()`` for custom painting, or indirectly via
@@ -30,12 +30,12 @@ RADIUS = 6
 # Smaller radius for compact elements (chips, list selections, badges).
 RADIUS_SM = 4
 # Height of the window-level unified toolbar (nav / breadcrumb / search /
-# view controls — layout redesign 2026-07 Phase 1-1).  Single definition so
+# view controls).  Single definition so
 # the widget's fixed height and any dependent QSS can never drift apart.
 TOOLBAR_HEIGHT = 40
 
 # Height of the window-level condition chip bar (applied search-condition
-# chips + hit count + 「すべて解除」 — layout redesign 2026-07 Phase 1-3).
+# chips + hit count + 「すべて解除」).
 # Sits directly under the unified toolbar and collapses to zero height when
 # no condition is engaged; one definition keeps the widget and its QSS in
 # lockstep, like TOOLBAR_HEIGHT above.
@@ -51,9 +51,8 @@ CONDITION_BAR_HEIGHT = 32
 FILMSTRIP_HEIGHT = 96
 
 # Standard height (px) for the compact pane-header strip (title + count +
-# optional "⋯" overflow entry) introduced by the 2026-07 layout redesign
-# (Phase 1-2, see the `PanelHeader` section of docs/claude/design.md and
-# ``common/ui/widgets.py::PanelHeader``).  One definition so every pane that
+# optional "⋯" overflow entry — ``common/ui/widgets.py::PanelHeader``).
+# One definition so every pane that
 # adopts PanelHeader lines up.
 PANEL_HEADER_HEIGHT = 28
 
@@ -70,6 +69,18 @@ def rgba(hex_color: str, alpha: float) -> str:
     h = hex_color.lstrip("#")
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f"rgba({r}, {g}, {b}, {alpha:.2f})"
+
+
+def focus_band_ink(tokens: "ThemeTokens") -> str:
+    """フォーカス帯（``focus_band.py``）の印 — ▸ と題名 — の色.
+
+    dark 系は ``accent`` そのまま。light 系の ``accent`` は白文字を載せる
+    中間色で、帯地 ``bg_hover`` の上では本文 4.5:1 を割る（light 4.4 /
+    washi 4.1 / linen 4.2）ので、深い ``accent_pressed`` を使う（5.4:1 以上）。
+    帯地と印の対はここと qss.py の ``[focusBand="true"]`` 規則の 2 箇所だけで、
+    テストは全テーマでこの色 × ``bg_hover`` の比を検査する。
+    """
+    return tokens.accent if tokens.is_dark else tokens.accent_pressed
 
 
 @dataclass(frozen=True)
@@ -90,8 +101,8 @@ class ThemeTokens:
     bg_stage: str        # image "stage" backdrop (deeper than any UI surface)
                          # — the surround behind a centred preview + the stage
                          # filmstrip, so the image reads as *exhibited* rather
-                         # than sitting on a chrome panel (redesign 2026-07
-                         # Phase 3-1).  Dark: near-black; light: a mid grey mat
+                         # than sitting on a chrome panel.
+                         # Dark: near-black; light: a mid grey mat
                          # darker than the paper surfaces so light images float.
                          # NOT a QPalette role — document pages (markdown / PDF)
                          # and the browse grid keep their normal UI surfaces.
@@ -140,9 +151,8 @@ DARK_TOKENS = ThemeTokens(
     border_strong="#584a3b",
     text="#f0e7d8",
     text_muted="#b3a48f",
-    # UIレビュー 2026-08-28 N-53: 旧 #6f6152 は bg_surface では床(2.9)を満たす
-    # が、メニュー / ポップオーバーの下地 bg_raised では 2.69 まで落ちていた。
-    # 明度を 1 段上げて raised 面でも床を越えさせる(raised 3.04 / surface 3.35)。
+    # bg_surface だけでなくメニュー / ポップオーバーの下地 bg_raised でも
+    # 床 (2.9) を越える明度にする (raised 3.04 / surface 3.35)。
     text_disabled="#786959",
     text_on_accent="#221507",
     accent="#c9a24a",
@@ -170,9 +180,8 @@ LIGHT_TOKENS = ThemeTokens(
     border_strong="#b0a48b",
     text="#25313a",
     text_muted="#5b6570",
-    # 旧 #a3a89f は bg_surface 比 2.23:1 で dark/standard (約 3.0:1) より 1 段
-    # 薄く、light だけプレースホルダ/無効ラベルが読めなかった (UIレビュー
-    # 07-25 #99)。3.0:1 へ揃える。
+    # プレースホルダ / 無効ラベルが読めるよう、bg_surface 比を
+    # dark / standard と同じ約 3.0:1 へ揃える。
     text_disabled="#8a9089",
     text_on_accent="#ffffff",
     accent="#1e6f96",
@@ -201,7 +210,7 @@ STANDARD_TOKENS = ThemeTokens(
     border_strong="#6e675e",
     text="#f0e9e2",
     text_muted="#b3aca4",
-    # UIレビュー 2026-08-28 N-53（dark と同じ理由 — 旧 #7d766d は raised 2.64）。
+    # dark と同じ理由（raised 面でも床を越える明度）。
     text_disabled="#877f75",
     text_on_accent="#2a1f0e",
     accent="#e8a13c",

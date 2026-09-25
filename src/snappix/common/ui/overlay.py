@@ -1,7 +1,7 @@
 """Fixed colour palette for overlays drawn ON TOP OF image content.
 
 This is the registered **theme-independent exception** to the design system
-(see docs/claude/design.md 使用ルール 2): badges / chips / scrims / capsules
+(UI surfaces otherwise take every colour from the theme tokens): badges / chips / scrims / capsules
 that ride on top of arbitrary thumbnails or full-screen photos must stay
 legible on any image, so they use fixed dark scrims + fixed light chrome +
 fixed accent hues instead of following the theme tokens.
@@ -35,9 +35,9 @@ SCRIM_CHIP_STRONG = QColor(0, 0, 0, 150)    # favorites / star / badge-row chips
 SCRIM_HEAVY = QColor(0, 0, 0, 170)          # lightbox mat + hint / title overlays
 
 # Bottom title-band gradient on tile thumbnails (transparent → near-opaque).
-# Three stops, not two (UIレビュー 2026-08-28 N-20): with a plain 0→190 ramp
-# the caption's FIRST line sits at f≈0.10–0.5 of the band and only got α20–100,
-# measuring 2.7–6.2:1 on bright thumbnails (AA 4.5:1 未達が常態).  The band now
+# Three stops, not two: with a plain 0→190 ramp the caption's FIRST line
+# sits at f≈0.10–0.5 of the band and only gets α20–100, measuring 2.7–6.2:1
+# on bright thumbnails (below AA 4.5:1).  The band now
 # reserves a run-up (``gallery_view_parts.painter.SCRIM_RAMP``) above the
 # text so the mid stop — α140 ≈ 4.7:1 against white — lands exactly where
 # the first line starts.
@@ -57,8 +57,7 @@ OVERLAY_TEXT = QColor(255, 255, 255, 235)       # chip text / similar glyph
 OVERLAY_TEXT_STRONG = QColor(255, 255, 255, 240)  # title band / relevance text
 # 本編ではない内部/メタファイル（post.md・``#thumb#``）のタイトル。画像上の
 # 帯なので QPalette の Disabled ロール（＝下帯キャプション側の減光）は使え
-# ず、同じ「1 段落とす」をオーバーレイの語彙で表したもの
-# (UIレビュー 07-25 #52)。
+# ず、同じ「1 段落とす」をオーバーレイの語彙で表したもの。
 OVERLAY_TEXT_DIM = QColor(255, 255, 255, 150)
 
 # CSS colour string for large text QLabels on the heaviest scrim (lightbox /

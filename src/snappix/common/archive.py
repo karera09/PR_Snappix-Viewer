@@ -36,9 +36,11 @@ Design notes
 
 from __future__ import annotations
 
+import lzma
 import os
 import time
 import zipfile
+import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,7 +61,7 @@ from .sanitize import (
 # the running total — never tripping the guard. Charging a fixed overhead per
 # entry makes that class of bomb count toward the same cap.
 #
-# The *magnitude* is load-bearing (レビュー 2026-08-27 #81). The sole caller
+# The *magnitude* is load-bearing. The sole caller
 # (``viewer/zip_drill.py``) derives ``max_total_bytes`` as
 # ``<size ceiling> * 100`` (``_EXTRACT_SIZE_RATIO``). Every ZIP member already
 # costs at least ~76 bytes *inside the archive* (a 30-byte local header + a
@@ -79,7 +81,7 @@ _PER_ENTRY_OVERHEAD_BYTES = 16384
 
 @dataclass(frozen=True)
 class ExtractResult:
-    """Outcome of :func:`extract_zip_to_dir` (項目#181).
+    """Outcome of :func:`extract_zip_to_dir`.
 
     ``completed`` is ``False`` when the extraction stopped early because
     *should_cancel* returned ``True``.  ``extracted`` counts the members
@@ -116,7 +118,7 @@ def _numbered_name(stem: str, suffix: str, i: int) -> str:
     sit exactly on the ``MAX_COMPONENT_BYTES`` (255) budget. Appending ``_2``
     naively would overflow it and ``open("wb")`` would raise ``OSError`` (Errno
     36 on ext4/XFS), aborting the *whole* extraction — so the stem is truncated
-    to make room for the counter instead (レビュー 2026-07-31 #25).
+    to make room for the counter instead.
     """
     marker = f"_{i}"
     budget = (
@@ -144,8 +146,8 @@ def _unique_file(
 
     *next_suffix* is an optional per-extraction ``{target: counter}`` **hint**
     so a run of members collapsing onto the same name doesn't rescan
-    ``_2 … _N`` from scratch every time (レビュー 09-03 #258: that made an
-    archive of N same-named entries cost O(N²) ``exists()`` calls — on a NAS,
+    ``_2 … _N`` from scratch every time (without it an
+    archive of N same-named entries would cost O(N²) ``exists()`` calls — on a NAS,
     one stat round-trip each).  It is only a starting point: the loop still
     advances past anything taken, so truncation collisions from
     :func:`_numbered_name` and files created by someone else mid-extraction
@@ -334,35 +336,63 @@ def extract_zip_to_dir(
     ``OSError``) so callers can surface the error their own way.  A failure
     that belongs to **one member** — an unsupported compression method, an
     encrypted member in an otherwise plain archive, a CRC mismatch from bit
-    rot — is counted in ``skipped`` like a zip-slip entry as long as some
-    other member did extract, so one bad member cannot cost the caller the
-    whole output directory (it throws that away when extraction fails).  When
-    **nothing** came out and the reason was such a failure, the exception is
-    raised after all: there is no partial result worth keeping, and a caller
-    showing "0 extracted" says much less than the error does.
+    rot, a corrupted compressed stream caught mid-read (``zlib.error`` /
+    ``lzma.LZMAError`` / a bz2 ``OSError`` / a truncated member's
+    ``EOFError``), or a target path the filesystem itself refuses (parent
+    ``mkdir`` / file ``open`` raising ``OSError``, e.g. ``ENAMETOOLONG`` with
+    long paths disabled) — is counted in ``skipped`` like a zip-slip entry as
+    long as some other member did extract, so one bad member cannot cost the
+    caller the whole output directory (it throws that away when extraction
+    fails).  An ``OSError`` from *writing* the destination file (disk full
+    etc.) is not a member fault and is left to propagate and abort the whole
+    extraction.  When **nothing** came out and the reason was a member
+    decode failure, the exception is raised after all: there is no partial
+    result worth keeping, and a caller showing "0 extracted" says much less
+    than the error does.
 
     Returns an :class:`ExtractResult`; entries that could not be extracted
     (zip-slip, unusable names, a parent path component that is a file, an
     undecodable member) are counted in its ``skipped`` — the archive
     extracted fully only when ``completed`` is ``True`` **and** ``skipped``
     is ``0``, and callers presenting the outcome to a user must not show a
-    non-zero ``skipped`` as a complete extraction (項目#181).
+    non-zero ``skipped`` as a complete extraction.
     """
     claimed: set[Path] = set()
     # Per-target "where to resume numbering" hints for :func:`_unique_file`
-    # (レビュー 09-03 #258) — a hint only, never authoritative.
+    # — a hint only, never authoritative.
     next_suffix: dict[Path, int] = {}
     written_total = 0
     skipped = 0
     # Loop invariant: resolving it per member is a filesystem round trip each
     # time (see :func:`_safe_member_path`).
     dest_resolved = dest.resolve()
+    #: First per-member decode failure, re-raised only if nothing extracts.
+    member_error: Exception | None = None
+
+    def _skip(
+        what: str,
+        member: str,
+        exc: Exception | None = None,
+        *,
+        member_fault: bool = False,
+    ) -> None:
+        # One skipped entry: log it, count it, and remember the first
+        # member-decode failure (*member_fault*) for the nothing-extracted case.
+        nonlocal skipped, member_error
+        if exc is None:
+            logger.warning("zip extract: skipping {} {!r}", what, member)
+        else:
+            logger.warning("zip extract: skipping {} {!r}: {}", what, member, exc)
+        if member_fault and member_error is None:
+            member_error = exc
+        skipped += 1
+
     with zipfile.ZipFile(zip_path) as zf:
         entries = zf.infolist()
         # Directory entries first, so an archive that stores empty folders
         # reproduces them (the module docstring's "structure preserving"
-        # promise — previously only folders that happened to contain a file
-        # were recreated, as a side effect of the per-file ``mkdir``).  They
+        # promise — the per-file ``mkdir`` alone would recreate only folders
+        # that happen to contain a file).  They
         # go through the same ``_safe_member_path`` gate so zip-slip is judged
         # identically, and they are NOT counted in ``extracted`` / the
         # progress denominator (the existing progress contract is per file).
@@ -393,16 +423,10 @@ def extract_zip_to_dir(
                 # Same policy as the file branch: a parent component that is
                 # already a file (or any other FS refusal) skips the entry
                 # instead of aborting the whole extraction.
-                logger.warning(
-                    "zip extract: skipping unusable directory entry {!r}",
-                    info.filename,
-                )
-                skipped += 1
+                _skip("unusable directory entry", info.filename)
         infos = [info for info in entries if not info.is_dir()]
         total = len(infos)
         done = 0
-        #: First per-member decode failure, re-raised only if nothing extracts.
-        member_error: Exception | None = None
         for info in infos:
             if should_cancel is not None and should_cancel():
                 return ExtractResult(False, done, skipped)
@@ -420,22 +444,67 @@ def extract_zip_to_dir(
                 # archive holds both ``a`` and ``a/b``). We can't create a
                 # directory over it — skip this entry the same way zip-slip
                 # entries are skipped rather than aborting the whole extraction.
-                logger.warning(
-                    "zip extract: skipping entry whose parent path is a file {!r}",
-                    name,
-                )
-                skipped += 1
+                _skip("entry whose parent path is a file", name)
+                continue
+            except OSError as exc:
+                # E.g. ENAMETOOLONG / Windows WinError 206 when the target
+                # path exceeds MAX_PATH and long paths are disabled (the
+                # Windows default). Same policy as an unusable *name* — skip
+                # this entry rather than aborting the whole extraction.
+                _skip("entry with unusable target path", name, exc)
                 continue
             target = _unique_file(target, claimed, next_suffix)
             claimed.add(target)
-            cancelled = overflow = False
             try:
-                with zf.open(info) as src, target.open("wb") as dst:
+                src = zf.open(info)
+            except (zipfile.BadZipFile, RuntimeError, NotImplementedError) as exc:
+                # The member's local header alone already rules it out: an
+                # unsupported compression method (Deflate64 / zstd / PPMd) or
+                # an encrypted member inside an otherwise plain archive. Skip
+                # it the way an unusable *name* is skipped rather than
+                # aborting — the caller throws the whole temp directory away
+                # on failure, so letting this escape would delete every
+                # member that did extract. Kept so the end of the loop can
+                # still raise when nothing extracted at all.
+                _skip("undecodable member", name, exc, member_fault=True)
+                continue
+            try:
+                dst = target.open("wb")
+            except OSError as exc:
+                src.close()
+                _skip("entry with unusable target path", name, exc)
+                continue
+            cancelled = overflow = read_failed = False
+            try:
+                with src, dst:
                     while True:
                         if should_cancel is not None and should_cancel():
                             cancelled = True
                             break
-                        chunk = src.read(1024 * 1024)
+                        try:
+                            chunk = src.read(1024 * 1024)
+                        except (
+                            zipfile.BadZipFile,
+                            RuntimeError,
+                            NotImplementedError,
+                            zlib.error,
+                            EOFError,
+                            lzma.LZMAError,
+                            OSError,
+                        ) as exc:
+                            # The stream itself is broken past what the local
+                            # header revealed: a corrupted deflate/LZMA
+                            # stream, a bz2 member raising ``OSError``
+                            # ("Invalid data stream"), or a truncated member
+                            # (``EOFError``) — bit rot / a bad transfer, not a
+                            # format the header could rule out up front. Same
+                            # skip-and-continue policy as the header-time
+                            # failures above.
+                            _skip(
+                                "undecodable member", name, exc, member_fault=True
+                            )
+                            read_failed = True
+                            break
                         if not chunk:
                             break
                         written_total += len(chunk)
@@ -449,23 +518,10 @@ def extract_zip_to_dir(
             except ExtractSizeLimitError:
                 # Our own guard (a RuntimeError subclass) — never a member fault.
                 raise
-            except (zipfile.BadZipFile, RuntimeError, NotImplementedError) as exc:
-                # One member the local zipfile cannot decode: an unsupported
-                # compression method (Deflate64 / zstd / PPMd), an encrypted
-                # member inside an otherwise plain archive, or a CRC mismatch
-                # from bit rot.  Skip it the way an unusable *name* is skipped
-                # rather than aborting — the caller throws the whole temp
-                # directory away on failure, so letting this escape would
-                # delete every member that did extract.  Kept so the end of
-                # the loop can still raise when nothing extracted at all.
-                logger.warning(
-                    "zip extract: skipping undecodable member {!r}: {}", name, exc
-                )
-                if member_error is None:
-                    member_error = exc
-                # The name stays claimed: a later member must not land on it.
+            if read_failed:
+                # Already counted by ``_skip``. The name stays claimed: a
+                # later member must not land on it.
                 target.unlink(missing_ok=True)
-                skipped += 1
                 continue
             if not cancelled and not overflow:
                 # Charge the per-entry overhead so an archive of many tiny /

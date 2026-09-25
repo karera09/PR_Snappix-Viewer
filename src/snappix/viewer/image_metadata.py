@@ -97,11 +97,25 @@ class ImageMetadata:
 
 
 def _to_float(value) -> float | None:
-    """Coerce an EXIF value (``IFDRational`` / int / float) to ``float``."""
+    """Coerce an EXIF value (``IFDRational`` / int / float) to ``float``.
+
+    Pillow turns a 0/0 ``IFDRational`` (a manual lens routinely writes this
+    for FNumber / ExposureTime) into ``float('nan')`` instead of raising, so
+    it slips past the ``except`` below.  Every caller's ``n <= 0`` guard also
+    lets NaN through (any comparison against NaN is ``False``), which used to
+    reach ``round(nan)`` / ``int(round(nan))`` downstream and raise
+    ``ValueError`` — an exception the per-tag loop in :func:`_read_exif`
+    does not catch, so it propagated to :func:`extract_image_metadata`'s
+    broad ``except`` and discarded the whole result (EXIF *and*, for a PNG,
+    the ``text_chunks`` read earlier in the same call).  Rejecting NaN at
+    this single coercion point keeps every formatter's existing ``value is
+    None`` handling as the one path for "no usable value".
+    """
     try:
-        return float(value)
+        n = float(value)
     except (TypeError, ValueError, ZeroDivisionError):
         return None
+    return None if n != n else n  # n != n  <=>  math.isnan(n), without the import
 
 
 def _fmt_datetime(value) -> str:
@@ -182,7 +196,7 @@ def _read_png_text(img) -> tuple[list[tuple[str, str]], dict[str, str], frozense
     ``.text`` unconditionally calls ``load()`` (full pixel decode + full file
     read) to pick up chunks placed *after* IDAT, which breaks
     :func:`extract_image_metadata`'s header-only contract — on a cold NAS a
-    detail-window selection would re-read and decode the whole PNG (#11).
+    detail-window selection would re-read and decode the whole PNG.
     ``info`` holds every pre-IDAT ``tEXt`` / ``zTXt`` / ``iTXt`` chunk, which
     is where SD front-ends (A1111 / ComfyUI / NovelAI) write their metadata;
     the rare post-IDAT text chunk is knowingly not surfaced.
@@ -334,7 +348,7 @@ def _read_metadata(path: Path, *, bomb_check: bool = True) -> ImageMetadata:
             text_chunks, full_chunks, truncated = _read_png_text(img)
             # ``PngImageFile.getexif`` falls back to ``load()`` (full
             # decode) when no ``eXIf`` chunk was seen before IDAT —
-            # skip EXIF for such PNGs to keep this header-only (#11).
+            # skip EXIF for such PNGs to keep this header-only.
             exif = _read_exif(img) if "exif" in img.info else []
         else:
             exif = _read_exif(img)

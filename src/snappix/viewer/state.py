@@ -73,10 +73,10 @@ class ViewerState(BaseModel):
     #: so re-showing restores it.  Toggled via the toolbar pane button /
     #: 表示 popover check / F6.
     preview_visible: bool = True
-    #: Right-pane 情報パネル visibility (redesign 2026-07 Phase 2-2).  Toggled via
+    #: Right-pane 情報パネル visibility.  Toggled via
     #: the 表示 popover check / F8; when hidden the centre pane widens.
     info_panel_visible: bool = True
-    #: Left-pane ナビレール visibility (redesign 2026-07 Phase 2-3).  Toggled via
+    #: Left-pane ナビレール visibility.  Toggled via
     #: the 表示 popover check / F7; when hidden the centre pane widens.  Defaults
     #: to shown so the rail's library / bookmark / saved-search targets are
     #: discoverable out of the box.
@@ -125,8 +125,8 @@ class ViewerState(BaseModel):
     # never fails validation — same forward-compat rationale as the enum-ish
     # ``str`` fields below.
     language: str = "ja"
-    # DEPRECATED as a persisted value (UIレビュー 07-25 #40).  「ロックありのみ」
-    # is a *search* dimension — it narrows what the grid shows — so it now obeys
+    # DEPRECATED as a persisted value.  「ロックありのみ」
+    # is a *search* dimension — it narrows what the grid shows — so it obeys
     # the same 「検索は揮発、設定は永続」 rule as every other query axis (see the
     # ``tag_search_enabled`` note below): the field survives for round-trip
     # compatibility, but :func:`load_state` drops whatever is on disk and
@@ -259,8 +259,8 @@ class ViewerState(BaseModel):
     # renders pages lazily so the buffer stays resident while the PDF is
     # shown (peak 2x during load), and the preview is reached automatically
     # when a folder's representative file is a PDF — an unbounded read meant
-    # a 200 MB scanned book cost that much RSS on a single click
-    # (レビュー 2026-09-03 項目#69).  Over the cap: size-only notice.
+    # a 200 MB scanned book cost that much RSS on a single click.
+    # Over the cap: size-only notice.
     pdf_preview_size_limit_mib: int = 100
 
     # Media preview (audio / video) settings.
@@ -268,11 +268,10 @@ class ViewerState(BaseModel):
     media_volume: int = 70  # 0–100
     # Loop the current media file when playback reaches the end.
     media_loop: bool = False
-    # 再生速度 (UIレビュー 2026-08-28 N-136)。隣の loop / volume は
-    # 3 経路（MediaView の emit → ContentView / Lightbox の再送出 →
-    # 窓の state 書き込み）が揃っていたのに、速度だけシグナルも
-    # フィールドも無く、分割ビューで 1.5x にしても F11 の全画面側は
-    # 1.0x のままだった（2 つの MediaView は別インスタンス）。
+    # 再生速度。隣の loop / volume と同じ 3 経路（MediaView の emit →
+    # ContentView / Lightbox の再送出 → 窓の state 書き込み）で持つ — 2 つの
+    # MediaView は別インスタンスなので、ここに無いと分割ビューで 1.5x に
+    # しても F11 の全画面側は 1.0x のままになる。
     media_playback_rate: float = 1.0
 
     # Markdown preview font size in points.  0 = follow the application
@@ -363,7 +362,7 @@ class ViewerState(BaseModel):
     tag_search_enabled: bool = False
     tag_search_query: str = ""
     # 製品既定値は条件次元レジストリの単一定数（0.35 の手書き複製を残さない
-    # — N-31。精度チップの engaged 判定も同じ定数と比較する）。
+    # — 精度チップの engaged 判定も同じ定数と比較する）。
     tag_search_threshold: float = DEFAULT_TAG_THRESHOLD
     tag_search_media_type: str = "all"      # all/image/video/audio/document/archive
     tag_search_folder_mode: bool = True      # True = show folders, False = files
@@ -372,13 +371,13 @@ class ViewerState(BaseModel):
     # image must carry all include tags).  Ignored in file mode.
     tag_search_folder_coverage: bool = True
     # all/safe/sfw/explicit (severity band)。投稿日と同じく **SAVED BUT NOT
-    # RESTORED AT STARTUP**（N-06）: 有効化フラグが揮発のため、起動時に非 all
+    # RESTORED AT STARTUP**: 有効化フラグが揮発のため、起動時に非 all
     # を復元すると「適用されないチップ」だけが出る。セッション内復元
     # （restore_enabled=True）は従来どおり帯を往復する。
     tag_search_rating: str = "all"
     # 投稿日フィルタ。**SAVED BUT NOT RESTORED AT STARTUP** — an intentional
-    # asymmetry that reads like a bug from the state file alone (UIレビュー
-    # 07-25 #129): ``save_tag_settings`` writes all three, but
+    # asymmetry that looks like a defect from the state file alone:
+    # ``save_tag_settings`` writes all three, but
     # ``restore_tag_settings`` forces the preset back to "all" unless
     # ``restore_enabled=True``, which only the *session-internal* restores (nav
     # history 戻る / 保存した検索) pass.  Rationale is the same 「検索は揮発、
@@ -391,7 +390,7 @@ class ViewerState(BaseModel):
     tag_date_start: str = ""                 # ISO date (YYYY-MM-DD) or ""
     tag_date_end: str = ""                   # ISO date (YYYY-MM-DD) or ""
 
-    # NSFW view suppression (Phase 2 item 2-1).  A **view setting**, not a
+    # NSFW view suppression.  A **view setting**, not a
     # search dimension ("検索は揮発、設定は永続" — this one persists): when on,
     # the plain browse grid hides tiles whose representative rating is at or
     # above the chosen band.  "off" shows everything (historical behaviour),
@@ -435,7 +434,7 @@ def _state_path():
 
 
 #: ``viewer_state.json`` の **読み取り** と **``os.replace`` による着地** だけを
-#: 直列化するプロセス内ロック（issue #140 M-2）。
+#: 直列化するプロセス内ロック。
 #:
 #: Windows のファイル削除・改名は、対象を開いている全ハンドルが
 #: ``FILE_SHARE_DELETE`` を持っているときにしか通らない。Python の ``open`` /
@@ -443,12 +442,11 @@ def _state_path():
 #: ``load_state``（ブックマーク突き合わせの読み取り）と B の ``save_state``
 #: （``os.replace(tmp, viewer_state.json)``）が重なると、**読み取りに巻き
 #: 込まれて保存が丸ごと落ちる** — 実害は保存の喪失に加えて、事実でない
-#: 「保存できませんでした」の常駐警告（N-07 の経路）。
+#: 「保存できませんでした」の常駐警告（:func:`save_state` の戻り値の経路）。
 #:
 #: **ロックが囲うのはこの 2 つの短い操作だけ**で、時間のかかる tmp 書き込みは
-#: ロックの外に置く（:func:`_write_json_atomic`）。issue #132 が解いた
-#: 「詰まったオートセーブが closeEvent の 3 秒予算をロック待ちで溶かす」を
-#: 再発させないための線引き: 囲うのが「小さな JSON の read + 1 回の replace」
+#: ロックの外に置く（:func:`_write_json_atomic`）。「詰まったオートセーブが
+#: closeEvent の 3 秒予算をロック待ちで溶かす」を起こさないための線引き: 囲うのが「小さな JSON の read + 1 回の replace」
 #: なら、健全な保存先でのロック待ちはミリ秒で有界。死んだ共有では待ちも
 #: 有界ではなくなるが、そのとき保存を行っているのは予算付きワーカー
 #: （``main_window._save_merged_state``）なので、GUI スレッドは待たずに
@@ -473,8 +471,8 @@ def load_state() -> ViewerState:
         data = json.loads(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         # ``UnicodeDecodeError`` は ``ValueError`` の子で ``OSError`` でも
-        # ``JSONDecodeError`` でもない — 明示的に並べないとすり抜ける
-        # （レビュー 2026-09-03 項目#57）。非 UTF-8 の viewer_state.json
+        # ``JSONDecodeError`` でもない — 明示的に並べないとすり抜ける。
+        # 非 UTF-8 の viewer_state.json
         # （ANSI 既定のエディタで上書き保存 / USB の 1 バイト破損）でここが
         # 抜けると、``app.py`` の ``load_state()`` 呼び出しにはガードが無く
         # プロセス最上位まで抜け、windowed 凍結ビルドでは stderr も無い
@@ -502,9 +500,9 @@ def load_state() -> ViewerState:
     if data.get("imageview_cache_max_mib") == 512:
         data["imageview_cache_max_mib"] = 2048
 
-    # UIレビュー 07-25 #40: 「ロックありのみ」 became volatile ("検索は揮発、設定は
-    # 永続").  Read-and-discard rather than reject, so an older state file
-    # written by a build that persisted it still loads cleanly — the value is
+    # 「ロックありのみ」 is volatile ("検索は揮発、設定は永続").  Read-and-discard
+    # rather than reject, so an older state file that persisted it still loads
+    # cleanly — the value is
     # simply ignored and the session starts unfiltered.
     data.pop("filter_locked_only", None)
 
@@ -544,8 +542,8 @@ def _write_json_atomic(path, data: dict, *, should_land=None) -> bool:
     Returns **True** if the write landed (``False`` = *should_land* said no —
     tmp を捨てて静かに戻った。例外は投げない）。
 
-    *should_land* は「**着地の直前**にもう一度だけ訊く」任意のゲート
-    （issue #132 M-2 R4）。``False`` を返したら ``os.replace`` を行わず tmp を
+    *should_land* は「**着地の直前**にもう一度だけ訊く」任意のゲート。
+    ``False`` を返したら ``os.replace`` を行わず tmp を
     捨てて静かに戻る。死んだ共有では tmp への書き込みだけで数十秒かかるので、
     書き始めた時点の「自分が最新」という判断はそこで陳腐化している — 呼び出し
     側の書き込みを**ロックで直列化する代わりに**、追い越された書き込みを着地
@@ -553,23 +551,23 @@ def _write_json_atomic(path, data: dict, *, should_land=None) -> bool:
     ``main_window._save_merged_state`` の docstring（詰まったオートセーブが
     closeEvent の保存予算を丸ごと食う）。
 
-    一時ファイル名は ``tempfile.mkstemp`` で**呼び出しごとに固有**にする
-    （レビュー 2026-07-31 #67）。固定名 ``viewer_state.json.tmp`` を共有して
-    いた頃は、``persist_bookmarks`` の docstring が明示的にサポートする
-    「2 インスタンス並行書き込み」で、A の ``os.replace`` と B の書き込み
-    （切り詰め→書き込みの非アトミック 2 段）が交錯すると空/部分書き込みの
-    tmp が ``viewer_state.json`` として置換され得た — 壊れた JSON は次回
+    一時ファイル名は ``tempfile.mkstemp`` で**呼び出しごとに固有**にする。
+    固定名 ``viewer_state.json.tmp`` を共有すると、``persist_bookmarks`` の
+    docstring が明示的にサポートする「2 インスタンス並行書き込み」で、A の
+    ``os.replace`` と B の書き込み（切り詰め→書き込みの非アトミック 2 段）が
+    交錯すると空/部分書き込みの tmp が ``viewer_state.json`` として置換され
+    得る — 壊れた JSON は次回
     ``load_state`` で defaults へ落ち、merge 機構が守ろうとしたブックマークも
     含めて全設定を失う。
 
     ``except BaseException: unlink`` の意図（残骸を溜めない）を**例外を
     投げずに放棄される経路**でも守るため、置換に成功した直後に古い残骸を
-    掃除する（:func:`_reap_stale_tmps` — issue #132 差し戻し F5）。予算付き
+    掃除する（:func:`_reap_stale_tmps`）。予算付き
     teardown はワーカーごと放棄するので、この関数のどの ``except`` も通ら
     ないまま ``<name>.<rand>.tmp`` が残る（実測: 中断 3 回で 3 個）。
 
-    **着地（``os.replace``）だけは :data:`_STATE_FILE_LOCK` の下で行う**
-    （issue #140 M-2）: 同一プロセスの ``load_state`` が読み取り用に開いて
+    **着地（``os.replace``）だけは :data:`_STATE_FILE_LOCK` の下で行う**:
+    同一プロセスの ``load_state`` が読み取り用に開いて
     いる間、Windows では改名が ``PermissionError`` で落ちる。tmp への書き込み
     （＝時間のかかる方）はロックの外に残す — 詳しくはロックの docstring。
     ``should_land`` の最終確認も同じロックの中へ入れる: 「確認 → 着地」の間に
@@ -614,7 +612,7 @@ def _reap_stale_tmps(path, max_age_s: float = _STALE_TMP_AGE_S) -> None:
     予算付き teardown（``common/teardown.py``）は保存ワーカーを**例外を投げ
     させずに放棄する**ので、``_write_json_atomic`` の ``except`` 節は通らず
     ``viewer_state.json.<rand>.tmp`` がそのまま残る。固有名なので次の書き込み
-    が上書きすることもなく、「残骸は溜まる一方」（レビュー 2026-07-31 #67）が
+    が上書きすることもなく、「残骸は溜まる一方」が
     現実になる — 実測で中断 3 回 = 3 個。
 
     掃除は**置換に成功した直後にだけ**行う: そのタイミングなら保存先が応答
@@ -648,14 +646,13 @@ def save_state(state: ViewerState, *, should_land=None) -> bool:
     """Write the whole state file.  Returns **False** if the write failed.
 
     *should_land* は :func:`_write_json_atomic` へそのまま渡す「着地直前の
-    最終確認」（issue #132 M-2）。``False`` を返した場合も戻り値は ``True``
-    ＝「失敗ではない」— 呼び出し側が意図的に降りただけなので、N-07 の
-    「保存できませんでした」警告を出してはならない。
+    最終確認」。``False`` を返した場合も戻り値は ``True`` ＝「失敗ではない」
+    — 呼び出し側が意図的に降りただけなので、「保存できませんでした」警告を
+    出してはならない。
 
-    UIレビュー 2026-08-28 N-07: 書き込み不可な NAS / 読み取り専用メディアでは
-    設定・ブックマーク・保存した検索が消えているのに呼び出し元が「保存
-    しました」と成功表示していた。失敗をログにだけ落とすのをやめ、成否を
-    返して呼び出し元が利用者へ伝えられるようにする（伝達様式は
+    書き込み不可な NAS / 読み取り専用メディアでは設定・ブックマーク・保存
+    した検索が消えるので、失敗をログにだけ落とさず成否を返し、呼び出し元が
+    「保存しました」と偽らずに利用者へ伝えられるようにする（伝達様式は
     ``ViewerWindow._notify_persist_failed`` = user_meta.db と同型の
     セッション 1 回・常駐警告トースト）。
     """
@@ -679,7 +676,7 @@ def _read_partial_write_base(what: str) -> tuple[dict, bytes | None] | None:
     返すのは ``(dict, 読んだ生バイト列)`` の組で、2 番目は
     :func:`_persist_partial` の**楽観ロック**が着地直前の照合に使うスナップ
     ショット（ファイルが無い / 壊れていて退避した後は ``None``）。読み取り
-    そのものに失敗したときの扱いは ``shared_prefs`` と同じ二分法（項目#134）:
+    そのものに失敗したときの扱いは ``shared_prefs`` と同じ二分法:
 
     * **読めない（OSError）** ≠ 壊れている — 別プロセス（アンチウイルス /
       バックアップ）が一瞬掴んでいるだけかもしれない。ここで「対象キーだけ
@@ -694,7 +691,7 @@ def _read_partial_write_base(what: str) -> tuple[dict, bytes | None] | None:
     if not path.exists():
         return {}, None
     try:
-        # ``load_state`` と同じ理由でロックの下で読む（issue #140 M-2）:
+        # ``load_state`` と同じ理由でロックの下で読む:
         # 読み取り用に開いている間、並行する ``os.replace`` は Windows で
         # 失敗する。照合用スナップショットを取るため**バイト列で**読み、
         # デコードは下で行う（非 UTF-8 でも「読んだ生の中身」は残る）。
@@ -710,8 +707,8 @@ def _read_partial_write_base(what: str) -> tuple[dict, bytes | None] | None:
     try:
         raw = snapshot.decode("utf-8")
     except UnicodeDecodeError as exc:
-        # 非 UTF-8 のバイト列は「読めない」ではなく「壊れている」側
-        # （レビュー 2026-09-03 項目#57）。``UnicodeDecodeError`` は
+        # 非 UTF-8 のバイト列は「読めない」ではなく「壊れている」側。
+        # ``UnicodeDecodeError`` は
         # ``OSError`` の子ではないので明示的に捕まえないと Qt スロットの
         # 外まで抜ける（「この検索を保存…」が無反応になる）。空文字を
         # 下の ``json.loads`` に渡して、退避 + 最小ファイル書き直しの
@@ -769,8 +766,8 @@ def _current_state_bytes(path) -> bytes | None:
 def _persist_partial(what: str, apply_fields):
     """対象キーだけを ``viewer_state.json`` へ書き戻す（楽観ロックつき）.
 
-    :func:`persist_bookmarks` / :func:`persist_saved_searches` の共通後半
-    （レビュー 2026-09-03 項目#58）。*apply_fields* は読んだ生 dict を受け
+    :func:`persist_bookmarks` / :func:`persist_saved_searches` の共通後半。
+    *apply_fields* は読んだ生 dict を受け
     取り、**自分の管轄キーだけ**を書き換えて、呼び出し元へ返す値を返す。
 
     **なぜ楽観ロックが要るか**: 部分書き込みは「読んだ dict 全体を書き戻す」
@@ -801,11 +798,11 @@ def _persist_partial(what: str, apply_fields):
     tuple[object | None, bool]
         ``(apply_fields の戻り値, 書き込みに失敗しなかったか)``。1 番目が
         ``None`` は「ディスクが読めず書き込みを見送った」＝呼び出し元は自分の
-        in-memory 値をそのまま返すこと（N-07 の「失敗」には数えない）。
+        in-memory 値をそのまま返すこと（保存失敗の警告には数えない）。
 
         再試行を出し切って諦めた場合は 2 番目が ``False`` になる — 値は
         in-memory に残るだけでディスクには載っていないので、呼び出し元が
-        「保存しました」と名乗ってよい状態ではない（N-07 は成否表示の契約で、
+        「保存しました」と名乗ってよい状態ではない（成否表示の契約は、
         載らなかった保存を成功と言わないこと側も含む）。「読めなくて見送った」
         との区別は従来どおり 1 番目が ``None`` かどうかが担う。
     """
@@ -857,8 +854,7 @@ def persist_bookmarks(
     round-trip, no model validation), so this never overwrites settings a
     concurrent instance saved in the meantime.
 
-    「他のフィールドに触らない」は**楽観ロックで担保している**（レビュー
-    2026-09-03 項目#58）。生 JSON 往復は「読んだ dict 全体を書き戻す」
+    「他のフィールドに触らない」は**楽観ロックで担保している**。生 JSON 往復は「読んだ dict 全体を書き戻す」
     read-modify-write なので、素朴に書くと読み取りと ``os.replace`` の間に
     別インスタンスが着地させた変更（例: 保存済み検索の追加）を丸ごと巻き
     戻す。:func:`_persist_partial` が着地直前にディスクの中身を照合し、
@@ -876,7 +872,7 @@ def persist_bookmarks(
     explicitly blanked stay blanked, while names another instance set in the
     meantime survive (:func:`merge_bookmarks`).
 
-    読み取りに失敗したときの扱いは ``shared_prefs`` と同じ二分法（項目#134）:
+    読み取りに失敗したときの扱いは ``shared_prefs`` と同じ二分法:
 
     * **読めない（OSError）** ≠ 壊れている — 別プロセス（アンチウイルス /
       バックアップ）が一瞬掴んでいるだけかもしれない。ここで「ブックマーク
@@ -891,8 +887,7 @@ def persist_bookmarks(
     （読み取り側の実装は :func:`_read_partial_write_base` に共通化 —
     ``persist_saved_searches`` と同じ前半。）
 
-    3 番目の返り値は**書き込みに失敗しなかったか**（UIレビュー 2026-08-28
-    N-07）。読み取り不能で書き込みを見送った上記の分岐は「失敗」に数えない —
+    3 番目の返り値は**書き込みに失敗しなかったか**。読み取り不能で書き込みを見送った上記の分岐は「失敗」に数えない —
     in-memory の値は生きたまま終了時のフル :func:`save_state` が書くという
     設計上の意図的な先送りで、そこが本当に駄目なら save_state が False を
     返す。ここを失敗扱いにすると、アンチウイルスが一瞬掴んだだけで
@@ -979,7 +974,7 @@ def merge_saved_searches(
 ) -> list[dict]:
     """Union this instance's saved searches with ones another instance saved.
 
-    :func:`merge_bookmarks` の保存済み検索版（項目#32）: ``name`` をキーに
+    :func:`merge_bookmarks` の保存済み検索版: ``name`` をキーに
     union し、同名はこのインスタンス（*mine*）側が勝つ。順序は *mine* の
     並びが先、disk 側にしか無い追加分をディスク上の順序のまま末尾へ。
     *removed_names* はこのインスタンスが明示削除・改名した旧名の集合 —
@@ -1003,7 +998,7 @@ def persist_saved_searches(
 ) -> tuple[list[dict], bool]:
     """Write ONLY ``saved_searches`` into ``viewer_state.json`` right now.
 
-    :func:`persist_bookmarks` と同型（項目#32）: 生 JSON 往復で対象キーだけ
+    :func:`persist_bookmarks` と同型: 生 JSON 往復で対象キーだけ
     を書き換え、他のフィールドには一切触らない。ディスク側の値とは
     :func:`merge_saved_searches` でマージするので、2 インスタンス並行時に
     後から書いた側が相手の保存済み検索を消さない。読めない / 壊れている
@@ -1012,7 +1007,7 @@ def persist_saved_searches(
     マージ結果を返すので、呼び出し元はディスク側の追加分を自分の
     in-memory 状態へ採り込める（フル保存までの同期維持）。2 番目の返り値は
     **書き込みに失敗しなかったか**（:func:`persist_bookmarks` と同じ規約 —
-    読み取り不能による先送りは失敗に数えない。UIレビュー 2026-08-28 N-07）。
+    読み取り不能による先送りは失敗に数えない）。
     """
     def _apply(data: dict) -> list[dict]:
         disk = data.get("saved_searches")

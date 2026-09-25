@@ -96,13 +96,13 @@ NAV_BUTTON_WIDTH = 32
 #: 検索欄の下限幅（px）。プレースホルダが読める最小幅。
 SEARCH_FIELD_MIN_W = 260
 
-#: Upper bound on the toolbar search field's width.  Raised 340 → 500
-#: (UIレビュー 07-25 #3): the three mode chips + magnifier + ⚙ ate ~200px
-#: of the old cap, leaving ``filter_edit`` about 133px — too narrow for
-#: either the placeholder or the user's own query to be readable.  The
+#: Upper bound on the toolbar search field's width.  The three mode chips
+#: + magnifier + ⚙ take ~200px, so a smaller cap (340) would leave
+#: ``filter_edit`` about 133px — too narrow for either the placeholder or the
+#: user's own query to be readable.  The
 #: breadcrumb (the bar's stretch member) still has spare width at every
 #: window size we measured, so the two share it instead of the field
-#: being pinned narrow.  Paired with a shortened placeholder (案B従).
+#: being pinned narrow.  Paired with a shortened placeholder.
 SEARCH_FIELD_MAX_W = 500
 
 
@@ -235,7 +235,7 @@ class SearchField(QFrame):
         self.mode_chip_ai: QToolButton | None = None
         if ai_available:
             # Checkable so it can carry the SAME :checked accent styling as
-            # 名前/本文 when an AI query is active (UIレビュー #10).  The check
+            # 名前/本文 when an AI query is active.  The check
             # state is driven purely by ``apply_modes`` (mirrors
             # ``_advanced_search_active``); a plain click only opens the AI
             # popover, so the host re-syncs right after to undo the auto-toggle.
@@ -244,7 +244,7 @@ class SearchField(QFrame):
                 t("viewer.toolbar.mode_ai_tooltip"),
                 checkable=True,
             )
-            # Visual separation of the lit AIタグ chip (UIレビュー 07-25 #14):
+            # Visual separation of the lit AIタグ chip:
             # 名前/本文 are syntax aids over the SAME box, while AIタグ is a
             # different engine whose results the box then only narrows — so its
             # lit state gets the full accent fill instead of the soft tint the
@@ -263,8 +263,8 @@ class SearchField(QFrame):
         self.filter_edit = QLineEdit()
         enable_clear_button(self.filter_edit)
         self.filter_edit.setPlaceholderText(t("viewer.post_grid.filter_placeholder"))
-        # 検索欄からの唯一のキーボード出口（Enter / ↓）を画面上で予告する
-        # （UIレビュー 2026-09-11 N-69）。キーは表から引く（D1）。
+        # 検索欄からの唯一のキーボード出口（Enter / ↓）を画面上で予告する。
+        # キーはショートカット表から引く。
         from .shortcuts_dialog import key_hint, with_key_hint
 
         results_hint = t(
@@ -279,9 +279,9 @@ class SearchField(QFrame):
             + "\n" + results_hint
         )
         self.filter_edit.textChanged.connect(self.text_changed.emit)
-        # Enter = 「結果へ移る」 (UIレビュー 07-25 #6).  Incremental search has
-        # no "commit" concept, so Enter used to be a silent no-op indistinguishable
-        # from a mis-press; ↓ is wired next to it in the host's ``eventFilter``
+        # Enter = 「結果へ移る」.  Incremental search has no "commit" concept,
+        # so without this Enter would be a silent no-op indistinguishable from a
+        # mis-press; ↓ is wired next to it in the host's ``eventFilter``
         # (the same address-bar / Explorer convention).
         self.filter_edit.returnPressed.connect(self.submitted.emit)
         # First-focus syntax cheatsheet (session-once) + Esc-to-dismiss are
@@ -295,11 +295,10 @@ class SearchField(QFrame):
         set_icon(self.filter_icon_action, "search", role="muted")
         field_lay.addWidget(self.filter_edit, 1)
 
-        # 構文ヘルプは検索欄の右端（UIレビュー 2026-09-11 E3）— 旧「検索
-        # オプション」ポップオーバー（sliders 図像・中身 2 項目）は撤去し、
-        # 「サブフォルダも検索」はフィルターポップオーバーの先頭行（検索範囲）
-        # へ（台帳 ``search_dimensions`` の ``recursive`` 行）。図像は既定色・
-        # 16px（装飾の虫めがねと同じ明度に沈まない — N-124）。
+        # 構文ヘルプは検索欄の右端。「サブフォルダも検索」は別の検索オプション
+        # 面を持たず、フィルターポップオーバーの先頭行（検索範囲）に置く
+        # （台帳 ``search_dimensions`` の ``recursive`` 行）。図像は既定色・
+        # 16px（装飾の虫めがねと同じ明度に沈まない）。
         self.help_action = self.filter_edit.addAction(
             QIcon(), QLineEdit.TrailingPosition
         )
@@ -345,7 +344,7 @@ class SearchField(QFrame):
 
         本文 lights up only for a pure body-scoped query; any bare term means
         the default name search is (also) engaged.  When an AI query is
-        *dominating* the grid (UIレビュー #10) the AIタグ chip is the lit one
+        *dominating* the grid the AIタグ chip is the lit one
         and 名前/本文 are cleared — the plain filter box is then only a name
         overlay on the AI hits, so lighting 名前 would misname the current
         search dimension.
@@ -354,19 +353,19 @@ class SearchField(QFrame):
         self.mode_chip_body.setChecked(body_mode)
         if self.mode_chip_ai is not None:
             self.mode_chip_ai.setChecked(ai_active)
-        # UIレビュー 2026-08-28 N-05: AI 検索中の 名前 / 本文 チップは押しても
-        # **絶対に点灯しない**（上の 2 行が強制消灯する）のに活性チップと同じ
-        # 見た目で並んでいた＝壊れたボタン。しかも「本文」押下は検索欄を
+        # AI 検索中の 名前 / 本文 チップは押しても**絶対に点灯しない**（上の
+        # 2 行が強制消灯する）ので、活性チップと同じ見た目で並べると壊れた
+        # ボタンに見える。しかも「本文」押下は検索欄を
         # ``body:…`` へ書き換えるが、AI 結果に対して ``body:`` 項は
         # ``_general_filter_terms`` が捨てるので黙って無効化される。既存の不変
         # 条件（AI 中は plain モードに入れない）を**見た目へ一致させるだけ**で、
         # 挙動は変えない。
         self.mode_chip_name.setEnabled(not ai_active)
         self.mode_chip_body.setEnabled(body_usable)
-        # UIレビュー #9: while AI results are shown the 名前 chip's match surface
+        # While AI results are shown the 名前 chip's match surface
         # narrows to name/title only — say so in its tooltip (restored to the
         # full-surface wording once the AI query clears).  無効時は「なぜ押せ
-        # ないか」も同じツールチップで答える（N-05）。
+        # ないか」も同じツールチップで答える。
         self.mode_chip_name.setToolTip(
             t("viewer.toolbar.mode_name_tooltip_ai") if ai_active
             else t("viewer.toolbar.mode_name_tooltip")
@@ -378,10 +377,10 @@ class SearchField(QFrame):
         else:
             body_tip = t("viewer.toolbar.mode_body_tooltip")
         self.mode_chip_body.setToolTip(body_tip)
-        # UIレビュー 07-25 #14: the box next to the chips is NOT an AI-tag input
+        # The box next to the chips is NOT an AI-tag input
         # while an AI query owns the grid — it only narrows the AI hits by name.
         # The placeholder is the one always-visible surface, so it has to say so
-        # (the tooltip / 0 件カード were already split by #9).  Restored to the
+        # (the tooltip / 0 件カード say so too).  Restored to the
         # normal wording the moment the AI query clears.
         self.filter_edit.setPlaceholderText(
             t("viewer.post_grid.filter_placeholder_ai") if ai_active
@@ -453,14 +452,14 @@ class FilterHelpPopups:
     ) -> QFrame:
         """Construct the shared filter-syntax cheatsheet frame.
 
-        *brief* は N-116 の減量版（自動表示側だけ）: 実測 382×415px のパネル
-        が中央グリッドに自動で被さっていたので、初回向けの 3 行 + ヘルプ
+        *brief* は自動表示側だけの減量版: 全文（実測 382×415px のパネル）が
+        中央グリッドに自動で被さるのは重いので、初回向けの 3 行 + ヘルプ
         図像への誘導 + **閉じ方**の 1 行に落とす。図像から開く全文はそのまま。
         """
         popup = QFrame(self._parent, flags)
         # このペインには補完器の ``Qt.Popup`` も居るので、構文ヘルプの 2 面
         # （図像から開く全文 / 初回自動の短縮版）だけを名前で選べるようにする
-        # — 「開くたびに溜まらない」の回帰テストが数える対象（項目 #201）。
+        # — 「開くたびに溜まらない」のテストが数える対象。
         popup.setObjectName(FILTER_HELP_POPUP_NAME)
         popup.setFrameShape(QFrame.StyledPanel)
         layout = QVBoxLayout(popup)
@@ -492,11 +491,10 @@ class FilterHelpPopups:
             if existing.isVisible():
                 existing.close()
                 return
-            # 非可視の旧インスタンスは明示破棄する（レビュー 2026-09-03 項目
-            # #201）。``Qt.Popup`` はクリックアウェイで hide されるだけなので、
-            # 参照を差し替えるだけでは開くたびにこのペインの子として溜まる
-            # — ``advanced_search._show_search_cheatsheet``（項目#155）が
-            # 同じ形の対で、こちらが手本を写し損ねていた側。
+            # 非可視の旧インスタンスは明示破棄する。``Qt.Popup`` はクリック
+            # アウェイで hide されるだけなので、参照を差し替えるだけでは開く
+            # たびにこのペインの子として溜まる
+            # — ``advanced_search._show_search_cheatsheet`` が同じ形の対。
             existing.deleteLater()
             self.popup = None
         popup = self._build_frame(Qt.Popup)
@@ -507,7 +505,7 @@ class FilterHelpPopups:
         popup.show()
 
     def show_brief(self) -> None:
-        """初回フォーカスの自動表示 — **短縮版**（N-116）.
+        """初回フォーカスの自動表示 — **短縮版**.
 
         表示済みフラグ（``PostGrid._filter_help_autoshown``）の
         ``viewer_state.json`` 永続化は意図的に**しない**: 教示機会を恒久的に
@@ -528,7 +526,7 @@ class FilterHelpPopups:
         if popup is not None:
             # 自動表示は 1 セッション 1 回だが、``_filter_help_autoshown`` を
             # 跨ぐ再表示（履歴復元・別ルート）でも子が残らないよう、閉じると
-            # 同時に破棄まで予約する（項目 #201 — 図像側と同じ作法）。
+            # 同時に破棄まで予約する（図像側と同じ作法）。
             popup.close()
             popup.deleteLater()
             self.auto = None
@@ -548,21 +546,19 @@ class FilterHelpPopups:
 class DisplayOptions(QWidget):
     """The pane's display options, seated inside the 「並び・表示」 popover.
 
-    Until UIレビュー 08-28 N-24 these lived behind their own 「⋯」 toolbar
-    button right next to 「並び・表示」, whose tooltips both started with
-    「表示オプション(」 while their contents did not overlap — and the same
-    「⋯」 figure meant something different again in the 情報パネル and in the
-    ナビレール.  ⋯ now means exactly one thing (**that pane's display
-    options**), so the grid's display options move in with the pane's other
-    display controls and the second trigger is gone.
+    They do not get their own 「⋯」 toolbar button next to 「並び・表示」: two
+    triggers whose tooltips both start with 「表示オプション(」 would stand side
+    by side, and ⋯ means exactly one thing elsewhere (**that pane's display
+    options** — 情報パネル / ナビレール), so the grid's display options live
+    with the pane's other display controls.
 
     ``exclude_thumb_check`` is a ``QCheckBox``; ``setChecked`` / ``isChecked``
     / ``toggled`` are the same three members ``main_window`` and the state
-    round-trip already used against the older ``QAction``.  The NSFW band
+    round-trip use, the same as a checkable ``QAction``.  The NSFW band
     stays a ``QMenu`` of exclusive checkable ``QAction``s — it is a 3-way
     radio that reads better as a submenu than as a third combo row.
 
-    UIレビュー 07-25 #40: 「ロックありのみ」 is a *query* axis and lives in the
+    「ロックありのみ」 is a *query* axis and lives in the
     フィルタ popover, not here.
     """
 
@@ -637,9 +633,8 @@ class ViewPopover(QFrame):
     *build_options* が返したウィジェットを座らせるだけで、中身は知らない。
 
     NOTE ペイン表示トグル 3 つ（ナビレール / プレビュー列 / 情報パネル）は
-    かつてここに ☑ として同居していたが、UIレビュー 2026-08-28 N-134 の
-    裁定で**取り除いた**: 同じツールバーの 2cm 右に常設の 3 ボタンが
-    並んでいて、同一バー上に同じ 3 機能が二重に見えていた。導線は
+    ここに ☑ として**置かない**: 同じツールバーの 2cm 右に常設の 3 ボタンが
+    並ぶので、同一バー上に同じ 3 機能が二重に見える。導線は
     ツールバーボタン・表示メニュー・F6/F7/F8 の 3 系統に残るので失われず、
     checked 同期も窓側の ``_set_*_checks`` に一元化されているため
     削除側の片側欠落も起きない。**ここへ戻さないこと** — 戻すなら
@@ -678,14 +673,13 @@ class ViewPopover(QFrame):
 def make_view_button(on_click: Callable[[], None]) -> QToolButton:
     """「並び・表示」 popover の引き金ボタン。
 
-    UIレビュー 07-25 #100: the three toolbar popover triggers (フィルタ /
-    並び・表示 / ⋯) are the same kind of control, so they now share one
-    style — icon-only + tooltip.  This one carried a text label, which
-    both broke the row's rhythm and competed for the width #3 gives back
-    to the search field.  ``setText`` stays for the accessible name.
-    UIレビュー 07-25 #24: renamed 「表示」 → 「並び・表示」 (the menu bar's
-    表示(V) is a different menu) and the tooltip now enumerates what is
-    inside, so neither entry point is searched in vain.
+    The three toolbar popover triggers (フィルタ / 並び・表示 / ⋯) are the
+    same kind of control, so they share one style — icon-only + tooltip.  A
+    text label would break the row's rhythm and compete for the width the
+    search field needs.  ``setText`` stays for the accessible name.
+    Named 「並び・表示」, not 「表示」 (the menu bar's 表示(V) is a different
+    menu), and the tooltip enumerates what is inside, so neither entry point
+    is searched in vain.
     """
     btn = QToolButton()
     btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
@@ -719,8 +713,7 @@ def build_date_range_editors(
 
     投稿日だけが行内に追加のインラインコントロールを持つ軸なので、
     台帳の生成ループからは外して 1 関数に閉じ込める（この形が
-    あるために単一の ``QFormLayout`` では組めない — N-99 の改善案が
-    ``QFormLayout`` 化を退けた理由そのもの）。
+    あるために単一の ``QFormLayout`` では組めない）。
     """
     date_from = QDateEdit()
     date_from.setCalendarPopup(True)
@@ -739,7 +732,7 @@ def build_date_range_editors(
     date_to.dateChanged.connect(on_changed)
     date_to.setVisible(False)
     date_row.addWidget(date_to)
-    # 相互クランプ(項目188): 開始 > 終了の逆転入力をウィジェットレベルで
+    # 相互クランプ: 開始 > 終了の逆転入力をウィジェットレベルで
     # 発生させない。片方を動かすともう片方の可動域が追従し、逆転させる
     # 変更は Qt が境界値へ丸める(復元経路で保存済みの逆転値が来ても同様に
     # 正規化される)。保険として preset_range 側にも lo>hi の swap がある。
@@ -821,9 +814,9 @@ class GridToolbar(QWidget):
         self.breadcrumb = BreadcrumbBar()
         lay.addWidget(self.breadcrumb, 1)
 
-        # Icon-only, like the nav buttons — the full-text label used to eat
-        # the width the breadcrumb needs to show the current folder (UIレビュー
-        # #2).  Same wording as the File menu's フォルダを開く… (A04), carried
+        # Icon-only, like the nav buttons — a full-text label would eat the
+        # width the breadcrumb needs to show the current folder.  Same wording
+        # as the File menu's フォルダを開く…, carried
         # by the tooltip.
         self.change_root_btn = self._nav_btn(
             lay, "folder-open", "viewer.post_grid.open_folder_tooltip",
@@ -831,11 +824,10 @@ class GridToolbar(QWidget):
         self.change_root_btn.clicked.connect(self.change_root_clicked.emit)
 
         # Global search field (mode chips + filter box + syntax help).
-        # Stretch 1, like the breadcrumb: 07-25 #3 raised the cap to 500px on
-        # the stated premise that "the two share" the bar's spare width, but
-        # the field was added with the default stretch 0 and never grew past
-        # ~294px — leaving ``filter_edit`` at 153px, narrower than the 209px
-        # its own placeholder needs (UIレビュー 2026-08-28 N-108).  The
+        # Stretch 1, like the breadcrumb: ``SEARCH_FIELD_MAX_W`` assumes the
+        # two share the bar's spare width; with the default stretch 0 the field
+        # never grows past ~294px — leaving ``filter_edit`` at 153px, narrower
+        # than the 209px its own placeholder needs.  The
         # existing min/max still bound it.
         self.search_field = search_field
         lay.addWidget(search_field, 1)
@@ -848,10 +840,9 @@ class GridToolbar(QWidget):
         self.filter_btn.clicked.connect(self.filter_clicked.emit)
 
         # 「並び・表示」 popover — sort / layout / thumbnail size **and** the
-        # display options that used to sit behind a second ⋯ button next to it
-        # (UIレビュー 08-28 N-24).  Two triggers whose tooltips both began with
-        # 「表示オプション(」 stood side by side in one toolbar, so the same
-        # figure 「⋯」 pointed at three unrelated things across the window.
+        # display options (no second ⋯ button next to it: two triggers whose
+        # tooltips both begin with 「表示オプション(」 would stand side by side,
+        # and 「⋯」 would point at unrelated things across the window).
         self.view_button = view_button
         lay.addWidget(view_button)
 

@@ -93,18 +93,18 @@ class MediaView(QWidget):
     navigate_requested = Signal(int, bool)  # (delta, immediate)
     loop_toggled = Signal(bool)
     volume_changed = Signal(int)  # user moved the volume slider (F07, 0–100)
-    # 再生速度コンボの変更 (N-136) — loop / volume と同じ 3 経路に載せ、
+    # 再生速度コンボの変更 — loop / volume と同じ 3 経路に載せ、
     # インスタンス間（分割プレビュー ⇄ 全画面）で値を共有する。
     playback_rate_changed = Signal(float)
-    # 現在ソースの再生が**終端に達してもう先へ進まない**ことの正規化通知
-    # （項目#26）。EndOfMedia（ループ無効 / スライドショーによる抑止中）と
+    # 現在ソースの再生が**終端に達してもう先へ進まない**ことの正規化通知。
+    # EndOfMedia（ループ無効 / スライドショーによる抑止中）と
     # InvalidMedia（破損 / 未対応コーデック — EndOfMedia が永遠に来ない）を
     # MediaView 側で 1 本に正規化する。ライトボックスのスライドショーは
     # private な ``_player`` を購読する代わりにこれを購読する。ループ継続中
     # （ネイティブ / エミュレーションとも）は出さない。
     playback_finished = Signal()
     # プレーヤの durationChanged の再送出（ms）。スライドショーの
-    # ウォッチドッグが「残り尺 + 余裕」への張り直しに使う（項目#26）。
+    # ウォッチドッグが「残り尺 + 余裕」への張り直しに使う。
     duration_changed = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -135,7 +135,7 @@ class MediaView(QWidget):
         self._audio_label = QLabel()
         self._audio_label.setAlignment(Qt.AlignCenter)
         # White-on-black is intentional (video letterbox overlay — see the
-        # image-anchored-overlay exception in docs/claude/design.md).  The
+        # image-anchored-overlay exception to the theme-token rule).  The
         # colour itself comes from ``common/ui/overlay.py`` like every other
         # image-anchored fixed colour: spelling it here would leave this surface
         # outside the two single sources of truth the design system declares.
@@ -234,6 +234,7 @@ class MediaView(QWidget):
         self._player.errorOccurred.connect(self._on_error)
         self._seek_slider.sliderPressed.connect(self._on_seek_pressed)
         self._seek_slider.sliderReleased.connect(self._on_seek_released)
+        self._seek_slider.actionTriggered.connect(self._on_seek_action)
         self._vol_slider.valueChanged.connect(self._on_volume_changed)
 
         self._seeking = False
@@ -247,19 +248,19 @@ class MediaView(QWidget):
         self._is_video = False
         self._playback_rate = 1.0
         # ``show_media(position_ms=…)`` で受けた再生位置。``LoadedMedia`` が
-        # 来た時点で一度だけ当てて降ろす (N-142)。番兵 0 は使わない——
+        # 来た時点で一度だけ当てて降ろす。番兵 0 は使わない——
         # ``0 ms`` は「引き継ぎ無し」ではなく**先頭へ戻す**要求で、別インス
         # タンスを先頭まで巻き戻してから引き継いだときに当てる必要がある。
         self._pending_seek_ms: Pending[int] = Pending()
         # volume の ``_suppress_vol_emit`` と同じ役割 — apply_settings に
         # よる復元をユーザー変更として echo しない。速度・ループもそれぞれ
-        # 自前のフラグを持つ（ループ分の欠落はレビュー 09-03 #213）。
+        # 自前のフラグを持つ。
         self._suppress_rate_emit = False
         self._suppress_loop_emit = False
         self._loop_enabled = False
         # Temporary loop override (slideshow): while True, playback never
         # loops — natively or emulated — regardless of ``_loop_enabled``,
-        # so ``EndOfMedia`` fires and the slideshow can advance (#13).  The
+        # so ``EndOfMedia`` fires and the slideshow can advance.  The
         # user's loop preference / button state is left untouched.
         self._loop_suppressed = False
         # True when QMediaPlayer.setLoops is available and used natively;
@@ -270,7 +271,7 @@ class MediaView(QWidget):
         # Connected unconditionally: normalizes the playback "end" states
         # (EndOfMedia / InvalidMedia) into ``playback_finished`` and — on the
         # non-native-loop fallback path — performs the manual
-        # restart-on-EndOfMedia loop emulation (項目#26).
+        # restart-on-EndOfMedia loop emulation.
         self._player.mediaStatusChanged.connect(self._on_media_status_changed)
 
         # Apply initial volume (will be overwritten by apply_settings).
@@ -304,7 +305,7 @@ class MediaView(QWidget):
     # ------------------------------------------------------------------ API
 
     def show_media(self, path: Path, position_ms: int = 0) -> None:
-        """Open *path*, optionally resuming at *position_ms* (N-142).
+        """Open *path*, optionally resuming at *position_ms*.
 
         ``position_ms`` は「別インスタンスから引き継いだ再生位置」。
         ``setSource`` 直後の ``setPosition`` は無視される（まだ尺が
@@ -346,24 +347,24 @@ class MediaView(QWidget):
             self._player.pause()
 
     def playback_position(self) -> int:
-        """現在の再生位置 (ms)。別インスタンスへの引き継ぎ用 (N-142)。"""
+        """現在の再生位置 (ms)。別インスタンスへの引き継ぎ用。"""
         return max(0, int(self._player.position()))
 
     def current_path(self) -> Path | None:
-        """いま開いているファイル（未ロードなら ``None``）— N-142 の公開面.
+        """いま開いているファイル（未ロードなら ``None``）— 引き継ぎの公開面.
 
         引き継ぎ 4 点（一時停止 / 位置取得 / シーク / 同一ファイル判定）の
-        うち、これだけホスト側が ``_current_path`` を直読みしていた
-        （レビュー 09-03 #206）。Qt 型を返さないので遅延 import に影響しない。
+        うち、ホスト側が ``_current_path`` を直読みしないための口。
+        Qt 型を返さないので遅延 import に影響しない。
         """
         return self._current_path
 
     def seek(self, position_ms: int) -> None:
-        """再生位置を直接指定する（引き継ぎの復路 — N-142）。"""
+        """再生位置を直接指定する（引き継ぎの復路）。"""
         self._player.setPosition(max(0, int(position_ms)))
 
     def pause_playback(self) -> bool:
-        """再生中なら一時停止する（項目#30 — 別ウィンドウが前面に出るとき）.
+        """再生中なら一時停止する（別ウィンドウが前面に出るとき）.
 
         ``clear_media`` と違いソースも再生位置も保持するので、閲覧モードから
         戻ったユーザーは同じフレームの続きから再開できる。戻り値は「実際に
@@ -402,7 +403,7 @@ class MediaView(QWidget):
             self._vol_slider.setValue(vol)
             self._suppress_vol_emit = False
         self._loop_enabled = state.media_loop
-        # Programmatic restore — must not echo back as a user change (#213).
+        # Programmatic restore — must not echo back as a user change.
         self._suppress_loop_emit = True
         try:
             self._loop_btn.setChecked(state.media_loop)
@@ -412,7 +413,7 @@ class MediaView(QWidget):
         self._apply_playback_rate(state.media_playback_rate)
 
     def _apply_playback_rate(self, rate: float) -> None:
-        """Restore a persisted playback rate without echoing it back (N-136).
+        """Restore a persisted playback rate without echoing it back.
 
         コンボに無い値（設定ファイルの手書き / 将来の選択肢削除）は
         黙って無視して 1.0 のままにする — 復元で落ちない。
@@ -437,7 +438,7 @@ class MediaView(QWidget):
         The lightbox slideshow relies on ``EndOfMedia`` to advance past a
         video — with the loop preference ON, native infinite looping never
         reaches end-of-media and the slideshow stalls on the first video
-        forever (#13).  While suppressed, both the native ``setLoops`` path
+        forever.  While suppressed, both the native ``setLoops`` path
         and the EndOfMedia-emulation fallback play the source once; the
         loop button / ``loop_enabled()`` are unaffected and the preference
         resumes as soon as the suppression is lifted.
@@ -458,7 +459,7 @@ class MediaView(QWidget):
         )
 
     def expected_remaining_ms(self) -> int | None:
-        """実再生中の残り時間（再生速度換算済み・ms）。不明なら ``None``（項目#26）.
+        """実再生中の残り時間（再生速度換算済み・ms）。不明なら ``None``.
 
         再生していない（一時停止 / 停止 / 自動再生 OFF で置かれたまま）か
         尺が未判明（メタデータ未着）なら ``None`` — その場合、呼び出し側の
@@ -537,7 +538,7 @@ class MediaView(QWidget):
         self._player.setLoops(loops)
 
     def _on_media_status_changed(self, status) -> None:
-        """再生の「終端」を正規化して :attr:`playback_finished` を出す（項目#26）.
+        """再生の「終端」を正規化して :attr:`playback_finished` を出す.
 
         * ``InvalidMedia`` — 破損 / 未対応コーデック。``EndOfMedia`` は永遠に
           来ないので、これも終端として通知する。
@@ -554,7 +555,7 @@ class MediaView(QWidget):
         from PySide6.QtMultimedia import QMediaPlayer  # noqa: PLC0415
 
         if status == QMediaPlayer.MediaStatus.LoadedMedia:
-            # 引き継いだ再生位置をここで当てる (N-142) — 尺が分かる
+            # 引き継いだ再生位置をここで当てる — 尺が分かる
             # 前の setPosition は黙って無視されるため。
             seek_ms = self._pending_seek_ms.take_if(always)
             if seek_ms is not None:
@@ -607,6 +608,23 @@ class MediaView(QWidget):
         self._seeking = False
         self._player.setPosition(self._seek_slider.value())
 
+    def _on_seek_action(self, action: int) -> None:
+        """ホイール / PageUp・PageDown / Home・End による移動を再生位置へ反映する。
+
+        ``sliderPressed`` / ``sliderReleased`` はマウスドラッグでしか発火し
+        ない。QSlider はホイールや PageUp/PageDown、Home/End をそれぞれ
+        ``triggerAction`` 経由で処理し、そこで飛ぶのは ``actionTriggered``
+        だけなので、この経路を無視すると再生位置が一度も動かずつまみだけ
+        ずれる。ホイールは ``SliderMove`` として飛ぶ（マウスドラッグの
+        ``SliderMove`` と同じ action 値）ため action 種別では区別できず、
+        ``_seeking``（ドラッグ中フラグ）で判定する — ドラッグ中の連続移動は
+        ``_on_seek_released`` 側でまとめて反映する。
+        """
+        del action  # action 値では区別できないため未使用（docstring 参照）
+        if self._seeking:
+            return
+        self._player.setPosition(self._seek_slider.sliderPosition())
+
     def _on_volume_changed(self, value: int) -> None:
         from PySide6.QtMultimedia import QAudio  # noqa: PLC0415
 
@@ -650,7 +668,7 @@ class MediaView(QWidget):
         self._set_controls_enabled(False)
 
     def _on_open_default(self) -> None:
-        # 共通ヘルパ経由 — 失敗時はステータス通知 (UIレビュー 07-25 #74)。
+        # 共通ヘルパ経由 — 失敗時はステータス通知。
         if self._current_path is not None:
             open_with_default(self._current_path, self)
 
@@ -725,15 +743,15 @@ def build_media_view(
     on_duration: Callable[[int], None] | None = None,
     pending_state: "ViewerState | None" = None,
 ) -> "MediaView | None":
-    """MediaView を構築し、ホストへの公開シグナルを一括配線する集約点（項目#71）.
+    """MediaView を構築し、ホストへの公開シグナルを一括配線する集約点.
 
     :func:`snappix.viewer.image_view.connect_state_writeback` と同じ趣旨の
     ファンアウト。MediaView のインスタンスは 2 つある（中央プレビュー
-    ``ContentView._media`` と全画面 ``LightboxWindow._media``）が、従来は
+    ``ContentView._media`` と全画面 ``LightboxWindow._media``）が、
     「遅延構築 → シグナル配線 → 保留設定の当て込み → 構築失敗の降格」を
-    **両ホストが別々に手書き**していたため、片側だけに配線が足される事故が
-    繰り返し起きた（N-136 の再生速度、構築失敗の降格が中央ペインだけ、等）。
-    以後、**MediaView とホストの間に増やす配線は必ずこの関数に足すこと**。
+    **両ホストが別々に手書き**すると、片側だけに配線が足される事故
+    （再生速度の配線、構築失敗の降格が中央ペインだけ、等）が起きる。
+    **MediaView とホストの間に増やす配線は必ずこの関数に足すこと**。
 
     構築失敗（QtMultimedia のプラグイン / DLL 欠落）は例外を送出せず
     ``None`` を返す。「そのプレビューだけ失敗」への降格そのものは各ホストの

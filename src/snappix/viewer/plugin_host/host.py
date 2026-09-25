@@ -72,7 +72,7 @@ def _ai_provider_state() -> tuple:
 
 
 def _restore_ai_provider(before: tuple) -> None:
-    """activate 失敗で残った provider を *before*（``(provider, owner)``）へ戻す（項目#85）。
+    """activate 失敗で残った provider を *before*（``(provider, owner)``）へ戻す。
 
     ``ai_pack._provider`` はモジュールグローバルの**単一スロット**で、任意の
     プラグインが ``register_provider`` を呼べる。activate が失敗したプラグイン
@@ -120,7 +120,7 @@ def _purge_modules(mod_name: str) -> None:
 def _release_ai_provider(
     pid: str, lp: "LoadedPlugin", loaded: "dict[str, LoadedPlugin]"
 ) -> None:
-    """deactivate 後に、そのプラグインが残した provider を引き揚げる（項目#172）。
+    """deactivate 後に、そのプラグインが残した provider を引き揚げる。
 
     activate 失敗の巻き戻し（:func:`_restore_ai_provider`）と対称の保証を
     deactivate 側にも置く: **無効化したプラグインの provider は残らない**を
@@ -240,7 +240,7 @@ class PluginHost:
         except OSError as exc:
             logger.warning("plugins dir scan failed: {}", exc)
             self.scanned = False
-        # 記録済みフォルダを id 重複の解決ヒントに渡す（なりすまし対策 #37）。
+        # 記録済みフォルダを id 重複の解決ヒントに渡す（なりすまし対策）。
         self.manifests, self.broken = discover_plugins(
             self.plugins_dir, preferred_folders=self.store.preferred_folders()
         )
@@ -364,7 +364,7 @@ class PluginHost:
             module=module,
             context=context,
             # 無効化のときに「このプラグインが載せた provider」だけを引き揚げる
-            # ための目印（項目#172 — deactivate 側の対称な保証）。
+            # ための目印（deactivate 側の対称な保証）。
             provider_before=provider_before,
             provider_after=_ai_provider_state(),
         )
@@ -407,7 +407,7 @@ class PluginHost:
         （UI 側が再起動を案内する）。
 
         遅延セマンティクスでも **AI エンジンの provider だけは今すぐ引き揚げる**
-        （:func:`_release_ai_provider` — 項目#172）: 単一スロットに居座った
+        （:func:`_release_ai_provider`）: 単一スロットに居座った
         まま UI 骨組みだけ消えると、無効化したはずのプラグインのエンジンで
         セッションが続く。activate 失敗時の巻き戻しと対称の保証。
         """
@@ -437,7 +437,7 @@ class PluginHost:
                     pid, traceback.format_exc(),
                 )
         # 寄稿 UI を回収したのと同じ理由で、残った AI エンジン provider も
-        # 引き揚げる（プラグインの自主規律に頼らない — 項目#172）。
+        # 引き揚げる（プラグインの自主規律に頼らない）。
         _release_ai_provider(pid, lp, self.loaded)
         return clean
 

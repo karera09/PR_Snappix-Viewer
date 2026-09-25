@@ -105,6 +105,8 @@ from .curation_recovery import (
 from .dialogs import host_picker_places, pick_existing_directory
 from .empty_state import EmptyAction
 from .focus_target import SEAT_GRID, curation_subject
+from .locations import is_zip_temp_path
+from .user_meta import CurationMap
 
 # Re-exported for backwards compatibility: the filter-syntax engine moved to
 # ``filter_query.py`` (pure logic, Qt-free) but tests and callers historically
@@ -205,7 +207,7 @@ class PostGrid(ChildrenGrid):
     go_back_requested = Signal()
     go_forward_requested = Signal()
     help_requested = Signal()
-    # ``go_up_requested`` は基底 :class:`ChildrenGrid` に移した（N-26）— 右一覧
+    # ``go_up_requested`` は基底 :class:`ChildrenGrid` が持つ — 右一覧
     # でも Backspace が効くようにするため。ここでは ↑ ボタンからも emit する。
     reload_requested = Signal()
     root_change_requested = Signal(Path)
@@ -224,9 +226,8 @@ class PostGrid(ChildrenGrid):
     #: results, which reflect the displayed hits).  Drives the status-bar
     #: count widget.
     counts_changed = Signal(int, int)
-    #: 右クリック「このファイルの場所を開く」(UI08-28 N-64 / 2026-09-11 N-40)。
-    #: 横断一覧・検索ヒットの行は実体がどこにあるかを名前でしか示せず、そこへ
-    #: 戻る手段がエクスプローラ経由しか無かった。このペインは窓の ``set_root``
+    #: 右クリック「このファイルの場所を開く」。横断一覧・検索ヒットの行は実体が
+    #: どこにあるかを名前でしか示せないので、そこへ戻る手段を持たせる。このペインは窓の ``set_root``
     #: を知らないので意図だけを報告し、窓が親フォルダ + 当の項目の選択へ
     #: 着地させる（``recent_files_requested`` と同じ形）。
     reveal_in_app_requested = Signal(Path)
@@ -246,7 +247,7 @@ class PostGrid(ChildrenGrid):
     #: API・新メニュー — が増えたときに片側だけ欠ける。
     population_replacing = Signal()
     #: グリッドの母集合が検索 / 全面占有オーバーレイで入れ替わり、その結果に
-    #: 選択が 1 つも残らなかった（UIレビュー 2026-08-28 N-13 / N-58）。横断
+    #: 選択が 1 つも残らなかった。横断
     #: キュレーション一覧・最近追加されたファイル一覧・AI 検索結果・平常の検索
     #: 着地の 4 経路が :meth:`_rebuild_grid` の 1 点でここへ合流する。窓は
     #: ``_reset_preview_panes``（set_root と同じリセット規約）でプレビュー列と
@@ -258,7 +259,7 @@ class PostGrid(ChildrenGrid):
     #: (item K01).  The window re-opens tags.db and re-injects the fresh indexes
     #: via :meth:`set_tag_indexes`.
     reload_tag_db_requested = Signal()
-    #: 条件バーの「この検索を保存…」が押された（UIレビュー 09-11 N-25）。
+    #: 条件バーの「この検索を保存…」が押された。
     #: ウィンドウ側の既存スロット ``_on_save_current_search`` へ届く。
     save_search_requested = Signal()
 
@@ -299,7 +300,7 @@ class PostGrid(ChildrenGrid):
         # Filter-syntax cheatsheet auto-popup: shown once per session, on the
         # first focus of the filter box (see eventFilter / _show_filter_help).
         self._filter_help_autoshown = False
-        # クリック規約ヒント（N-146）— 平常ブラウズに初めてタイルが並んだ
+        # クリック規約ヒント — 平常ブラウズに初めてタイルが並んだ
         # とき 1 度だけ出す（``_maybe_show_click_hint``）。
         self._click_hint_shown = False
         self._click_hint: QFrame | None = None
@@ -314,7 +315,7 @@ class PostGrid(ChildrenGrid):
         #: 片方だけ書く経路を新設しないこと。
         self._filter_text = ""
         self._filter_locked_only = False
-        # ★キーの確認トースト（UIレビュー #20）— 連打時に差し替えるため保持。
+        # ★キーの確認トースト — 連打時に差し替えるため保持。
         self._star_toast = None
         # Last tile selected while NO search was engaged.  Typing a filter
         # rebuilds the grid and silently drops the selection, so this is the
@@ -401,6 +402,13 @@ class PostGrid(ChildrenGrid):
         self._body_filter_sig: tuple | None = None
         self._body_filter_matches: tuple[set[str], set[str]] | None = None
         self._pending_body_sig: Pending[tuple] = Pending()
+        # 窓がいまプレビューしている文脈 = グリッドが最後に選択として伝えた
+        # パス。:attr:`preview_context_lost` のゲート材料で、グリッド
+        # 自身の選択は ``set_tiles`` が再構築のたびに落とすので材料にならない
+        # — 1 回目の再構築で落ちた後は「選択なし」扱いになり、選択が結果に
+        # 残っていても 2 打鍵目以降の再構築が無条件にプレビューを消してしまう。
+        # 選択の伝達で更新し、発火と set_root で None へ戻す。
+        self._context_path: Path | None = None
         # Scan-lifecycle flag mirroring ``loading_changed``: True from
         # ``set_root`` until the scanner's ``metadata_finished`` closes the
         # pass.  The empty-state hook (``_empty_state_kind``) consults it so a
@@ -413,12 +421,16 @@ class PostGrid(ChildrenGrid):
         # sort never touch sqlite — the store is written through on mutation and
         # the map patched in lockstep.
         self._user_meta = user_meta
+        # ``open_or_report`` は全行を 1 度読めたストアしか渡さないので、ここで
+        # 読めないのは開いた直後の一過性失敗だけ — 空マップで始める。
+        loaded = user_meta.try_load_all() if user_meta is not None else None
         self._user_meta_map: dict = (
-            user_meta.load_all() if user_meta is not None else {}
+            loaded if loaded is not None
+            else CurationMap() if user_meta is not None
+            else {}
         )
-        # UIレビュー 07-25 #135: 「スター (高い順)」 は user_meta が開けない環境では
-        # 常に全件同点＝実質壊れた選択肢なのに、フィルタ側（★コンボ）だけが
-        # ゲートされていた。並びも同じゲートに揃え、永続値がそれを指していた
+        # 「スター (高い順)」 は user_meta が開けない環境では常に全件同点＝実質
+        # 壊れた選択肢なので、フィルタ側（★コンボ）と同じゲートを並びにも掛け、永続値がそれを指していた
         # ときは既定へ落とす（選べない値が選択状態のまま残らないように）。
         if user_meta is None and self._sort_mode == "star_desc":
             self._sort_mode = _SORT_LABELS[0][0]
@@ -446,7 +458,7 @@ class PostGrid(ChildrenGrid):
         # then do nothing.
         self._nsfw_hidden_count = 0
         # 初回起動（空ライブラリ + ナビ履歴なし）を空フォルダと区別するフラグ
-        # (N-02 / 空状態オーケストレータ)。**判定はグリッドではできない** —
+        # (空状態オーケストレータ)。**判定はグリッドではできない** —
         # 履歴も既定ライブラリもウィンドウが持つので、ウィンドウが
         # :meth:`set_first_run` で教える。既定 False = 従来どおり
         # ``"empty_folder"``（単体でグリッドを使うテスト・部品利用は無影響）。
@@ -466,33 +478,33 @@ class PostGrid(ChildrenGrid):
         # widgets exist only when a user_meta store is wired.
         self._filterbar_star_min = 0
         self._filterbar_later = False
-        # ユーザータグの絞り込み (UIレビュー 07-25 #13②) — ★/あとで見ると同じ
+        # ユーザータグの絞り込み — ★/あとで見ると同じ
         # 揮発の in-place predicate。``""`` = 「すべて」= 無制限。
         self._filterbar_user_tag = ""
-        # ユーザータグ候補のキャッシュ (UIレビュー07-25 追修)。``None`` = dirty。
+        # ユーザータグ候補のキャッシュ。``None`` = dirty。
         # 実体は ``user_meta.db`` の全行走査 (``all_tags``) なので、フィルタ
         # ポップオーバーを開くたび・履歴を 1 歩戻るたびに GUI スレッドで
         # フルスキャンさせない。無効化はタグ編集とストア再読込の 2 か所だけ。
         self._user_tags_cache: list[str] | None = None
         # **グリッド全面を占有している一覧**（横断キュレーション H01 /
-        # 最近追加されたファイル N-49）の状態。``None`` = 平常ブラウズ。
+        # 最近追加されたファイル）の状態。``None`` = 平常ブラウズ。
         # 2 つの一覧は「グリッド全体を奪う / 母集合をメモリに持つ / 入場前の
         # 並び順を退避する / 単一クラムに差し替える / 世代ガードで stale 着地を
-        # 捨てる / 相互排他」という**同一の形**なので、13 + 9 個の平置き
-        # フィールドと 4 経路 × 2 の片付けを 1 つの値オブジェクトへ寄せた
-        # （:mod:`.overlay_list` — レビュー 2026-09-03 項目 #97）。種別は
+        # 捨てる / 相互排他」という**同一の形**なので、平置きのフィールドと
+        # 経路ごとの片付けを持たず 1 つの値オブジェクトへ寄せる
+        # （:mod:`.overlay_list`）。種別は
         # :class:`~.curation_list.CurationList`（横断一覧）か ``Path``
         # （最近追加一覧）。永続化・履歴・チップの識別子は今までどおり
         # ``CurationList.key`` の文字列 / ``Path`` のまま。
         self._overlay: OverlayList | None = None
         # ``OverlayList`` が持つのは: 母集合 (``entries`` / ``rel_paths``)、
-        # 読めずに落ちた行のプレースホルダ (#133 項目 3 —
+        # 読めずに落ちた行のプレースホルダ (
         # ``curation_recovery.build_ghost_entries``。母集合とは別に持ち、
         # 並べ替え・絞り込みの外で末尾へ付く)、消えた / 読めなかった行の
-        # 件数 (N-09 — 分けて数える)、全滅フラグ ``failed``、解決 / 走査が
+        # 件数 (分けて数える)、全滅フラグ ``failed``、解決 / 走査が
         # in-flight であることを示す ``pending``、走査中の 「N 件走査」 用の
-        # ``scanned``、そして入場前の並び順 ``saved_sort`` (07-25 #59)。
-        # 可視タイル限定の post.md 後追い解決 (N-49 後半) の受付済み集合は
+        # ``scanned``、そして入場前の並び順 ``saved_sort``。
+        # 可視タイル限定の post.md 後追い解決の受付済み集合は
         # ``_curation_meta_resolver`` が持つ（世代と中断トークンは
         # ``_curation_meta_stream``）。一覧の母集合はスナップショットなので、
         # 解決結果は**その場更新**のみ（並べ替え・絞り込みの再適用はしない）。
@@ -515,7 +527,7 @@ class PostGrid(ChildrenGrid):
         # Keyboard-completion signals from the gallery view (B-item 1):
         # Escape clears the active filter / search (left pane only — the右一覧
         # has no filter of its own).  Backspace（上の階層へ）は基底
-        # ``ChildrenGrid`` が両ペイン分を中継する（N-26）。
+        # ``ChildrenGrid`` が両ペイン分を中継する。
         self._view.clear_filter_requested.connect(self._on_escape_clear)
         # Image-origin similarity (item 2-4): the hover 「◇」 overlay is only
         # meaningful with a vector index; enable + wire it for the left pane.
@@ -531,10 +543,9 @@ class PostGrid(ChildrenGrid):
         if self._user_meta is not None:
             self._view.set_curation_provider(self._curation_badge_for)
             self._view.star_key_requested.connect(self._on_star_key)
-            # バッジは絵のままでは意味が伝わらない (UIレビュー 07-25 #136) —
+            # バッジは絵のままでは意味が伝わらない —
             # ♡/🔒 と同じくホバーで言葉に展開する。ユーザータグはバッジすら
-            # 無い唯一のキュレーション次元だったので、ここが初めての表示面
-            # になる (#13)。
+            # 無いキュレーション次元なので、タイル上の表示面はここになる。
             self._view.set_tooltip_extra_provider(self.curation_tooltip_lines)
         # Metadata batch + final-pass signals are PostGrid-specific.
         self._scanner.metadata_ready.connect(self._on_metadata_batch)
@@ -558,11 +569,10 @@ class PostGrid(ChildrenGrid):
         self._recursive_debounce = Debouncer(
             self, 250, self._kick_recursive_scan, mode=DebounceMode.TRAILING
         )
-        # 左ペインの off-thread 仕事は 4 本 + 1 本の ``GuardedStream``
-        # （レビュー 2026-09-03 項目 #56 / #215）。以前はこの 5 経路がそれぞれ
-        # 「世代カウンタ + CancelToken + 無親ブリッジ + 専用プール + shutdown
-        # 配線」の 5 点セットを手書きしており、curation-meta だけが 2 点を
-        # 落として在庫していた。ストリームは self に親付けするので
+        # 左ペインの off-thread 仕事は 4 本 + 1 本の ``GuardedStream``。
+        # 各経路で「世代カウンタ + CancelToken + 無親ブリッジ + 専用プール +
+        # shutdown 配線」の 5 点セットを手書きすると、どれかが一部を落とす。
+        # ストリームは self に親付けするので
         # ``ViewerWindow._drain_loader_pools`` の ``findChildren`` が窓じまいの
         # 有界ドレインへ自動的に載せる = 配線漏れが原理的に起こせない。
         # ワーカー本体（何を計算するか）は Qt 非依存の ``grid_tasks.py``。
@@ -589,11 +599,11 @@ class PostGrid(ChildrenGrid):
         self._nsfw_resolver.landed.connect(self._on_nsfw_ratings)
         # 横断一覧の解決 (H01)。キュレーション全件の per-path ``os.stat`` は
         # 秒単位で詰まり得るので、グローバルプール（短命 probe と共用）では
-        # なく専用の単一スレッドへ出す（項目 #215 — ``_runnable`` の docstring
-        # が名指ししていた「per-item stat loops」の移行漏れ）。
+        # なく専用の単一スレッドへ出す（``_runnable`` の docstring が言う
+        # 「per-item stat loops」に当たる）。
         self._curation_stream = GuardedStream(self)
         self._curation_stream.bind(self._on_curation_entries)
-        # 横断一覧の可視タイル限定 post.md 後追い解決 (N-49 後半)。サムネ /
+        # 横断一覧の可視タイル限定 post.md 後追い解決。サムネ /
         # アスペクトと同じ「ビューポート内だけ」の規律に載せるため、可視範囲が
         # 動くたびに 80ms デバウンスで再評価する。投入は**加算的**で、1 tick の
         # 投入量の上限とその続きの投入は ``KeyedResolver`` が持つ。読めなかった
@@ -630,9 +640,8 @@ class PostGrid(ChildrenGrid):
     # ------------------------------------------------------------ chrome
 
     def _build_chrome(self, outer_layout: QVBoxLayout) -> None:
-        # Unified toolbar (layout redesign 2026-07, Phase 1-1): the old Row 1
-        # (nav + breadcrumb), Row 2 (filter / recursive / sort) and Row 3
-        # (⋯ options / 表示 / size slider) now live on ONE window-level 40px
+        # Unified toolbar: nav + breadcrumb, filter / recursive / sort and
+        # ⋯ options / 表示 / size slider live on ONE window-level 40px
         # bar that ``main_window`` mounts ABOVE the splitter.  PostGrid still
         # OWNS the widgets and their state (filter text, sort, view mode,
         # thumbnail size, …) — the toolbar is only their seat — so every
@@ -642,24 +651,22 @@ class PostGrid(ChildrenGrid):
         self.toolbar = self._build_toolbar()
 
         # Adaptive filter controls (種別 / 投稿日 / ★ / あとで見る — item 2-2)
-        # moved into a small popover behind the toolbar's フィルタ button
-        # (Phase 1-3): the old dedicated 「フィルタ ▾」 row is gone.  Applied
+        # live in a small popover behind the toolbar's フィルタ button, not in
+        # a dedicated row.  Applied
         # values surface as chips on the condition bar below.
         self._build_filter_popover()
 
-        # Condition chip bar (Phase 1-3): a window-level 1-row strip directly
-        # under the toolbar showing ONLY the applied search conditions as
-        # chips (click = edit popover, × = drop that one dimension), plus the
-        # hit count and 「すべて解除」.  Replaces both the old 「フィルタ ▾」
-        # row and the Row 5 search banner; hidden (zero height) while nothing
-        # is engaged.  PostGrid owns it, main_window mounts it under the
+        # Condition chip bar: a window-level 1-row strip directly under the
+        # toolbar showing ONLY the applied search conditions as chips (click =
+        # edit popover, × = drop that one dimension), plus the hit count and
+        # 「すべて解除」; hidden (zero height) while nothing is engaged.  PostGrid owns it, main_window mounts it under the
         # toolbar — same seat pattern as ``toolbar``.
         self.condition_bar = self._build_condition_bar()
 
         # Item E02: field-scoped tokens (``tags:`` / ``title:`` / ``body:`` …)
         # only match the DIRECT children — the recursive walk sees bare
-        # descendant paths, not their post.md metadata, by design (see
-        # docs/claude/viewer/search.md).  When "サブフォルダも検索" is on AND the
+        # descendant paths, not their post.md metadata, by design (reading
+        # every descendant's post.md would defeat the fast walk).  When "サブフォルダも検索" is on AND the
         # filter box carries such a token, a small note makes that limit
         # explicit instead of silently returning fewer descendants than the user
         # expects.  Control tokens (type:/rating:/score:) apply globally, so they
@@ -677,7 +684,7 @@ class PostGrid(ChildrenGrid):
     # ------------------------------------------------------------ toolbar
 
     def _build_toolbar(self) -> QWidget:
-        """Build the window-level unified toolbar (Phase 1-1).
+        """Build the window-level unified toolbar.
 
         Returned **parentless**; ``main_window._build_ui`` mounts it above
         the splitter, which reparents it into the window.  部品の実体は
@@ -727,7 +734,7 @@ class PostGrid(ChildrenGrid):
     # -------------------------------------------- chrome accessors（同一実体）
     #
     # 席は :mod:`.grid_chrome` の部品が持つが、**外から観測される名前**（窓 /
-    # テスト / ``tools/ui_review``）は変えない — 以下は部品が作った同一の
+    # テスト / 撮影ツール）は変えない — 以下は部品が作った同一の
     # ウィジェットを返すだけの読み取り専用プロパティ。AI パック無効の配布で
     # 席そのものが無い 3 つ（``mode_chip_ai`` / ``nsfw_btn`` / ``nsfw_menu``）
     # は ``AttributeError`` を上げ、``getattr(..., None)`` / ``hasattr`` の
@@ -850,7 +857,7 @@ class PostGrid(ChildrenGrid):
     def _on_mode_chip_ai_clicked(self) -> None:
         """AIタグ chip clicked — open the AI popover, then restore the check
         state (the checkable chip auto-toggled on click, but its lit state must
-        track ``_advanced_search_active`` only — UIレビュー #10)."""
+        track ``_advanced_search_active`` only)."""
         self.focus_tag_search()
         self._sync_search_mode_chips()
 
@@ -870,7 +877,7 @@ class PostGrid(ChildrenGrid):
             field.mode_chip_ai is not None and self._advanced_search_active()
         )
         # 全面占有一覧（横断キュレーション / 最近追加）の母集合は post.md を
-        # 持たないので ``body:`` は 1 件も照合できない — AI 中 (N-05) と同じ
+        # 持たないので ``body:`` は 1 件も照合できない — AI 中と同じ
         # 「点かないのに押せるボタン」を作らない。押下は素の語を ``body:`` へ
         # 書き換えるので、そのまま押せると効いていた絞り込みが黙って全解除
         # される（一覧の絞り込みは素の語だけが効く）。
@@ -885,7 +892,7 @@ class PostGrid(ChildrenGrid):
             body_usable=body_usable,
             body_mode=has_body and not has_bare and body_usable,
         )
-        # N-30: AI 検索は常に再帰（ワーカーが表示中フォルダ配下を丸ごと歩く）
+        # AI 検索は常に再帰（ワーカーが表示中フォルダ配下を丸ごと歩く）
         # ため、「サブフォルダも検索」は AI 中は無効果 — フィルターポップ
         # オーバー側のチェックを無効化し、理由をツールチップで名乗る。同期点は
         # このチョークポイント
@@ -944,8 +951,8 @@ class PostGrid(ChildrenGrid):
     def _build_view_popover_rows(self, pop_lay: QVBoxLayout) -> None:
         """「並び・表示」ポップオーバーの 3 行を組む（枠から呼ばれる）."""
         # 並び順 → 表示形式 → サムネイルサイズ の 3 行は右ペインと共通の
-        # ファクトリから作る（N-75 — 行の並び・ラベル・選択肢順・操作方法が
-        # 左右で割れていた）。並び順コンボの現在値選択と接続だけはここで
+        # ファクトリから作る（行の並び・ラベル・選択肢順・操作方法を左右で
+        # 割らない）。並び順コンボの現在値選択と接続だけはここで
         # 行う（ランク表示中の差し替え `_sync_sort_combo_for_rank` がある）。
         self._build_view_settings_rows(
             pop_lay,
@@ -988,20 +995,19 @@ class PostGrid(ChildrenGrid):
     def _build_filter_popover(self) -> None:
         """Adaptive filter popover — **rows generated from the dimension ledger**.
 
-        Phase 1-3 moved these axes off the old dedicated 「フィルタ ▾」 row
-        into a small popover behind the toolbar's フィルタ button; applied
+        These axes live in a small popover behind the toolbar's フィルタ
+        button; applied
         values surface as condition-bar chips whose click re-opens this
         popover.  Values are VOLATILE (never persisted) — everything starts
         all-default.  Widget attribute names + handlers are unchanged, so the
         predicate plumbing, the ``type:`` control-token sync and the search
         snapshot round-trip are untouched.
 
-        UIレビュー 2026-08-28 提案2 第2段: 行の組み立ては
-        :mod:`.filter_popover` が台帳 :mod:`.search_dimensions` の列挙で行う
-        （ラベル・コロン・中立値の語・ツールチップの AI 出し分け = N-51・
-        選択肢が台帳 1 枚から来るので、N-99 の書式ばらけが**軸ごとに手書き
-        する余地ごと**消える）。年齢区分もそこに席を持つ（AI ポップオーバー
-        の重複軸整理 — 07-25 #41）。
+        行の組み立ては :mod:`.filter_popover` が台帳 :mod:`.search_dimensions`
+        の列挙で行う（ラベル・コロン・中立値の語・ツールチップの AI 出し分け・
+        選択肢が台帳 1 枚から来るので、書式のばらけが**軸ごとに手書きする
+        余地ごと**消える）。年齢区分もそこに席を持つ（AI ポップオーバーと軸を
+        重複させない）。
         """
         self._filter_popover = filter_popover.build(
             self,
@@ -1030,7 +1036,7 @@ class PostGrid(ChildrenGrid):
         toolbar フィルタ button; condition-bar chips pass themselves)."""
         pop = self._filter_popover
         # ユーザータグ候補はストアの現在値 — 開くたびに詰め直す（別ペインや
-        # ライトボックスからの編集も拾う。UIレビュー 07-25 #13②）。
+        # ライトボックスからの編集も拾う）。
         self._reload_user_tag_choices()
         pop.adjustSize()
         if anchor is None:
@@ -1054,13 +1060,13 @@ class PostGrid(ChildrenGrid):
     def _reload_user_tag_choices(self, *, cacheable: bool = True) -> None:
         """Refill the ユーザータグ combo from the store, keeping the selection.
 
-        UIレビュー 07-25 #13②.  The candidate list is whatever tags exist in
+        The candidate list is whatever tags exist in
         ``user_meta.db`` right now, so it is refreshed after an edit and each
         time the popover opens rather than frozen at construction.  A currently
         selected tag that no longer exists anywhere is kept as a choice so the
         engaged filter doesn't silently reset itself under the user.
 
-        UIレビュー07-25 追修: 値は :meth:`all_user_tags` のキャッシュ越しに読む
+        値は :meth:`all_user_tags` のキャッシュ越しに読む
         （ポップオーバーを開くたび・履歴 1 歩ごとに全行走査しない）。
         *cacheable* を False にすると素読みし、**キャッシュも焼かない** —
         構築時の一発 fill 専用で、ホストがストアやキュレーション map を差し込む
@@ -1080,7 +1086,7 @@ class PostGrid(ChildrenGrid):
             choices = [current, *choices]
         combo.blockSignals(True)
         combo.clear()
-        # 中立値の語は他軸と同じ「すべて」（N-99 — 旧「(すべて)」独自語）。
+        # 中立値の語は他軸と同じ「すべて」（独自語を作らない）。
         # 語は台帳から引く（``filter_popover._build_row`` と同じ書き方 — この行
         # だけ手書きだと、台帳を直しても片側が置いていかれる）。
         usertag_dim = _dim_get("usertag")
@@ -1110,8 +1116,7 @@ class PostGrid(ChildrenGrid):
 
         An engaged axis accents its control (via ``palette(highlight)`` so it
         tracks theme switches); the applied values themselves surface as
-        condition-bar chips (Phase 1-3 — the old collapse/expand row logic is
-        gone with the row).
+        condition-bar chips (there is no collapse/expand row).
 
         提案2 第2段: 軸ごとの手書きから台帳の列挙（:mod:`.filter_popover`）
         へ。エディタ種別でアクセントの QSS が決まるので、行を足すときに
@@ -1128,7 +1133,7 @@ class PostGrid(ChildrenGrid):
 
     def _on_filterbar_star_changed(self) -> None:
         self._filterbar_star_min = int(self.filterbar_star_combo.currentData() or 0)
-        # UIレビュー07-25 追修: コントロール操作は同じ次元のトークンを**置き換える**
+        # コントロール操作は同じ次元のトークンを**置き換える**
         # （残すと、コンボが示す値と違う条件が黙って AND され続ける）。
         self._strip_synced_curation_token("star")
         self._preserve_selection_for_rebuild(ancestor_fallback=True)
@@ -1137,7 +1142,7 @@ class PostGrid(ChildrenGrid):
 
     def _on_filterbar_later_toggled(self, checked: bool) -> None:
         self._filterbar_later = bool(checked)
-        # UIレビュー07-25 追修: 同上 — チェックを外したのに ``later:yes`` が
+        # 同上 — チェックを外したのに ``later:yes`` が
         # 効き続ける（しかもチップに出ない）状態を作らない。
         self._strip_synced_curation_token("later")
         self._preserve_selection_for_rebuild(ancestor_fallback=True)
@@ -1148,7 +1153,7 @@ class PostGrid(ChildrenGrid):
         self._filterbar_user_tag = str(
             self.filterbar_usertag_combo.currentData() or ""
         )
-        # N-65: コントロール操作は同じ次元のトークンを**置き換える**（★ /
+        # コントロール操作は同じ次元のトークンを**置き換える**（★ /
         # あとで見る と同じ契約 — 残すと、コンボが示す値と違う条件が黙って
         # AND され続ける）。消すのは既存タグと完全一致する同期可能形だけ。
         self._strip_synced_curation_token("mytags")
@@ -1171,13 +1176,13 @@ class PostGrid(ChildrenGrid):
         self._update_filter_bar()
 
     def _available_sort_labels(self) -> list[tuple[str, str]]:
-        """``_SORT_LABELS`` minus the modes this install can't honour (#135).
+        """``_SORT_LABELS`` minus the modes this install can't honour.
 
         「スター (高い順)」 needs the user-curation store: with no ``user_meta.db``
-        every entry sorts at star 0, so the option was a choice that silently
-        did nothing.  Gated exactly like the フィルタ popover's ★ combo, which
-        already disappears in that configuration — the two now degrade together
-        (UIレビュー 07-25 #135).
+        every entry sorts at star 0, so the option would be a choice that
+        silently does nothing.  Gated exactly like the フィルタ popover's ★
+        combo, which disappears in that configuration — the two degrade
+        together.
         """
         if self._user_meta is not None:
             return list(_SORT_LABELS)
@@ -1203,7 +1208,7 @@ class PostGrid(ChildrenGrid):
         return [e for e in pool if str(e.path) in keys]
 
     def _sync_posted_sort_enabled(self, entries: list[FolderEntry]) -> None:
-        """投稿日系の並び順を post.md 不在の一覧で無効化する (N-93).
+        """投稿日系の並び順を post.md 不在の一覧で無効化する.
 
         ``post.md`` はオプショナルなので、持たない一覧では ``posted_*`` は
         ``posted_at is None`` 同士の安定ソート = 名前順と区別が付かない並びに
@@ -1260,7 +1265,7 @@ class PostGrid(ChildrenGrid):
         # The post grid is the hero surface (redesign 2026-07): its icon tiles
         # ride the title on a bottom gradient scrim with the ♡/★/あとで見る/
         # 関連度 badges consolidated into the bottom-right seat, so the ♡ badge
-        # can no longer collide with the title (ui-review 2026-07-18 診断⑥).
+        # cannot collide with the title.
         # The owner-requested 「画像の下に表示」 mode opts out: it reserves a
         # below-image caption strip (``caption_height > 0``) so the name sits
         # OUT of the photo on a label plate — better legibility on busy images.
@@ -1330,7 +1335,7 @@ class PostGrid(ChildrenGrid):
                 # 「名前（見つかりません）」）— 分解してはいけない。
                 head = rel
             else:
-                # N-08: 名前を 1 行目へ、親パスはサブタイトル側へ回す。
+                # 名前を 1 行目へ、親パスはサブタイトル側へ回す。
                 head, parent = split_rel_caption(rel)
                 if (
                     entry.is_dir
@@ -1340,10 +1345,10 @@ class PostGrid(ChildrenGrid):
                 ):
                     # post.md の投稿タイトルが判っている投稿フォルダの行は、
                     # 平常グリッドと同じ見出しを出す（親パスは副題のまま）。
-                    # N-08 が守りたかったのは「省略で実体名から削られる」
-                    # ファイル行で、タイトルを持つフォルダ行では生のフォルダ名
-                    # （``20260101_000000`` のような ID 名）が 1 行目に居座り、
-                    # 同じフォルダが面によって違う名前で並んでいた。
+                    # 名前を 1 行目へ回すのは「省略で実体名から削られる」
+                    # ファイル行のためで、タイトルを持つフォルダ行で生のフォルダ
+                    # 名（``20260101_000000`` のような ID 名）を 1 行目に出すと、
+                    # 同じフォルダが面によって違う名前で並ぶ。
                     head = entry.title
         sub = _format_subtitle(
             entry,
@@ -1383,11 +1388,10 @@ class PostGrid(ChildrenGrid):
         # 一覧 / 最近追加されたファイル): a drill-down / bookmark jump lands on
         # the new root's plain children.  The overlay IS remembered by the
         # history entry the window pushes for the position we're leaving, so
-        # 「戻る」 re-enters it (UIレビュー 07-25 #58) — the window drives that,
-        # not this teardown.  片付けは退場と**同じ 1 実装**を通る（この経路が
-        # ``exit_*_view`` を通らないからと本体をインライン複製していたのが
-        # レビュー 2026-09-03 項目 #97 の指摘そのもの — 奪っていた並び順を
-        # 返し忘れると、ドリルイン先が star_desc のままになる）。
+        # 「戻る」 re-enters it — the window drives that, not this teardown.
+        # 片付けは退場と**同じ 1 実装**を通る（この経路が ``exit_*_view`` を
+        # 通らないからと本体をインライン複製すると、奪っていた並び順を
+        # 返し忘れてドリルイン先が star_desc のままになる）。
         self._teardown_overlay()
         # Stale recursive results from the previous root would mix in
         # under the new root's filter — cancel the in-flight walk and
@@ -1396,6 +1400,9 @@ class PostGrid(ChildrenGrid):
         self._recursive_scanner.cancel()
         self._recursive_results = None
         self._rel_paths.clear()
+        # 窓は set_root と同じリセット規約でプレビューを落とす — 旧ルートの
+        # 選択を文脈として持ち越さない。
+        self._context_path = None
         # Advanced-search results are root-scoped too — drop them and re-scope
         # any persistent query to the new root (tags.db is keyed by absolute
         # path, so the prefix range follows the root automatically).  The
@@ -1496,7 +1503,7 @@ class PostGrid(ChildrenGrid):
         (:func:`context_menus.append_common_entry_actions` — 開く /
         エクスプローラ / フルパスをコピー / ファイルをコピー / 画像なら類似検索,
         matching the right pane; ``include_copy_file=True`` keeps 「ファイルを
-        コピー」 available in both panes — L06), followed by the user-curation
+        コピー」 available in both panes), followed by the user-curation
         section (star / あとで見る
         / ユーザータグ — ``context_menus.VERBS`` の curation 節, suppressed when no
         ``user_meta`` store is wired).  No filesystem I/O happens here (menu
@@ -1511,9 +1518,8 @@ class PostGrid(ChildrenGrid):
 
         Split out of :meth:`_context_menu_for` so the **menu bar's 編集 menu** can
         carry the same set for the current selection without a second, drifting
-        copy of it (UIレビュー 2026-08-28 N-70 案B / N-157) — the review found the
-        編集 menu holding a single item while ★ / あとで見る / ユーザータグ /
-        コピー系 existed only under the right button.  Callers own the ``QMenu``;
+        copy of it — otherwise the 編集 menu would hold a single item while ★ /
+        あとで見る / ユーザータグ / コピー系 exist only under the right button.  Callers own the ``QMenu``;
         this only appends.  No filesystem I/O (menu build stays NAS-free).
         """
         ghost = self._is_curation_ghost(tile.path)
@@ -1529,7 +1535,7 @@ class PostGrid(ChildrenGrid):
             similar_cb = lambda p=tile.path: self.set_similar_seed(p)  # noqa: E731
         # 共通ブロックは動詞レジストリ 1 表から（開く / コピー / 探す / 印 —
         # 4 席が同じ並び）。「最近追加」はフォルダのみ、印は店があるときだけ。
-        # 実体に到達できなかった行 (#133 項目 3) は ``ghost`` 軸で表の側が
+        # 実体に到達できなかった行は ``ghost`` 軸で表の側が
         # 落とす — 「開く / エクスプローラ / 印」は全部空振りするので出さず、
         # 張り替え導線と探す手掛かりだけが残る。「この一覧から外す」は
         # **確実に消えた行にだけ**渡す（口を渡さない = 表の条件が偽）。
@@ -1561,7 +1567,7 @@ class PostGrid(ChildrenGrid):
         )
 
     def _is_curation_ghost(self, path: Path) -> bool:
-        """横断一覧のプレースホルダタイル（到達不能行 — #133 項目 3）か。"""
+        """横断一覧のプレースホルダタイル（到達不能行）か。"""
         overlay = self._overlay
         return overlay is not None and str(path) in overlay.ghost_keys
 
@@ -1584,7 +1590,7 @@ class PostGrid(ChildrenGrid):
         return "ghost" if self._is_curation_ghost(entry.path) else ""
 
     def _aspect_source(self, entry: FolderEntry) -> Path | None:
-        """ゴーストはアスペクト計測不能として扱う（#133 項目 3）。
+        """ゴーストはアスペクト計測不能として扱う。
 
         プレースホルダの 3 点セット（``build_ghost_entries``）はローダーの
         遅延 scandir と post.md 後追いを塞ぐが、**画像拡張子を持つファイル由来
@@ -1599,7 +1605,7 @@ class PostGrid(ChildrenGrid):
         return super()._aspect_source(entry)
 
     def _remove_curation_ghost(self, path: Path) -> None:
-        """「この一覧から外す」— 今の一覧種別の印だけを外す (#133 R6)。
+        """「この一覧から外す」— 今の一覧種別の印だけを外す。
 
         外すのは**この一覧が About な軸だけ**（スター付き一覧なら★、
         あとで見る一覧なら L、タグ一覧ならそのタグ 1 つ）: 他の軸の表明は
@@ -1616,13 +1622,11 @@ class PostGrid(ChildrenGrid):
         write = grid_overlays.ghost_unmark(
             view, meta.tags if meta is not None else (),
         )
-        if write is None:
-            return
         if self._apply_curation(path, *write):
             self._refresh_curation_view()
 
     def _rebind_curation_ghost(self, old_path: Path) -> None:
-        """「現在の場所を指定…」→ ``rebind_path`` → 一覧の再解決 (#133 項目 3)。
+        """「現在の場所を指定…」→ ``rebind_path`` → 一覧の再解決。
 
         ファイルダイアログ・店への書き込み・地図のパッチは
         ``curation_recovery`` 側の部品に委譲し、ここは配線だけ。成功したら
@@ -1651,7 +1655,7 @@ class PostGrid(ChildrenGrid):
         )
         if meta is None:
             # 旧行が既に無い（別ウィンドウが消した等）か書き込み失敗 —
-            # #53 と同じ控えめな失敗フィードバックに乗せる。
+            # 書き込み失敗と同じ控えめな失敗フィードバックに乗せる。
             self.show_curation_failed_feedback(old_path)
             return
         # タグ和集合で候補集合が変わり得る（``_apply_curation`` の tags 分岐と
@@ -1708,8 +1712,7 @@ class PostGrid(ChildrenGrid):
             # 行単位の経路と同じ控えめな失敗フィードバックに乗せる。
             self.show_curation_failed_feedback(old_path)
             return
-        self.refresh_user_meta()
-        self.curation_changed.emit()
+        self.refresh_user_meta()  # curation_changed の配布まで含む
         self._refresh_curation_view()
 
     def current_tile(self):
@@ -1717,7 +1720,7 @@ class PostGrid(ChildrenGrid):
 
         ``current_path()`` alone cannot answer 「フォルダかファイルか」 without a
         ``stat``, and menu building must stay NAS-free — the tile already carries
-        the answer from the scan.  Used by the window's 編集 menu (N-70 案B).
+        the answer from the scan.  Used by the window's 編集 menu.
         """
         return self._view.current_tile()
 
@@ -1747,9 +1750,9 @@ class PostGrid(ChildrenGrid):
 
         右クリック（4 席）/ 編集メニュー / ``L`` / 0-5 / 右一覧・全画面からの
         転送がすべてここを通るので、「右クリックだけトーストが出ない」
-        （UIレビュー 2026-09-11 N-146）や「席によって対象名の告知が無い」が
+        や「席によって対象名の告知が無い」が
         起こせない。書き込みは :meth:`_apply_curation` の単一チョークポイントの
-        まま（失敗の警告も向こうが出す — #53）。``notify=False`` は全画面用
+        まま（失敗の警告も向こうが出す）。``notify=False`` は全画面用
         （自前の中央オーバーレイで告知する）。``kind="edit_tags"`` は編集
         ダイアログを開く（完了トーストはダイアログ側。*parent* を渡すとその窓の
         上に出す — 全画面は別トップレベルなので、左ペイン親のままだと裏に出る）。
@@ -1758,9 +1761,19 @@ class PostGrid(ChildrenGrid):
         if self._user_meta is None:
             return False
         # post.md（投稿本文）は投稿フォルダの印に読み替える — 右一覧の post.md 行で
-        # 0-5 / 右クリックを撃っても、表示（ストリップ）と同じ対象へ書く（N-51）。
+        # 0-5 / 右クリックを撃っても、表示（ストリップ）と同じ対象へ書く。
         # 書き込みの funnel はここ 1 本なので、経路ごとの読み替え漏れが起きない。
         path = curation_subject(path)
+        # ZIP ドリルインの展開先は窓を閉じると消える一時ディレクトリ — そこを
+        # キーに書くと印は二度と現れず、横断一覧に到達不能行だけが残る。
+        # 書き込みの funnel で断り、理由を案内する（タグ編集ダイアログも開かない）。
+        if is_zip_temp_path(path):
+            self._curation_toast(
+                t("viewer.post_grid.curation_zip_temp_toast"),
+                kind="warning",
+                duration_ms=_CURATION_FAIL_TOAST_MS,
+            )
+            return False
         if kind == "edit_tags":
             self._edit_user_tags(path, parent=parent)
             return True
@@ -1779,11 +1792,9 @@ class PostGrid(ChildrenGrid):
         なので C++ 側の所有権はその親にあり、
         ``exec()`` を抜けてローカル参照が消えてもダイアログは**非表示の子
         ウィジェットとして生き残る**。この導線は画像ごとに何度でも開けるので、
-        ``deleteLater`` が無いと 1 セッションで際限なく積み上がる（issue #125
-        と同型 — あちらはモデル取得の提案なので 1 インストール 1〜2 回だが、
-        こちらは桁が違う）。``try``/``finally`` で必ず破棄を予約する。
+        ``deleteLater`` が無いと 1 セッションで際限なく積み上がる。``try``/``finally`` で必ず破棄を予約する。
 
-        破棄は ``deleteLater``（``WA_DeleteOnClose`` ではない）: #111 の
+        破棄は ``deleteLater``（``WA_DeleteOnClose`` ではない）: プロセスを落とす
         「シグナル発火スタックの内側で C++ オブジェクトを解放する」形を
         作らないため。``exec()`` は既に戻っており、以降このスコープは ``dlg``
         に触れない（``textValue()`` は finally より前に読む）。子の
@@ -1798,12 +1809,12 @@ class PostGrid(ChildrenGrid):
         dlg.setLabelText(t("viewer.post_grid.edit_user_tags_label"))
         dlg.setTextValue(current)
         dlg.setInputMode(QInputDialog.TextInput)
-        # OK / キャンセルをカタログ文言へ（N-01）— この画面だけ Qt 既定の
+        # OK / キャンセルをカタログ文言へ — この画面だけ Qt 既定の
         # 語彙になるのを防ぐ。``dialogs.prompt_text`` を使わないのは、この
         # ダイアログだけ QLineEdit へ補完を付けるため。
         localize_input_dialog(dlg)
         # Best-effort autocomplete from existing user tags — per *token*, not
-        # per whole line (UIレビュー 2026-08-28 N-69).
+        # per whole line.
         line = dlg.findChild(_QLineEdit)
         existing = self.all_user_tags()
         if line is not None and existing:
@@ -1811,17 +1822,16 @@ class PostGrid(ChildrenGrid):
             completer.setCaseSensitivity(Qt.CaseInsensitive)
             line.setCompleter(completer)
         if line is not None and current:
-            # UIレビュー 2026-09-11 N-37: ``QInputDialog`` は show 時に既存値を
-            # **全選択**するので、開いた直後の 1 打鍵が既存タグを丸ごと消して
-            # いた。キュレーションは再生成できず取り消し導線も無いので、
+            # ``QInputDialog`` は show 時に既存値を**全選択**するので、開いた
+            # 直後の 1 打鍵が既存タグを丸ごと消してしまう。キュレーションは再生成できず取り消し導線も無いので、
             # 追記が既定になるようカーソルを末尾へ置き直す。show 時の全選択を
             # 上書きする必要があるため ``exec()`` の前に ``singleShot(0)`` で
             # 予約する（直接呼ぶと show 側に戻される）。
             # ラムダが捕捉するのは ``line`` だけ — ダイアログ自身を捕捉させる
-            # と #111 と同型の寿命の罠になる。末尾に区切りを足しておくと
+            # と寿命の罠（exec 中の自己捕捉で無言 abort）になる。末尾に区切りを足しておくと
             # 追記がそのまま自然な入力になる（``split_user_tags`` は末尾の
             # 区切りを無視するので確定値は変わらない）。区切りは
-            # ``split_user_tags`` が実際に割る文字（``[\\s,]``）でなければ
+            # ``split_user_tags`` が実際に割る文字でなければ
             # ならないので、上の ``current`` を組むのと同じ ``_TAG_INPUT_SEP``
             # を使う。
             line.setText(current + _TAG_INPUT_SEP)
@@ -1835,19 +1845,19 @@ class PostGrid(ChildrenGrid):
         from .user_meta import split_user_tags
 
         tags = split_user_tags(text)
-        # 保存に失敗したら確定トーストは出さない (#53)。候補の詰め直しは
+        # 保存に失敗したら確定トーストは出さない。候補の詰め直しは
         # どちらでも安全（失敗時はストアの現状がそのまま読み直される）。
         if self._apply_curation(path, "tags", tags):
             self.show_user_tags_feedback(path, tags)
         # 候補は編集で増える — 次にフィルタを開いたときに新しいタグが選べるよう
-        # 絞り込みコンボを詰め直す (UIレビュー 07-25 #13②)。
+        # 絞り込みコンボを詰め直す。
         self._reload_user_tag_choices()
 
     def show_user_tags_feedback(self, path: Path, tags: list[str]) -> None:
-        """ユーザータグ確定のトースト（UIレビュー 07-25 #13①）。
+        """ユーザータグ確定のトースト。
 
-        従来は OK を押しても画面が一切変わらず（バッジも無い次元なので）、
-        保存されたのかどうかが分からなかった。★の
+        バッジも無い次元なので、これが無いと OK を押しても画面が一切変わらず、
+        保存されたのかどうかが分からない。★の
         :meth:`show_star_feedback` と同じ funnel の作法で、対象名と確定値を
         必ず添える。連打では前のトーストを差し替える。
         """
@@ -1886,10 +1896,9 @@ class PostGrid(ChildrenGrid):
     def curation_tooltip_lines(self, path: Path) -> list[str]:
         """Hover-tooltip lines describing *path*'s curation (in-memory, no I/O).
 
-        UIレビュー 07-25 #136: ♡N / 🔒N は :meth:`ChildrenGrid._tooltip_for` で
-        言葉に展開されるのに、★ と 「あとで見る」 は絵のままだった。さらに
-        ユーザータグ (#13) はバッジすら無く、付けても製品のどこにも出て
-        こなかった — この 3 行がその最初の表示面になる。
+        ♡N / 🔒N は :meth:`ChildrenGrid._tooltip_for` で言葉に展開されるので、
+        ★ と 「あとで見る」 も絵のままにしない。ユーザータグはバッジすら無い
+        ので、この 3 行がタイル上の表示面になる。
 
         Public because the right pane's file list shows the same badges from the
         same map and needs the same words (the map itself stays owned here).
@@ -1897,8 +1906,8 @@ class PostGrid(ChildrenGrid):
         """
         lines: list[str] = []
         if self._is_curation_ghost(path):
-            # UIレビュー 2026-09-11 N-56: 張り替え（「現在の場所を指定…」）は
-            # 右クリックの奥にしか無く、画面上に手掛かりがゼロだった。印の行の
+            # 張り替え（「現在の場所を指定…」）は右クリックの奥にしか無いので、
+            # 画面上の手掛かりとして印の行の
             # **前**に手順を置く（``_is_curation_ghost`` は overlay の集合参照
             # だけなので、この関数の「同期のインメモリ参照のみ」契約は保つ）。
             lines.append(t("viewer.post_grid.curation_ghost_tooltip_hint"))
@@ -2020,7 +2029,7 @@ class PostGrid(ChildrenGrid):
         and repaints.  A rebuild is triggered only when a curation-driven filter
         or the star sort is active (so a bare star toggle doesn't reshuffle).
 
-        Returns **whether the change actually reached disk** (#53).  The
+        Returns **whether the change actually reached disk**.  The
         ``*_checked`` store variants report a read-only volume / disk-full /
         locked DB as ``ok=False``; this is the **single writer**, so the failure
         warning is raised here — every entry point (右クリックメニュー / 数字キー /
@@ -2049,15 +2058,14 @@ class PostGrid(ChildrenGrid):
             outcome = self._user_meta.set_tags_checked(
                 path, value, service=service, post_id=post_id, rel_name=rel_name,
             )
-            # 候補集合が変わり得る唯一の書き込み — キャッシュを落とす
-            # (UIレビュー07-25 追修)。
+            # 候補集合が変わり得る唯一の書き込み — キャッシュを落とす。
             self._user_tags_cache = None
         if not outcome.ok:
             self.show_curation_failed_feedback(path)
             return False
         meta = outcome.meta
         # Mirror the store's own display spelling, not the tile's.  The store
-        # writes ``path`` through ``absolute_spelling`` (#133 key contract), and
+        # writes ``path`` through ``absolute_spelling`` (the key contract), and
         # ``CurationMap.__setitem__`` *replaces* the existing key when a new
         # spelling normalises onto an already-indexed entry — so patching the
         # map with the tile's raw spelling (relative whenever ``--root`` is)
@@ -2073,15 +2081,29 @@ class PostGrid(ChildrenGrid):
         else:
             self._user_meta_map[key] = meta
         # Curation-dependent view state may need a rebuild; otherwise just
-        # repaint the affected tiles (cheap).
+        # repaint the affected tiles (cheap) — :meth:`_land_curation_map_change`.
         #
-        # UIレビュー 2026-08-28 N-67: 第 1 項に ``_curation_view is None`` が要る。
-        # 横断一覧は入場時に ``star_desc`` を**強制**する (``_CURATION_VIEW_SORT``)
-        # ので、一覧の中では第 1 項が常に真になり、★を 1 つ変えるたびに再ソート
-        # されてカーソル下のタイルが動いていた。第 2 項
-        # (:meth:`_curation_filter_active`) は「一覧はスナップショット」という
-        # 同じ不変条件を内側のガードで既に守っている — 同じ判定式の中で片方だけが
-        # 破っていた形なので、ここで揃える。
+        # 第 1 項に ``_curation_view is None`` が要る。横断一覧は入場時に
+        # ``star_desc`` を**強制**する (``_CURATION_VIEW_SORT``) ので、無いと
+        # 一覧の中では第 1 項が常に真になり、★を 1 つ変えるたびに再ソート
+        # されてカーソル下のタイルが動く。第 2 項 (:meth:`_curation_filter_active`)
+        # は「一覧はスナップショット」という同じ不変条件を内側のガードで守って
+        # いるので、同じ判定式の中で両項を揃える。
+        self._land_curation_map_change()
+        return True
+
+    def _land_curation_map_change(self) -> None:
+        """母集合（``_user_meta_map``）が変わった後の共通尾部。
+
+        地図を差し替える経路は :meth:`_apply_curation`（1 行の書き込み）と
+        :meth:`refresh_user_meta`（ストアの読み直し = リネーム追従の着地 /
+        根ごとの一括張り替え）の 2 本で、どちらも同じ 2 手を踏む:
+        ★並び・印の絞り込みが効いていれば再構築（メンバーシップと順序が
+        変わり得る）、そうでなければ塗り直しだけ。最後に ``curation_changed``
+        で窓側の全ミラー面（右一覧・全画面・画像トラック・ステージヘッダー・
+        情報パネル・詳細情報ウィンドウ・レール）へ配る。片方の経路だけが
+        持っていたころは、リネーム追従の着地で並びと他面が古いまま残った。
+        """
         if (
             self._curation_list() is None and self._sort_mode == "star_desc"
         ) or self._curation_filter_active():
@@ -2090,7 +2112,6 @@ class PostGrid(ChildrenGrid):
         else:
             self._view.viewport().update()
         self.curation_changed.emit()
-        return True
 
     def _curation_filter_active(self) -> bool:
         """Whether a curation-driven restriction is narrowing the grid.
@@ -2100,9 +2121,9 @@ class PostGrid(ChildrenGrid):
         repainted.  Two sources count:
 
         * the filter box (``star:`` / ``mytags:`` / ``later:`` terms), and
-        * the フィルタ popover's ★ floor / 「あとで見る」 controls — missing until
-          UIレビュー 07-25 #61: dropping a folder below the ★ floor left it on
-          screen until some unrelated rebuild, so the same restriction behaved
+        * the フィルタ popover's ★ floor / 「あとで見る」 controls — without
+          them, dropping a folder below the ★ floor would leave it on screen
+          until some unrelated rebuild, so the same restriction would behave
           differently depending on whether it was typed or clicked.
 
         The cross-library views (スター付き一覧 / あとで見る一覧) are deliberately
@@ -2133,12 +2154,12 @@ class PostGrid(ChildrenGrid):
         tile = self._view.current_tile()
         if tile is None:
             return
-        # 保存できなかったときは成功トーストを出さない (#53) — 判定は funnel
+        # 保存できなかったときは成功トーストを出さない — 判定は funnel
         # :meth:`request_curation` が持つ（失敗の警告は単一書き手側）。
         self.request_curation(tile.path, "star", star)
 
     def _star_target_label(self, path: Path) -> str:
-        """スタートーストに添える対象名（UIレビュー 07-25 #11）。
+        """スタートーストに添える対象名。
 
         グリッドに載っている対象なら**タイルの見出し**（投稿タイトル等 —
         キャプションの 1 行目。2 行目以降は日付・サイズの副題）を使い、
@@ -2154,15 +2175,15 @@ class PostGrid(ChildrenGrid):
         return path.name or str(path)
 
     def show_star_feedback(self, path: Path, star: int) -> None:
-        """0-5 スター確定の**共通トースト funnel**（UIレビュー 07-25 #11/#12）。
+        """0-5 スター確定の**共通トースト funnel**。
 
         ライトボックスの「★★★」オーバーレイと同水準の確認フィードバック
-        (07-13 #20) — 特に「0 = 解除」はバッジが消えるだけで無言だった。
+        — 特に「0 = 解除」はバッジが消えるだけなので、無いと無言になる。
         グリッドの数字キー（``_on_star_key``）とプレビュー面の 0-5
         （``main_window._set_current_star`` — 分割・最大化とも）が同じここを
-        通るので、3 面で挙動が揃う（#12）。
+        通るので、3 面で挙動が揃う。
 
-        文言には**必ず対象名を添える**（#11）: 分割ビューではフォーカスが
+        文言には**必ず対象名を添える**: 分割ビューではフォーカスが
         グリッドかプレビューかで対象が投稿フォルダ / 代表画像ファイルに黙って
         切り替わるため、「どちらに付いたか」はトーストでしか分からない。
 
@@ -2176,7 +2197,7 @@ class PostGrid(ChildrenGrid):
         )
 
     def show_later_feedback(self, path: Path, later: bool) -> None:
-        """「あとで見る」確定のトースト（UIレビュー 2026-08-28 N-74）。
+        """「あとで見る」確定のトースト。
 
         ★ (:meth:`show_star_feedback`) / ユーザータグ
         (:meth:`show_user_tags_feedback`) と同じ funnel の作法 — 対象名を必ず
@@ -2193,7 +2214,7 @@ class PostGrid(ChildrenGrid):
         )
 
     def show_curation_failed_feedback(self, path: Path) -> None:
-        """書き込みが永続化できなかったときの控えめな警告 (#53)。
+        """書き込みが永続化できなかったときの控えめな警告。
 
         ★ / ユーザータグの成功トーストと**同じスロット**（``_star_toast``）を
         使って前のフィードバックを差し替える — 「★★★」の直後に失敗が積み
@@ -2236,10 +2257,9 @@ class PostGrid(ChildrenGrid):
     def all_user_tags(self) -> list[str]:
         """Distinct user tags across the store (edit-dialog autocomplete).
 
-        UIレビュー07-25 追修: 値は ``user_meta.db`` の全行走査で、フィルタ
-        ポップオーバーを開くたび (:meth:`_reload_user_tag_choices`) と
-        履歴の 1 歩ごと (:meth:`restore_search_state`) に GUI スレッドで
-        走っていた。結果を保持し、タグが変わり得る 2 か所
+        値は ``user_meta.db`` の全行走査なので、フィルタポップオーバーを開く
+        たび (:meth:`_reload_user_tag_choices`) と履歴の 1 歩ごと
+        (:meth:`restore_search_state`) に GUI スレッドで走らせない。結果を保持し、タグが変わり得る 2 か所
         (:meth:`_apply_curation` の ``tags`` / :meth:`refresh_user_meta`) だけ
         無効化する。
         """
@@ -2254,17 +2274,27 @@ class PostGrid(ChildrenGrid):
         return self._user_meta_map.get(str(path))
 
     def refresh_user_meta(self) -> None:
-        """Reload the in-memory curation map (e.g. after a rename-following pass)."""
+        """Reload the in-memory curation map (e.g. after a rename-following pass).
+
+        差し替えた後は :meth:`_apply_curation` と同じ尾部
+        （:meth:`_land_curation_map_change`）を通す — 再構築の要否判定と
+        ``curation_changed`` の配布は呼び出し元が足すものではない。
+        """
         if self._user_meta is None:
             return
-        # ストアを読み直す = 外で書かれたタグも入り得る (UIレビュー07-25 追修)。
+        # ストアを読み直す = 外で書かれたタグも入り得る。
         self._user_tags_cache = None
-        self._user_meta_map = self._user_meta.load_all()
-        self._view.viewport().update()
+        loaded = self._user_meta.try_load_all()
+        if loaded is None:
+            # 読み直しに失敗した: 空マップで上書きすると全バッジが消えるので、
+            # 手元の母集合（書き込みと同期して patch 済み）を保つ。
+            return
+        self._user_meta_map = loaded
+        self._land_curation_map_change()
 
     # ------------------------------------------ cross-library curation list (H01)
 
-    #: ユーザータグ横断一覧の *kind* 接頭辞 (N-71) — 実体は
+    #: ユーザータグ横断一覧の *kind* 接頭辞 — 実体は
     #: :data:`~.curation_list.TAG_PREFIX`（種別の意味論はそちらが単一情報源）。
     CURATION_TAG_PREFIX = TAG_PREFIX
 
@@ -2281,13 +2311,13 @@ class PostGrid(ChildrenGrid):
         return grid_overlays.curation_pool_paths(self._user_meta_map, kind)
 
     def curation_pool_count(self, kind: str) -> int:
-        """「印を付けた件数」— レール行ラベルの実件数 (N-117)。
+        """「印を付けた件数」— レール行ラベルの実件数。
 
         ``_user_meta_map`` のメモリ走査だけ（``enter_curation_view`` が母集合を
         作るのと**同じ 1 実装**）なので I/O はゼロ。実際に一覧へ並ぶ件数とは
         ``resolve_curation_paths`` が落とす分（消えた / 読めなかった）だけずれ
         得るため、ラベルの意味は「印を付けた件数」であって「表示される件数」
-        ではない（N-09 の ``curation_error`` と整合させるための約束）。
+        ではない（``curation_error`` と整合させるための約束）。
         """
         if self._user_meta is None:
             return 0
@@ -2312,13 +2342,17 @@ class PostGrid(ChildrenGrid):
         # 80ms デバウンス — 一覧が消えた後に走らせない）。
         self._reset_curation_metadata()
 
-    def _exit_overlay(self) -> None:
+    def _exit_overlay(self, *, rebuild: bool = True) -> None:
         """占有一覧から平常グリッドへ戻る（Esc / チップ× / 「すべて解除」）。
 
-        単一クラム (#60) を解除して実フォルダの道筋へ戻す。件数は続く
+        単一クラムを解除して実フォルダの道筋へ戻す。件数は続く
         ``_rebuild_grid`` が入れ直す。ルート未設定（一覧から入って一度も
         フォルダを開いていない）なら道筋そのものが無いので空表示へ落とす —
         一覧の名前を残すと退場後も現在地を偽り続ける。
+
+        ``rebuild=False`` は直後に呼び出し側が自分で組み直す経路
+        （:meth:`apply_saved_search`）向け — 二度組みを避けるだけで、畳む
+        手順は同じ。
         """
         if self._overlay is None:
             return
@@ -2328,7 +2362,15 @@ class PostGrid(ChildrenGrid):
             self.breadcrumb.set_path(self._root_or_folder)
         else:
             self.breadcrumb.set_plain_text("")
-        self._rebuild_grid()
+        # 一覧の表示中は子孫走査の投入判定が非活性分岐に落ちていた（一覧が
+        # グリッドを占有するため）。一覧の上で「サブフォルダも検索」を点けた
+        # / 保存した検索で recursive が載ったまま退場すると、投入し直さない
+        # 限り走査は一度も走らず、直下だけを検索結果として出してしまう。
+        # 入場側の非活性化と対になる再投入はここ 1 か所（× / 閉じる /
+        # exit_*_view は全てこの退場を通る）。
+        self._maybe_start_recursive_scan()
+        if rebuild:
+            self._rebuild_grid()
 
     def _enter_overlay(
         self,
@@ -2416,11 +2458,11 @@ class PostGrid(ChildrenGrid):
         self._set_overlay_status(t("viewer.post_grid.curation_loading"))
         from .user_meta import resolve_curation_paths
 
-        # タイル説明はライブラリ基準の相対パス (N-49) — 基準はパンくずが持つ
+        # タイル説明はライブラリ基準の相対パス — 基準はパンくずが持つ
         # 唯一の情報源をそのまま渡す（post_grid 側に複製の状態を作らない）。
         bases = self.breadcrumb.library_bases()
         # 協調キャンセル: 退場 / 再入場 / 窓じまいの cancel が per-path の stat
-        # ループを刻みで止める（項目 #215 追補 — 死んだ共有では 1 stat が
+        # ループを刻みで止める（死んだ共有では 1 stat が
         # 15〜195 秒塞ぐので、有界ドレインだけでは残りの行を撫で続ける）。
         self._curation_stream.submit_job(
             lambda job, ps=list(paths), bs=bases: resolve_curation_paths(
@@ -2448,7 +2490,7 @@ class PostGrid(ChildrenGrid):
             )
         )
         self._rebuild_grid()
-        # 可視タイルの post.md を後追いで解決する (N-49 後半)。``_rebuild_grid``
+        # 可視タイルの post.md を後追いで解決する。``_rebuild_grid``
         # 経由の再レイアウトでも ``visible_range_changed`` は飛ぶが、暖レイアウト
         # （同じ幾何）では飛ばないことがあるので、着地時は明示的に一度蹴る。
         self._schedule_curation_meta()
@@ -2465,10 +2507,10 @@ class PostGrid(ChildrenGrid):
             unreadable=overlay.unreadable,
         )
 
-    # ---- 横断一覧の可視タイル限定 post.md 後追い解決 (N-49 後半) ----------
+    # ---- 横断一覧の可視タイル限定 post.md 後追い解決 ----------------------
 
     #: 1 tick に投げる最大件数。ビューポート 1 画面分を超えて先読みしない
-    #: （サムネ要求と同じ「ビューポート限定」の規律 — docs/claude/viewer/grid.md）。
+    #: （サムネ要求と同じ「ビューポート限定」の規律 — 画面外の行へ NAS I/O を撃たない）。
     _CURATION_META_BATCH = 24
 
     def _reset_curation_metadata(self) -> None:
@@ -2527,7 +2569,7 @@ class PostGrid(ChildrenGrid):
         )
 
     def _on_curation_metadata(self, payload: object) -> None:
-        """Landed post.md enrichment for visible curation tiles (N-49 後半).
+        """Landed post.md enrichment for visible curation tiles.
 
         Updates the pool entry and the tile **in place** — never re-sorts and
         never re-filters.  The cross-library list is a snapshot
@@ -2554,7 +2596,7 @@ class PostGrid(ChildrenGrid):
         ``"tag:<名前>"``) or ``None``.
 
         Read by the window when it snapshots a navigation position, so 「戻る」 can
-        re-enter the list a drill-down left (UIレビュー 07-25 #58).
+        re-enter the list a drill-down left.
         """
         view = self._curation_list()
         return None if view is None else view.key
@@ -2595,8 +2637,8 @@ class PostGrid(ChildrenGrid):
         """Leave the cross-library curation list, back to the plain grid (H01).
 
         中身は :meth:`_exit_overlay` — 一覧の種類によらず「解決を切る / 母集合を
-        捨てる / 奪った並び順を返す / 単一クラムを解除する」を 1 実装で通る
-        （項目 #97）。この入口が残るのは、窓・メニュー・AI 検索が「横断一覧なら
+        捨てる / 奪った並び順を返す / 単一クラムを解除する」を 1 実装で通る。
+        この入口が残るのは、窓・メニュー・AI 検索が「横断一覧なら
         出る」という意図で呼んでいるため。
         """
         if self._curation_list() is None:
@@ -2713,8 +2755,8 @@ class PostGrid(ChildrenGrid):
     def exit_recent_files_view(self) -> None:
         """Leave the 「最近追加されたファイル」 listing, back to the plain grid.
 
-        中身は :meth:`_exit_overlay` — 横断一覧の退場と**同じ 1 実装**（項目
-        #97）。走査の中止も、奪った並び順を返すことも、そちらの中で対に
+        中身は :meth:`_exit_overlay` — 横断一覧の退場と**同じ 1 実装**。
+        走査の中止も、奪った並び順を返すことも、そちらの中で対に
         なっている。
         """
         if self._overlay is None or self._overlay.recent is None:
@@ -2723,7 +2765,7 @@ class PostGrid(ChildrenGrid):
 
     def current_state(self) -> tuple[str, int, str, bool, str]:
         # 横断一覧・最近追加一覧が奪っている並び順は「その一覧の軸」であって
-        # ユーザーの選択ではない (UIレビュー 07-25 #59) — 一覧を開いたまま終了
+        # ユーザーの選択ではない — 一覧を開いたまま終了
         # したときに star_desc / mtime_desc が永続化されないよう、入場前の値を
         # 返す。
         overlay = self._overlay
@@ -2767,14 +2809,14 @@ class PostGrid(ChildrenGrid):
         # 後追い / 最近追加の走査）は全て ``GuardedStream`` なので、1 本ずつ
         # 名指しせず**このペインの下に居るストリームを列挙して**切る — 新しい
         # 経路を足したときに「shutdown への配線を書き忘れる」が起こせない
-        # （レビュー 2026-09-03 項目 #56。走行中タスクの有界待ちは窓側の
-        # ``_drain_loader_pools`` が同じ列挙で行う）。
+        # （走行中タスクの有界待ちは窓側の ``_drain_loader_pools`` が同じ列挙で
+        # 行う）。
         for stream in self.findChildren(GuardedStream):
             stream.cancel()
         # 絞り込み構文ヘルプの 2 面（図像から開く全文 / 初回自動の短縮版）は
         # どちらも TOP-LEVEL の ``QFrame`` — ペインを閉じても自分では閉じない
         # ので、``_shutdown_advanced_search`` が ``_search_cheatsheet_popup``
-        # に対して行っているのと対称に畳む（項目 #201）。
+        # に対して行っているのと対称に畳む。
         self._filter_help.close_all()
         # 受付済み集合と 80ms デバウンスは状態なので別途落とす（止めないと
         # 閉じた後に新しいバッチが走り出す）。
@@ -2856,7 +2898,7 @@ class PostGrid(ChildrenGrid):
         # The entry set just changed — any landed / in-flight ``body:``
         # verdicts were computed over the old entries.
         self._invalidate_body_filter()
-        # UIレビュー 07-25 #60: 横断一覧の表示中は現在地が「スター付き一覧」で
+        # 横断一覧の表示中は現在地が「スター付き一覧」で
         # あってスキャン中のフォルダではない — 一覧に入った直後に着地した
         # スキャンで単一クラムを踏み潰さない（件数は _rebuild_grid が入れる）。
         if (
@@ -2881,8 +2923,36 @@ class PostGrid(ChildrenGrid):
         if generation != self._pending_scan_generation:
             return
         with measure("metadata_batch_apply", f"{len(enriched)} entries"):
-            self._entries = self._replace_enriched_tiles(self._entries, enriched)
+            if self._current_view_scope() == "plain":
+                self._entries = self._replace_enriched_tiles(
+                    self._entries, enriched,
+                )
+            else:
+                # 占有一覧 / AI 検索結果がグリッドを持っている間は、直下走査の
+                # 母集合へマージするだけにする。タイルの差し替えと投稿日系の
+                # 活性の再評価は「画面に並んでいる母集合」についての判断で、
+                # 占有側には自分の着地経路（``_on_curation_metadata`` / AI 着地）
+                # がある — ここで評価すると画面に無い母集合（直下 ∩ 占有タイル
+                # ≒ 空）を根拠に投稿日ソートを無効化してしまう。平常グリッドへ
+                # 戻る再構築が、マージ済みの母集合で改めて評価する。
+                self._entries, _ = self._merge_enriched(
+                    self._entries, enriched,
+                )
         self._backfill_postrefs(enriched)
+
+    def _merge_enriched(
+        self, pool: list[FolderEntry], enriched: list[FolderEntry],
+    ) -> tuple[list[FolderEntry], list[FolderEntry]]:
+        """後追いメタを *pool* へマージする（タイルには触れない）。
+
+        戻り値は ``(マージ済みの母集合, サムネイル選択を掛け直したメタ)``。
+        """
+        # ``apply_preview`` always picks the ``#thumb#`` marker as the
+        # initial candidate.  Re-select per the user's checkbox so
+        # freshly-enriched entries respect the toggle from the start.
+        enriched = [self._reapply_thumbnail(e) for e in enriched]
+        by_path = {str(e.path): e for e in enriched}
+        return [by_path.get(str(e.path), e) for e in pool], enriched
 
     def _replace_enriched_tiles(
         self, pool: list[FolderEntry], enriched: list[FolderEntry],
@@ -2899,12 +2969,7 @@ class PostGrid(ChildrenGrid):
 
         戻り値は差し替え済みの母集合（呼び出し側が自分の置き場へ代入する）。
         """
-        # ``apply_preview`` always picks the ``#thumb#`` marker as the
-        # initial candidate.  Re-select per the user's checkbox so
-        # freshly-enriched entries respect the toggle from the start.
-        enriched = [self._reapply_thumbnail(e) for e in enriched]
-        by_path = {str(e.path): e for e in enriched}
-        pool = [by_path.get(str(e.path), e) for e in pool]
+        pool, enriched = self._merge_enriched(pool, enriched)
         for entry in enriched:
             idx = self._view.index_of_key(self._key_prefix + str(entry.path))
             if idx is None:
@@ -3015,10 +3080,10 @@ class PostGrid(ChildrenGrid):
     def _only_plain_text_restriction(self) -> bool:
         """検索範囲を広げれば救えるのは「素のテキスト語だけ」で 0 件のとき。
 
-        UIレビュー07-25 追修: ★ 下限・ユーザータグ・種別・ロック・投稿日窓など
-        別の軸が効いていても ``filtered_shallow`` が出ていたため、真因ではない
-        「検索範囲」を名指しし、主ボタンは高価な再帰走査を起こして結局 0 件、
-        という誤誘導になっていた。ほかの軸が 1 つでも効いているなら、正直な
+        ★ 下限・ユーザータグ・種別・ロック・投稿日窓など別の軸が効いているのに
+        ``filtered_shallow`` を出すと、真因ではない「検索範囲」を名指しし、
+        主ボタンは高価な再帰走査を起こして結局 0 件、という誤誘導になる。
+        ほかの軸が 1 つでも効いているなら、正直な
         「絞り込みを解除」カード (``filtered``) に落とす。
 
         ``field:`` 付きの項（``tags:`` / ``star:`` / ``mytags:`` …）も素の語では
@@ -3072,21 +3137,20 @@ class PostGrid(ChildrenGrid):
     def _empty_card_can_go_up(self) -> bool:
         """空フォルダカードが 「上の階層へ」 を名乗ってよいか。
 
-        UIレビュー07-25 追修: 従来は履歴の有無 (``back_btn``) だけを見ていたが、
-        ウィンドウ側の ``_on_go_up`` は**登録ライブラリの境界**では黙って何も
-        しない — 履歴があってもライブラリ直下なら、押しても何も起きない死んだ
-        ボタンになっていた。↑ ボタンはその境界に合わせて enable 同期されている
+        履歴の有無 (``back_btn``) だけでは足りない: ウィンドウ側の
+        ``_on_go_up`` は**登録ライブラリの境界**では黙って何もしないので、
+        履歴があってもライブラリ直下なら、押しても何も起きない死んだボタンに
+        なる。↑ ボタンはその境界に合わせて enable 同期されている
         (``main_window._update_nav_buttons``) ので、それを条件に加える。
         履歴条件も残すのは、上位フォルダを開いたことが無い状態で
-        「上の階層へ」 を勧めない従来の判断（= ライブラリ外へ迷い出さない）を
-        変えないため。どちらか欠ければ 「フォルダを開く…」 に落ちる。
+        「上の階層へ」 を勧めない（= ライブラリ外へ迷い出さない）ため。どちらか欠ければ 「フォルダを開く…」 に落ちる。
         """
         return self.up_btn.isEnabled() and self.back_btn.isEnabled()
 
     def _can_widen_to_subfolders(self) -> bool:
         """「サブフォルダも検索」を ON にすれば母集合が広がる状態か。
 
-        UIレビュー 2026-08-28 N-60: ドリルイン移動は ``clear_search_state`` が
+        ドリルイン移動は ``clear_search_state`` が
         範囲設定（``recursive_check``）まで落とすので、0 件になったときに範囲を
         広げ直す導線が要る。``filtered_shallow`` はそれを主ボタンに持っているが、
         ほかの軸（★下限・種別・投稿日…）が 1 つでも効いていると
@@ -3154,7 +3218,7 @@ class PostGrid(ChildrenGrid):
     def _widen_to_subfolders(self) -> None:
         """「サブフォルダも検索」を ON にして同じ needle のまま範囲を広げる.
 
-        子孫走査はチェックボックス自身のハンドラが蹴る（UIレビュー 07-25 #26）。
+        子孫走査はチェックボックス自身のハンドラが蹴る。
         """
         self.recursive_check.setChecked(True)
 
@@ -3176,7 +3240,7 @@ class PostGrid(ChildrenGrid):
         self.reload_requested.emit()
 
     def _retry_overlay_view(self) -> None:
-        """読み取りに失敗したオーバーレイ一覧をもう一度組み直す（N-09）。
+        """読み取りに失敗したオーバーレイ一覧をもう一度組み直す。
 
         入場そのものをやり直すので、母集合の収集・off-thread 解決・空状態の
         分類まで 1 本の既存経路（``enter_*_view``）を再利用する — 「失敗時だけの
@@ -3231,7 +3295,7 @@ class PostGrid(ChildrenGrid):
     def set_first_run(
         self, active: bool, *, default_library: bool = False
     ) -> None:
-        """空ライブラリを「初回起動」として扱うか（N-02 — ウィンドウが教える）.
+        """空ライブラリを「初回起動」として扱うか（ウィンドウが教える）.
 
         ナビ履歴の有無も「今のルートが自動生成の既定ライブラリか」も
         :class:`main_window.ViewerWindow` しか知らないので、判定はそちら
@@ -3260,8 +3324,7 @@ class PostGrid(ChildrenGrid):
         同じ正規の経路」を通るので、それぞれが再クエリと再構築を起こす。表を
         なぞって順に呼ぶリセット導線（:meth:`~.advanced_search.
         AdvancedSearchController._on_reset_advanced_only`）ではそれが N 回になり、
-        途中の中途半端な条件でスキャナを蹴ってしまう（レビュー 2026-09-03
-        項目 #89）。抜けたあとに呼び出し側が 1 回だけ蹴る。
+        途中の中途半端な条件でスキャナを蹴ってしまう。抜けたあとに呼び出し側が 1 回だけ蹴る。
         """
         prev = getattr(self, "_suspend_requery", False)
         self._suspend_requery = True
@@ -3275,13 +3338,8 @@ class PostGrid(ChildrenGrid):
             # 次元をまとめて中立化している最中（:meth:`_batched_condition_clear`）。
             return
         self._sync_sort_combo_for_rank()
-        # 再構築の前に「いま選ばれているもの」を控える — ``set_tiles`` は毎回
-        # 選択を落とすので、後段の :attr:`preview_context_lost` 判定は
-        # 「選択が消えたか」ではなく「**新しい母集合に居るか**」で行う
-        # （N-58: 選択タイルが結果に残っている絞り込みでプレビューを消さない）。
-        selected_before = self._view.current_path()
         entries = self._apply_filter_and_sort(self._entries)
-        # 実際に並んだ母集合で投稿日系の並びの可否を決める (N-93)。
+        # 実際に並んだ母集合で投稿日系の並びの可否を決める。
         self._sync_posted_sort_enabled(entries)
         self._set_entries_as_tiles(entries, seed_aspect=seed_aspect)
         # Report the displayed folder / file split so the status bar stays in
@@ -3290,12 +3348,12 @@ class PostGrid(ChildrenGrid):
         folders = sum(1 for e in entries if e.is_dir)
         self.counts_changed.emit(folders, len(entries) - folders)
         # 検索・絞り込み中はパンくずの件数もコンテナ件数のままだと
-        # バナーの「1件」と矛盾する (UIレビュー #26) — 表示中の件数へ
+        # バナーの「1件」と矛盾する — 表示中の件数へ
         # 同期する（名前フィルタ等の部分集合は「N 件中 M 件」表記）。
         # has_trail() ガードで set_root 直後の「読み込み中…」表示は
         # 上書きしない。
         if self._overlay is not None and self.breadcrumb.has_trail():
-            # UIレビュー 07-25 #60: 横断一覧の母集合はライブラリ全体のキュレー
+            # 横断一覧の母集合はライブラリ全体のキュレー
             # ション項目であって「いま立っているフォルダの直下」ではない。
             # ``_entries``（直下集合）を分母にすると「9 件中 2 件」という無関係な
             # 嘘になるので、表示件数だけを出す。NSFW の隠し件数も直下ブラウズの
@@ -3309,8 +3367,8 @@ class PostGrid(ChildrenGrid):
             total = len(self._browse_population())
             shown = len(entries)
             # 検索欄の語で探している間は範囲（このフォルダのみ / サブフォルダも）
-            # を件数に併記する（N-26: 0 件のときしか範囲が画面に出ず、ヒットが
-            # あると取りこぼしに気づけなかった）。AI 検索は常に配下全体なので
+            # を件数に併記する（0 件のときしか範囲が画面に出ないと、ヒットが
+            # あるときに取りこぼしに気づけない）。AI 検索は常に配下全体なので
             # 併記しない（範囲の切替が無い）。
             searching = bool(self._filter_text) and not self._advanced_search_active()
             if searching and self._recursive_search:
@@ -3337,9 +3395,9 @@ class PostGrid(ChildrenGrid):
                 # 詳細検索/再帰検索の結果は直下集合の部分集合ではない —
                 # 表示件数のみを出す（バナーと同じ数字）。
                 count = t("viewer.post_grid.count_suffix", n=shown)
-            # UIレビュー 07-25 #130: 「年齢制限を隠す」 is a PERSISTENT setting with
-            # no visible marker, so a partial application just looked like
-            # missing files ("数が合わない").  Ride the existing hidden counter
+            # 「年齢制限を隠す」 is a PERSISTENT setting with no visible marker,
+            # so a partial application would just look like missing files
+            # ("数が合わない").  Ride the existing hidden counter
             # onto the count display — the only place the numbers are stated —
             # instead of leaving the suppression silent.  Fully-hidden folders
             # keep their own empty-state card ("nsfw_hidden").
@@ -3349,7 +3407,7 @@ class PostGrid(ChildrenGrid):
                     n=self._nsfw_hidden_count,
                 )
             self.breadcrumb.set_count_text(count)
-        # Active-search visibility (item 2 / Phase 1-3): the condition chip
+        # Active-search visibility: the condition chip
         # bar and the auxiliary advanced-search surfaces both re-sync on every
         # rebuild — the single display choke point, so they can never show a
         # stale search.
@@ -3360,28 +3418,39 @@ class PostGrid(ChildrenGrid):
         self._sync_search_mode_chips()
         # 母集合が検索 / オーバーレイで入れ替わり、直前に選ばれていたものが
         # そこに居なくなったなら、窓のプレビュー列・右情報パネルも一緒に未選択へ
-        # 落とす（N-13 / N-58）。2 つのゲートが要点:
+        # 落とす。2 つのゲートが要点:
         #
         # * ``_search_engaged()`` — 平常ブラウズの再構築（メタデータ着地・NSFW
         #   レーティング着地・並べ替え・キャプション設定）では絶対に鳴らさない。
-        # * ``selected_before`` が新しい母集合に**居ない** — 絞り込みを打っても
-        #   選択タイルが結果に残っているあいだはプレビューを消さない。
-        #   （選択そのものは ``set_tiles`` が毎回落とすので、選択の有無では
-        #   この 2 つを区別できない。）
-        if self._search_engaged() and self._view.current_path() is None:
-            if selected_before is None or all(
-                e.path != selected_before for e in entries
-            ):
+        # * 窓が映している文脈（``_context_path``）が新しい母集合に**居ない**
+        #   — 絞り込みを打っても選択タイルが結果に残っているあいだはプレビュー
+        #   を消さない。（選択そのものは ``set_tiles`` が毎回落とすので、
+        #   グリッドの選択の有無では区別できない — 2 打鍵目以降の再構築では
+        #   直前の選択がもう無い。）
+        #
+        # 結果の着地待ち（:func:`grid_empty_state.results_pending`）の再構築では
+        # 判定を保留する。中間の並びで消すと、最終結果に選択が含まれていても
+        # プレビューが落ちる。着地の再構築がここへ戻ってきて判定する。
+        if (
+            self._search_engaged()
+            and self._view.current_path() is None
+            and not grid_empty_state.results_pending(
+                self._empty_state_inputs()
+            )
+        ):
+            context = self._context_path
+            if context is None or all(e.path != context for e in entries):
+                self._context_path = None
                 self.preview_context_lost.emit()
         self._maybe_show_click_hint(bool(entries))
 
     def _maybe_show_click_hint(self, has_tiles: bool) -> None:
-        """クリック規約のセッション初回ヒント（UIレビュー 2026-08-28 N-146）.
+        """クリック規約のセッション初回ヒント.
 
         「クリック = プレビュー / ダブルクリック = 開く」という中核規約を
-        教える面が F1 ヘルプと右一覧のツールチップにしか無く、肝心のグリッド
-        が無言だった（07-12 D04 の再掲）。全画面の初回操作ヒント（G05 =
-        ``lightbox_parts/overlays.py::_HintOverlay``）と同じ「セッション初回
+        グリッド自身でも教える（F1 ヘルプと右一覧のツールチップだけでは
+        肝心のグリッドが無言になる）。全画面の初回操作ヒント
+        （``lightbox_parts/overlays.py::_HintOverlay``）と同じ「セッション初回
         のみ・数秒で自動消灯・クリック透過」の作法を、平常ブラウズへ水平展開
         する。
 
@@ -3443,8 +3512,7 @@ class PostGrid(ChildrenGrid):
 
         「クリエイターアイコンを隠す」は検索の軸ではなく**表示の軸**なので、
         表示側 (``_apply_filter_and_sort``) だけでなく母集合側にも同じ変換を
-        通す（項目#64 追修正）。素の ``self._entries`` を分母にしていたため、
-        トグルを ON にしただけで:
+        通す。素の ``self._entries`` を分母にすると、トグルを ON にしただけで:
 
         * 何も絞り込んでいないのにパンくずが「(4 件中 3 件)」と絞り込み表記
           へ化ける（``shown < total`` が常に成立する）
@@ -3452,8 +3520,8 @@ class PostGrid(ChildrenGrid):
           ``filtered`` になり、「検索条件をすべて解除」を押しても何も戻らない
           行き止まりになる
 
-        という 2 つの嘘が出ていた。トグル OFF なら ``_drop_thumb_markers`` が
-        そのまま返すので、従来の挙動と完全に一致する。
+        という 2 つの嘘が出る。トグル OFF なら ``_drop_thumb_markers`` が
+        そのまま返すので、素の母集合と完全に一致する。
         """
         return self._drop_thumb_markers(self._entries)
 
@@ -3467,7 +3535,7 @@ class PostGrid(ChildrenGrid):
         ``(includes, excludes, or_pool)`` of casefolded needles: *includes*
         are AND-required, *excludes* AND-forbidden, and *or_pool* is the
         Danbooru-style ``~`` pool — when non-empty, at least one member must
-        match (#3: consumers must NOT flatten it into the AND includes, or
+        match (consumers must NOT flatten it into the AND includes, or
         ``~a ~b`` silently degrades to ``a AND b`` on descendant paths).
         """
         includes: list[str] = []
@@ -3501,37 +3569,33 @@ class PostGrid(ChildrenGrid):
             # population the "advanced"-scope dimensions of the view registry
             # apply (種別・★・あとで見る・ユーザータグ)。
             #
-            # **NSFW 抑制もここを通す（UIレビュー 2026-08-28 N-04 の裁定）**:
-            # 旧実装は「AI 検索は結果自体が別の年齢軸（AI パネルの年齢区分）を
-            # 持つので通さない」という理由でスキップしていたが、その軸の既定値は
+            # **NSFW 抑制もここを通す**: 「AI 検索は結果自体が別の年齢軸（AI
+            # パネルの年齢区分）を持つので通さない」とすると、その軸の既定値は
             # ``tag_search_rating="all"``＝何も抑制しないので、**永続設定である
-            # 「年齢制限を隠す」が AI 検索した瞬間に無言で失効**していた（抑制中
+            # 「年齢制限を隠す」が AI 検索した瞬間に無言で失効**する（抑制中
             # マーカーも消えるので気づく手掛かりが無い）。2 つの軸は AND で重なる
-            # ——「年齢制限を隠す」はビューの軸、AI パネルの年齢区分はクエリの軸——
-            # という読みへ改めた。``_nsfw_rating_map`` は path→rating の汎用実装
+            # ——「年齢制限を隠す」はビューの軸、AI パネルの年齢区分はクエリの軸。``_nsfw_rating_map`` は path→rating の汎用実装
             # なので、フォルダタイルにもファイルタイルにもそのまま効く。
             shown = self._apply_nsfw_filter(
                 self._fold_view_dimensions(
                     "advanced", self._apply_advanced_search()
                 )
             )
-            # 件数と「0 件確定」の判定はパイプラインの**終端**で 1 回だけ書く
-            # （レビュー 2026-09-03 項目 6）。``_apply_advanced_search`` の中で
-            # 書いていた頃は、その後ろに居る ``_fold_view_dimensions`` /
-            # ``_apply_nsfw_filter`` が全部落としても件数が絞り込み前のまま残り、
-            # 「タイル 0 件・0 件カードも出ない・ステータスは N 件」という説明の
-            # つかない画面になっていた（``_advanced_status_text`` がこの 1 個の
-            # スカラーを読む。0 件カードの判定は項目 #95 で画面に載ったタイル数
-            # ＝ ``_empty_state_kind`` の advanced 分岐へ移した）。
+            # 件数と「0 件確定」の判定はパイプラインの**終端**で 1 回だけ書く。
+            # ``_apply_advanced_search`` の中で書くと、その後ろに居る
+            # ``_fold_view_dimensions`` / ``_apply_nsfw_filter`` が全部落としても
+            # 件数が絞り込み前のまま残り、「タイル 0 件・0 件カードも出ない・
+            # ステータスは N 件」という説明のつかない画面になる
+            # （``_advanced_status_text`` がこの 1 個のスカラーを読む。0 件カードの
+            # 判定は画面に載ったタイル数＝ ``_empty_state_kind`` の advanced 分岐）。
             self._advanced_match_count = len(shown)
             return shown
         # Direct children: full match surface (name + title + tags) since
         # post.md has already been parsed during the metadata pass.
         direct = list(entries)
-        # 「クリエイターアイコンを隠す」 は直下ブラウズにも効かせる（レビュー
-        # 2026-08-27 #64）: 以前は再帰検索の子孫と AI 検索結果にしか適用されて
-        # おらず、`#thumb#` を持つ投稿フォルダを直下で開くとトグル ON でも
-        # マーカーのタイルが残っていた。ツールチップは「クリエイターアイコン
+        # 「クリエイターアイコンを隠す」 は直下ブラウズにも効かせる: 再帰検索の
+        # 子孫と AI 検索結果だけに適用すると、`#thumb#` を持つ投稿フォルダを
+        # 直下で開いたときトグル ON でもマーカーのタイルが残る。ツールチップは「クリエイターアイコン
         # （`#thumb#` プレフィックスのファイル）を非表示にします」と明言して
         # おり、右ペインの FileListView はトグルと無関係に常に落とすので、
         # 同じフォルダで左「4 件」/ 右「3件」という説明のつかない差になる。
@@ -3545,8 +3609,8 @@ class PostGrid(ChildrenGrid):
         # synchronous in-memory match.
         body_terms = [t for t in terms if t.field == "body"]
         sync_terms = [t for t in terms if t.field != "body"]
-        # ``~body:`` pool members make the OR pool span the sync/async seam
-        # (#4): a sync-side pool miss is then NOT final — the entry may still
+        # ``~body:`` pool members make the OR pool span the sync/async seam:
+        # a sync-side pool miss is then NOT final — the entry may still
         # be admitted by a matching ``~body:`` alternative on the worker.
         body_or = any(t.or_group for t in body_terms)
         or_confirmed: set[str] | None = None
@@ -3748,7 +3812,7 @@ class PostGrid(ChildrenGrid):
         # あとで見る・ユーザータグ).  locked / 投稿日 は scope 外 — この母集合
         # （resolve_curation_paths / walk_recent_files）は locked_count=0 /
         # posted_at=None で組まれるため原理的に意味を持たず、チップも表から
-        # 同じ scope 判定で消える（項目#65）。
+        # 同じ scope 判定で消える。
         items = self._fold_view_dimensions("overlay", items)
         return self._sorted_flat(items)
 
@@ -3844,8 +3908,7 @@ class PostGrid(ChildrenGrid):
         lightbox deliberately do NOT consume it; widening it there would mean
         duplicating the asynchronous rating-resolution machinery.  The menu
         label says so out loud (「グリッドで年齢制限を隠す」) so the scope is
-        readable from the screen rather than only from the source
-        (UIレビュー 2026-08-28 N-81 の〔設計〕側).
+        readable from the screen rather than only from the source.
         """
         value = nsfw_filter.normalize_band(value)
         if value == self._hide_nsfw:
@@ -3873,7 +3936,7 @@ class PostGrid(ChildrenGrid):
         self._advanced_search_cancel()
         self._advanced_search_drop_results()
         self._tag_search_enabled = False
-        # 3 択モードは中立へ（項目 #93 — 書き込み口 1 本。索引が入れ替わると
+        # 3 択モードは中立へ（書き込み口 1 本。索引が入れ替わると
         # rank / similar の可用性そのものが変わる）。
         self._set_ai_mode("and")
         self._tag_index = tag_index
@@ -3925,9 +3988,9 @@ class PostGrid(ChildrenGrid):
         メニューは席（``nsfw_btn``）に ``setMenu`` でぶら下がっているので、
         席が無効なままだとメニューを開く手段が無い。構築時と tags.db の再注入
         (:meth:`set_tag_indexes`) が同じ 1 実装を通ることで、片側だけ有効化して
-        機能全体が再起動まで到達不能になる欠落を防ぐ（レビュー 0903 項目
-        #121 — 再注入がメニューだけ有効化し、席は無効・ツールチップも
-        「tags.db が必要です」のまま残っていた）。
+        機能全体が再起動まで到達不能になる欠落を防ぐ（再注入がメニューだけ
+        有効化すると、席は無効・ツールチップも「tags.db が必要です」のまま
+        残る）。
         """
         reason = nsfw_filter.gate_tooltip(has_ratings)
         for name in ("nsfw_btn", "nsfw_menu"):
@@ -3944,9 +4007,9 @@ class PostGrid(ChildrenGrid):
     def _sync_nsfw_menu(self) -> None:
         """Reflect the active NSFW band in the ⋯-menu radio actions.
 
-        席のラベルも現在値へ差し替える (UIレビュー 2026-09-11 N-36): 設定は
-        永続するのにボタンは常に「年齢制限を隠す」で、いま何が効いているかを
-        メニューを開かないと確かめられなかった。中立値 (``off``) では素の
+        席のラベルも現在値へ差し替える: 設定は永続するので、ボタンが常に
+        「年齢制限を隠す」のままだと、いま何が効いているかをメニューを開かないと
+        確かめられない。中立値 (``off``) では素の
         文言へ戻す — 「隠さない」を常時出すと条件が効いて見える。
         """
         actions = getattr(self, "_nsfw_actions", None)
@@ -4037,13 +4100,13 @@ class PostGrid(ChildrenGrid):
     ) -> list[FolderEntry]:
         """Pure current-mode sort — **no** folders-first grouping.
 
-        UIレビュー 2026-08-28 N-12: the cross-library lists (and the 「最近追加
+        The cross-library lists (and the 「最近追加
         されたファイル」 listing) are *about* one axis — ★ の高い順 / 更新日時の
         新しい順 — and entering one even forces that sort
         (``_CURATION_VIEW_SORT``).  Running the browse-grid's folders-first
-        grouping as the last step silently overrode it: 「スター付き一覧」 came
-        out as ★5フォルダ → ★1フォルダ → ★3ファイル, i.e. **not** in star
-        order, which is the only thing that list exists to show.  These
+        grouping as the last step would silently override it: 「スター付き一覧」
+        would come out as ★5フォルダ → ★1フォルダ → ★3ファイル, i.e. **not** in
+        star order, which is the only thing that list exists to show.  These
         populations are flat pools that mix folders and files from all over the
         library, so "Explorer order" has nothing to group here anyway.  Plain
         browsing keeps :meth:`_sorted_dir_first` unchanged.
@@ -4077,7 +4140,7 @@ class PostGrid(ChildrenGrid):
         appear once the worker reports, instead of freezing the GUI thread
         on cold post.md reads.
 
-        When ``~body:`` pool members exist (#4), *or_confirmed* is the set
+        When ``~body:`` pool members exist, *or_confirmed* is the set
         of entry paths the sync-side ``~`` pool already admitted — those
         pass the pool without a body hit; every other entry must match at
         least one ``~body:`` member (the worker's *or_matched* set).  The
@@ -4086,10 +4149,10 @@ class PostGrid(ChildrenGrid):
         """
         sig = tuple((t.value, t.exclude, t.or_group) for t in body_terms)
         if self._body_filter_matches is not None and self._body_filter_sig == sig:
-            # 別署名のワーカーが in-flight なら取り下げる (#104)。``body:x`` →
+            # 別署名のワーカーが in-flight なら取り下げる。``body:x`` →
             # ``body:y`` → ``body:x`` と戻すとキャッシュ命中で即表示できるが、
-            # y のタスクは走り続け、着地時に世代ガードを素通りして**有効な x の
-            # 判定を y の判定で上書き**していた（直後の再構築が署名不一致を
+            # y のタスクを放置すると、着地時に世代ガードを素通りして**有効な x の
+            # 判定を y の判定で上書き**する（直後の再構築が署名不一致を
             # 検知して x を再キック → グリッドが一瞬 0 件「検索中…」に落ちる）。
             if self._pending_body_sig.take_if(lambda cur: cur != sig) is not None:
                 self._body_stream.cancel()  # 滞留中の emit を孤児化
@@ -4168,6 +4231,10 @@ class PostGrid(ChildrenGrid):
         # the transient result view, and current_path() covers them at
         # teardown time).
         tile = self._view.tile_at(index)
+        if tile is not None:
+            # 窓へ伝える選択 = プレビューの文脈（``preview_context_lost`` の
+            # ゲート材料）。再構築が落とす選択（index 無効）では更新しない。
+            self._context_path = tile.path
         if (
             tile is not None
             and not self._filter_text
@@ -4243,6 +4310,21 @@ class PostGrid(ChildrenGrid):
             filter_locked_only=self._filter_locked_only,
         )
 
+    def apply_saved_search(self, snap: SearchSnapshot) -> None:
+        """保存した検索を**現在のフォルダを起点に**掛ける（M03）。
+
+        :meth:`restore_search_state` との違いは占有一覧（横断一覧 / 最近追加
+        一覧）の扱いだけ。履歴の復元は一覧の上に載せた絞り込みを一覧ごと
+        戻すので一覧に留まるのが正しいが、保存検索は「フォルダへ掛ける」
+        約束なので先に一覧を出る。留まると一覧の母集合には overlay スコープの
+        次元（絞り込み欄・種別・★…）だけが効き、🔒・サブフォルダ・投稿日は
+        内部状態だけ立ってチップにも表示にも出ず、後で一覧を出たときに平常
+        グリッドへ漏れ出た。退場の再構築は続く :meth:`restore_search_state`
+        の末尾が担うので、ここでは組み直さない。
+        """
+        self._exit_overlay(rebuild=False)
+        self.restore_search_state(snap)
+
     def restore_search_state(self, snap: SearchSnapshot) -> None:
         """Re-apply a previously captured search state and re-run its scans."""
         # 母集合の全面入れ替え（横断一覧と同じ扱い）— 窓は分割ビューへ戻る。
@@ -4270,7 +4352,7 @@ class PostGrid(ChildrenGrid):
         # ranked results then re-flow through _resolve_pending_select, so the
         # previously-selected item is re-selected once it reappears.
         if self._vector_index is not None:
-            # 書き込み口 1 本（項目 #93）— 記録されたモードが今の索引で走らない
+            # 書き込み口 1 本 — 記録されたモードが今の索引で走らない
             # なら ``_set_ai_mode`` が中立へ落とし、シードもそこで捨てられる。
             self._set_ai_mode(snap.ai_mode)
             if self._ai_mode == "similar":
@@ -4302,7 +4384,7 @@ class PostGrid(ChildrenGrid):
             # dimension is visible (and removable) rather than silently dropped.
             self._filterbar_user_tag = str(snap.filterbar_user_tag or "")
             self._reload_user_tag_choices()
-        # 「🔒 ロックありのみ」(review #21) — 検索次元の一つとして verbatim に
+        # 「🔒 ロックありのみ」 — 検索次元の一つとして verbatim に
         # 復元する（clear_search_state が解除する軸は全て戻すのが snapshot の
         # 契約）。ハンドラ経由の再構築は末尾の _rebuild_grid が担う。
         self._filter_locked_only = bool(snap.filter_locked_only)
@@ -4423,7 +4505,7 @@ class PostGrid(ChildrenGrid):
         # 占有一覧に **留まったまま** 条件だけ落とす経路（空状態カードの
         # 「絞り込みを解除」= :meth:`_clear_narrowing_over_overlay`）では、
         # 一覧が自分について語っていた行を消してはいけない — 再設定する経路が
-        # 無いので二度と戻らなかった（#62 / 項目 #252）。退場も伴う経路
+        # 無いので二度と戻らない。退場も伴う経路
         # (:meth:`_on_banner_clear` / :meth:`_on_escape_clear`) は続く
         # ``_exit_overlay`` が改めて空へ倒すので、ここで戻しても残らない。
         overlay = self._overlay
@@ -4521,7 +4603,7 @@ class PostGrid(ChildrenGrid):
                     self.tag_threshold_slider.setValue(clamped)
                     self.tag_threshold_slider.blockSignals(False)
                     ai_changed = True
-        # ★ / ユーザータグ / あとで見る (UIレビュー 07-25 #62 / N-65) — same
+        # ★ / ユーザータグ / あとで見る — same
         # contract as ``type:`` above: a typed ``star:>=3`` / ``mytags:タグ`` /
         # ``later:yes`` now *operates the control* instead of living as a
         # second, invisible predicate beside it.
@@ -4559,10 +4641,8 @@ class PostGrid(ChildrenGrid):
         self._update_filter_bar()
 
     #: Curation filter fields the フィルタ popover can express 1:1
-    #: (UIレビュー 07-25 #62).  ``mytags:`` joined in N-65 (第3段): its combo
-    #: has existed since 07-25 #13②, so the old exclusion reason ("no
-    #: control") was stale — only the *matching-rule gap* remains, and that is
-    #: resolved per-value by :meth:`_syncable_curation_value` (exact-match
+    #: (``mytags:`` included: its combo exists, so the only gap is the
+    #: *matching rule*, and that is resolved per-value by :meth:`_syncable_curation_value` (exact-match
     #: values sync, substring-only values stay pure text terms).
     _SYNCED_CURATION_FIELDS = frozenset({"star", "mytags", "later"})
 
@@ -4581,13 +4661,13 @@ class PostGrid(ChildrenGrid):
         """``star:`` / ``mytags:`` / ``later:`` トークンの値 → コントロールが
         表せる値 (or ``None``).
 
-        UIレビュー07-25 追修: 「そのトークンをコントロールで言い換えられるか」の
+        「そのトークンをコントロールで言い換えられるか」の
         判定を 1 か所に集約する — :meth:`_parse_curation_control_tokens`（読む
         側）と :meth:`_strip_synced_curation_token`（コントロール操作で書き換える
         側）が別々の条件を持つと、両者がずれた瞬間にトークンが**見えないのに
-        効いている**状態になる（それがこの修正の元不具合）。
+        効いている**状態になる。
 
-        N-65（第3段）: ``mytags:`` の同期の意味論 — トークンは連結タグ列への
+        ``mytags:`` の同期の意味論 — トークンは連結タグ列への
         casefold **部分一致**、コンボは**完全一致**で照合規則が違う。同期する
         のは既存のユーザータグと casefold 完全一致する値だけ（返すのはストア
         の正準表記 — コンボの data 値と同一物）。部分一致にしかならない値は
@@ -4623,7 +4703,7 @@ class PostGrid(ChildrenGrid):
     def _strip_synced_curation_token(self, field: str) -> None:
         """コントロールが表せる形の ``field:`` トークンだけを検索文字列から消す。
 
-        UIレビュー07-25 追修: フィルタポップオーバーの ★ コンボ /
+        フィルタポップオーバーの ★ コンボ /
         「あとで見る」 を操作したら、同じ次元を指すトークンは**その操作で
         置き換わった**ものとして削除する（``_clear_dim_later`` が × に対して
         既にやっている契約を、コントロール本体にも広げる）。これが無いと
@@ -4662,7 +4742,7 @@ class PostGrid(ChildrenGrid):
         """``star:`` / ``mytags:`` / ``later:`` tokens →
         ``(star_min, later, user_tag, synced_fields)``.
 
-        The ``type:`` control token is the template (UIレビュー 07-25 #62): a
+        The ``type:`` control token is the template: a
         token the GUI can represent is treated as *equivalent to operating the
         control*, so the ★ combo / ユーザータグ combo / 「あとで見る」 check
         show what was typed instead of silently AND-ing a second copy of the
@@ -4670,7 +4750,7 @@ class PostGrid(ChildrenGrid):
 
         Only the syncable forms count — ``star:>=N`` / ``star:>N`` (a floor, =
         the combo's ★N以上), an affirmative ``later:``, and a ``mytags:`` whose
-        value casefold-equals an existing user tag (N-65 — the combo is
+        value casefold-equals an existing user tag (the combo is
         exact-match, so only exact-match values are expressible; ``user_tag``
         carries the store's canonical spelling).  Everything the controls
         cannot say (``star:=5``, ``star:<2``, ``later:no``, a substring-only
@@ -4685,7 +4765,7 @@ class PostGrid(ChildrenGrid):
         the combo's exact-match narrowing is a subset of the token's substring
         match, so the AND collapses to the combo's semantics).
 
-        UIレビュー07-25 追修: *synced* は「その形が表せる」だけでなく
+        *synced* は「その形が表せる」だけでなく
         **コントロールの現在値と実際に一致している**ときにだけ立てる。値がずれた
         トークン（コントロールを操作した直後など）は 絞り込みチップに出し続け、
         「見えないのに AND されている」状態を作らない。
@@ -4732,21 +4812,21 @@ class PostGrid(ChildrenGrid):
 
         ``type:`` / ``rating:`` / ``score:`` always, plus the ``star:`` /
         ``mytags:`` / ``later:`` tokens that mapped onto a filter-popover
-        control this time round (UIレビュー 07-25 #62 / N-65) — otherwise the
+        control this time round — otherwise the
         same restriction would be both a ★ / ユーザータグ chip and part of the
         絞り込み chip.
 
         「所有している」 は次元あたり 1 トークンまで: 同じ次元を 2 度名指し
         した ``type:image type:video`` は後勝ちで適用されるので、負けた側は
         どのコントロールにも届かない — 落とすと適用も照合も表示もされない
-        入力になるため、``type:foo`` / ``-type:video`` と同じくチップに残す
-        （レビュー 2026-08-27 #162）。値をコントロールが言い換えられない
+        入力になるため、``type:foo`` / ``-type:video`` と同じくチップに残す。
+        値をコントロールが言い換えられない
         ``star:=5`` のような形も同じ理由で残る。
 
         ``rating:`` / ``score:`` は **tags.db があるときだけ**コントロールへ
         届く（:meth:`_sync_filter_control_tokens`）。索引が無い構成で「所有
         している」と宣言すると、打ったトークンが適用も照合もされないまま
-        絞り込みチップからも消える — #162 が名指しで禁じた形そのもの。
+        絞り込みチップからも消える — 上で禁じた形そのもの。
         所有する軸は台帳（``token_fields``）から引く（手書きの列挙を作らない）。
         """
         _star, _later, _tag, synced = self._parse_curation_control_tokens(text)
@@ -4791,10 +4871,9 @@ class PostGrid(ChildrenGrid):
         または削除済み）」は、一覧に入った時点で **一度だけ** 組まれる告知で、
         再構築の経路には再導出が無い。一覧の上に載せた条件の解除
         (:meth:`clear_search_state`) は末尾で状態行を無条件に空へ倒すので、
-        覚えていないと「一覧には留まったまま件数行だけ消えて二度と戻らない」
-        （レビュー 2026-08-27 #62 / 2026-09-03 項目 #252）。
+        覚えていないと「一覧には留まったまま件数行だけ消えて二度と戻らない」。
         :meth:`_maybe_start_recursive_scan` の非活性分岐が同じ告知をオーバー
-        レイ中だけ守っている（#165）のと対の措置で、覚える場所は一覧の状態
+        レイ中だけ守っているのと対の措置で、覚える場所は一覧の状態
         そのもの（``OverlayList.status``）— 退場すれば一緒に消える。
         """
         overlay = self._overlay
@@ -4833,8 +4912,7 @@ class PostGrid(ChildrenGrid):
         """列挙できなかったサブツリーがあった（``results_ready`` の直前に届く）。
 
         最近追加一覧の ``RecentFilesScan.unreadable_dirs`` と同じ趣旨 — 穴の
-        空いた走査を「N 件」だけで見せない・0 件を「該当なし」と断定しない
-        （レビュー 2026-09-03 項目 #64）。
+        空いた走査を「N 件」だけで見せない・0 件を「該当なし」と断定しない。
         """
         if generation != self._recursive_scanner.latest_generation():
             return  # stale walk superseded by newer filter text
@@ -4894,9 +4972,9 @@ class PostGrid(ChildrenGrid):
             # (it sets its own "✓ タグ検索 …" line) or an overlay listing does —
             # 最近追加 の 「N 件中 M 件」 summary, 横断キュレーション一覧の
             # 「一覧を読み込み中…」/「N 件は見つかりませんでした（移動または削除
-            # 済み）」。横断一覧が守られていなかったため（レビュー 2026-08-27
-            # #165）、消えた★の唯一の告知が絞り込み 1 文字で消え、履歴復帰でも
-            # 解決待ちの表示が即座に潰れていた。otherwise clear back to the
+            # 済み）」。横断一覧も守らないと、消えた★の唯一の告知が絞り込み
+            # 1 文字で消え、履歴復帰でも解決待ちの表示が即座に潰れる。
+            # otherwise clear back to the
             # load state.
             if (
                 not self._advanced_search_active()
@@ -4907,6 +4985,13 @@ class PostGrid(ChildrenGrid):
                 self._recursive_results = None
                 self._rel_paths.clear()
             return
+        # 走っている旧クエリの走査はここで打ち切って世代を進める。世代が進む
+        # のは request() の時点だけなので、デバウンス窓（250ms）の中に旧走査
+        # が着地すると現世代として素通りし、「該当なし」を断定したうえで
+        # ``_recursive_scanning`` を倒す — 続く新走査の進捗は
+        # :meth:`_on_recursive_progress` が全部捨ててしまう。cancel は旧走査
+        # の NAS I/O も即座に止める。
+        self._recursive_scanner.cancel()
         # Optimistically mark "searching" through the debounce window so the
         # status bar reacts to the first keystroke, not 250 ms later.
         self._recursive_scanning = True
@@ -4960,7 +5045,7 @@ class PostGrid(ChildrenGrid):
         # 再帰検索も 1 クエリで最大 2 回着地する（シード → 権威あるライブ）ので、
         # タグ / ベクトルワーカーと同じく再構築の前に選択を預ける。シードのヒット
         # を選んだ直後にライブが着地すると、選択だけ落ちてプレビュー列は前の項目
-        # を映したまま（現在地が 2 つに割れる）になる — レビュー 0903 項目 #103。
+        # を映したまま（現在地が 2 つに割れる）になる。
         self._preserve_selection_for_rebuild()
         if is_seed:
             # Instant cache phase: keep the "検索中…" status, record the seed
@@ -4973,11 +5058,11 @@ class PostGrid(ChildrenGrid):
         self._recursive_scanning = False
         self._rebuild_grid()
         hits = self._descendant_match_count
-        # UIレビュー 07-25 #115: 0 件は「完了 ✓」ではない — 絵文字を外したうえで
+        # 0 件は「完了 ✓」ではない — 絵文字を外したうえで
         # 件数ゼロ専用の「該当なし」へ分岐する（成功記号で失敗を語らない）。
         # 読めなかったサブツリーがあるなら「該当なし」と断定しない — 「読めな
-        # かった」を「無かった」と言う読み方は N-09 が横断一覧・最近追加一覧で
-        # 明示的に禁じたもの（レビュー 2026-09-03 項目 #64）。
+        # かった」を「無かった」と言う読み方は横断一覧・最近追加一覧でも
+        # 採らない。
         if hits:
             summary = t("viewer.post_grid.recursive_done", hits=hits)
             if self._recursive_unreadable:
@@ -5022,10 +5107,10 @@ class PostGrid(ChildrenGrid):
         :meth:`_search_engaged` answers ``True`` merely because the overlay is
         open, so it cannot tell 「一覧を絞り込んでいる」 from 「一覧を開いている」.
         This is the narrower question the empty-state card needs — and it is
-        now DERIVED from the view-dimension table (項目#63/#65): exactly the
-        engaged dimensions whose ``scopes`` include ``"overlay"``, i.e. the
-        ones :meth:`_apply_overlay_view` actually applies.  The hand-written
-        list used to count locked / 投稿日, which the overlay never applies —
+        DERIVED from the view-dimension table: exactly the engaged dimensions
+        whose ``scopes`` include ``"overlay"``, i.e. the ones
+        :meth:`_apply_overlay_view` actually applies.  A hand-written list
+        could count locked / 投稿日, which the overlay never applies —
         misclassifying an R18-suppressed listing as ``recent_filtered``.
         """
         return any(
@@ -5036,7 +5121,7 @@ class PostGrid(ChildrenGrid):
     def search_engaged(self) -> bool:
         """Public read of :meth:`_search_engaged` for the hosting window.
 
-        UIレビュー 07-25 #118: main_window needs "a search is applied AND the
+        main_window needs "a search is applied AND the
         grid settled empty" to switch the right panel's placeholder to the
         検索 0 件 wording — the same predicate Esc uses, so the two can never
         disagree about what "検索中" means.
@@ -5054,11 +5139,11 @@ class PostGrid(ChildrenGrid):
         """
         # The cross-library curation list (H01) and the 「最近追加されたファイル」
         # listing are overlays — Esc leaves the active one.  The narrowing the
-        # user loaded ON the listing comes down with it (レビュー 2026-08-27
-        # #166): ``clear_search_state`` runs on *entry*, so it says nothing
+        # user loaded ON the listing comes down with it: ``clear_search_state``
+        # runs on *entry*, so it says nothing
         # about conditions added afterwards, and leaving them standing silently
         # applies them to the plain grid the user lands back on — with the
-        # 絞り込み chip suppressed (#15) the only remaining clue is the 件数
+        # 絞り込み chip suppressed the only remaining clue is the 件数
         # 表記.  `_on_banner_clear` already tears the overlay narrowing down
         # for exactly this reason; the two 「解除」 routes must not disagree.
         if self._overlay is not None:
@@ -5071,7 +5156,7 @@ class PostGrid(ChildrenGrid):
             self.clear_search_state()
 
     def _on_locked_filter_toggled(self, checked: bool) -> None:
-        """「ロックありのみ」 toggled in the フィルタ popover (UIレビュー 07-25 #40).
+        """「ロックありのみ」 toggled in the フィルタ popover.
 
         A *search* dimension, so it is volatile like the rest of them (see
         ``state.filter_locked_only``, which is now read-and-discarded on load)
@@ -5201,7 +5286,7 @@ class PostGrid(ChildrenGrid):
         """Which population owns the grid: ``overlay`` / ``advanced`` / ``plain``.
 
         The same precedence :meth:`_apply_filter_and_sort` selects its
-        population with — the view-dimension registry (項目#63) keys its
+        population with — the view-dimension registry keys its
         scope filtering off this so「適用される次元」と「チップに出る次元」が
         常に同じ判定を通る。
         """
@@ -5232,7 +5317,7 @@ class PostGrid(ChildrenGrid):
         return entries
 
     def _view_dimensions(self) -> list[_ViewDim]:
-        """ビュー次元表（項目#63）— 行順 = 条件バーのチップ順.
+        """ビュー次元表 — 行順 = 条件バーのチップ順.
 
         1 行 = グリッドを絞る 1 次元。適用（:meth:`_fold_view_dimensions`）・
         チップ化（:meth:`_condition_chips`）・オーバーレイ narrowing 判定
@@ -5283,7 +5368,7 @@ class PostGrid(ChildrenGrid):
         先頭は全面占有一覧（横断キュレーション / 最近追加）— 一覧そのものが
         最上位の次元で、× は絞り込みの解除ではなく一覧からの退場。以降は
         次元表の行順で、**いま見ている母集合が実際に適用する**軸だけが並ぶ
-        （一覧に効かない locked / 投稿日 はチップも出ない: 項目#63 / #65）。
+        （一覧に効かない locked / 投稿日 はチップも出ない）。
         """
         return condition_chips.chips(self._condition_state())
 
@@ -5301,12 +5386,12 @@ class PostGrid(ChildrenGrid):
         ]
 
     def _panel_reset_dimensions(self) -> list[_ViewDim]:
-        """AI パネルの「詳細条件のみリセット」が中立化する次元（項目 #89）.
+        """AI パネルの「詳細条件のみリセット」が中立化する次元.
 
-        対象は台帳の ``panel_reset`` 列 1 か所で宣言する — 以前は
+        対象は台帳の ``panel_reset`` 列 1 か所で宣言する —
         ``_advanced_only_engaged`` / ``_on_reset_advanced_only`` /
         ``clear_search_state`` / ``save_tag_settings`` がそれぞれ別の軸リストを
-        手書きしており、精度と表示単位だけが面ごとに落ちていた。AI パック
+        手書きすると、面ごとに一部の軸が落ちる。AI パック
         無効時は AI 所有の行が表ごと消えるので、この列も自然に縮む。
         """
         return [
@@ -5366,14 +5451,14 @@ class PostGrid(ChildrenGrid):
         )
 
     def _edit_condition(self, kind: str, anchor: QWidget) -> None:
-        """Open the edit surface for a condition chip's *kind* (Phase 1-3).
+        """Open the edit surface for a condition chip's *kind*.
 
         ``ai`` → the AI search popover, ``filter`` → the adaptive filter
         popover (both anchored at the clicked chip; 「サブフォルダも検索」 is
         a row of that popover too), ``search`` → focus the toolbar filter
         box.  ``none`` chips (the
         cross-library curation list, the 最近追加されたファイル listing) never route
-        here — they only carry a × clear, and say so in their tooltip (#64).
+        here — they only carry a × clear, and say so in their tooltip.
         """
         if kind == "ai":
             self.open_ai_popover(anchor)
@@ -5440,7 +5525,7 @@ class PostGrid(ChildrenGrid):
         if not specs:
             bar.hide_bar()
             return
-        # UIレビュー #15: the toolbar search field already displays the plain
+        # The toolbar search field already displays the plain
         # filter text with its own × (clear button), so echoing it as a second
         # 絞り込み chip (and a second ×) is pure duplication.  Drop the
         # "search"-kind chip WHILE the field is visibly showing a term.
@@ -5469,10 +5554,9 @@ class PostGrid(ChildrenGrid):
         self.tag_input.setText("")  # fires _on_tag_input_changed
 
     def _clear_dim_precision(self) -> None:
-        # Back to the product DEFAULT (N-31 — the chip only exists above
-        # max(floor, default), so「×で既定へ戻す」で確実に消える。旧実装は
-        # スライダ下限 = DB 記録 floor へ**永続的に**落としており、既定へ
-        # 戻す導線が無かった).  Fires valueChanged → _on_tag_threshold_changed
+        # Back to the product DEFAULT (the chip only exists above
+        # max(floor, default), so「×で既定へ戻す」で確実に消える。スライダ下限
+        # = DB 記録 floor へ落とすと、既定へ戻す導線が無くなる).  Fires valueChanged → _on_tag_threshold_changed
         # → re-query.
         # A synced ``score:`` token re-applies the old precision on the next
         # rebuild, so the × has to delete it first — same rule the sibling
@@ -5506,8 +5590,8 @@ class PostGrid(ChildrenGrid):
 
     def _clear_dim_star(self) -> None:
         # A synced ``star:`` token drives the combo on every edit, so the ×
-        # has to delete it too or the dimension re-applies (UIレビュー 07-25 #62
-        # — same rule ``_clear_dim_media`` follows for ``type:``).  消すのは
+        # has to delete it too or the dimension re-applies (the
+        # same rule ``_clear_dim_media`` follows for ``type:``).  消すのは
         # コントロールが言い換えられる形だけ (``_syncable_curation_value``):
         # ``star:=5`` / ``star:<2`` / ``-``・``~`` 接頭辞はコンボの持ち物では
         # なく、ただのテキスト項として絞り込みチップに残るのが正しい。
@@ -5516,9 +5600,9 @@ class PostGrid(ChildrenGrid):
         self._on_filterbar_star_changed()
 
     def _clear_dim_usertag(self) -> None:
-        """Drop the ユーザータグ chip (UIレビュー 07-25 #13②).
+        """Drop the ユーザータグ chip.
 
-        N-65: a synced ``mytags:`` token drives the combo on every edit, so
+        A synced ``mytags:`` token drives the combo on every edit, so
         the × deletes it too (same rule as ``_clear_dim_star``) — while the
         current tag is still known, i.e. before the combo is neutralised.
         Substring-only ``mytags:`` forms stay as text terms.
@@ -5536,7 +5620,7 @@ class PostGrid(ChildrenGrid):
         self._on_filterbar_later_toggled(False)
 
     def _clear_dim_recursive(self) -> None:
-        """Drop the 「サブフォルダも検索」 scope chip (UIレビュー 07-25 #25)."""
+        """Drop the 「サブフォルダも検索」 scope chip."""
         self._preserve_selection_for_rebuild(ancestor_fallback=True)
         self.recursive_check.setChecked(False)  # fires _on_recursive_toggled
 
@@ -5572,13 +5656,13 @@ class PostGrid(ChildrenGrid):
         # Clear exactly what the 絞り込み chip is showing as its own text, and
         # keep every token that owns a *separate* dimension chip (an applied
         # ``type:`` / ``rating:`` / ``score:`` and a synced ``star:`` /
-        # ``mytags:`` / ``later:`` — UIレビュー 07-25 #62 / N-65).  The
+        # ``mytags:`` / ``later:``).  The
         # ownership rule is read off :meth:`_plain_filter_label` (=
         # ``strip_control_tokens``) rather than re-derived from the head name:
         # that contract deliberately keeps ``~`` / ``-`` prefixed tokens and
         # values no control consumes (``type:`` / ``type:foo`` / ``score:<0.1``)
-        # inside the 絞り込み chip, so a hand-written head-name test made the ×
-        # a no-op on tokens the chip was showing (レビュー 0903 項目 #98).
+        # inside the 絞り込み chip, so a hand-written head-name test would make
+        # the × a no-op on tokens the chip was showing.
         # 突き合わせは**位置**で行う（集合ではなく部分列）— ラベルは元の並び
         # から所有トークンを抜いたものなので、同じ綴りが 2 度出るクエリ
         # (``type:image type:image``) でも「チップが見せている 1 つ」だけが
@@ -5626,7 +5710,7 @@ class PostGrid(ChildrenGrid):
         # 表示軸のトグルなので、他の軸（★ / あとで見る / 種別 / NSFW …）と
         # 同じく再構築の前に選択を預ける — ``set_tiles`` は毎回選択を落とすので、
         # これが無いとプレビュー列だけが前の投稿を映したまま残り、‹ › の起点も
-        # 先頭へ戻る（レビュー 0903 項目 #68）。
+        # 先頭へ戻る。
         self._preserve_selection_for_rebuild()
         # Re-pick the chosen thumbnail for every entry from the cached
         # marker / non-marker candidates (no rescan), then rebuild.  The
@@ -5683,12 +5767,11 @@ class PostGrid(ChildrenGrid):
         self._rebuild_grid()
 
     def _sync_reload_tooltip(self) -> None:
-        """F5 の説明を並び順に合わせて差し替える (UIレビュー 2026-08-28 N-145).
+        """F5 の説明を並び順に合わせて差し替える.
 
         「ランダム」並びのときだけ F5 は**並びをシャッフルし直す**
-        (:meth:`reshuffle_random_sort`) が、その副作用はツールチップにも
-        ショートカット表にも書かれていなかった。前例は最大化中の戻るボタンの
-        動的差し替え（07-25 #23）。
+        (:meth:`reshuffle_random_sort`) ので、その副作用をツールチップで
+        名乗る（最大化中の戻るボタンの動的差し替えと同じ作法）。
         """
         btn = getattr(self, "reload_btn", None)
         if btn is None:
@@ -5743,12 +5826,12 @@ class PostGrid(ChildrenGrid):
         self.filter_edit.selectAll()
 
     def _jump_to_results(self) -> bool:
-        """Hand keyboard control from the search box to the grid (#6).
+        """Hand keyboard control from the search box to the grid.
 
         Wired to ``returnPressed`` and to ``↓`` in :meth:`eventFilter`
-        (UIレビュー 07-25 #6): after typing a query there was no keyboard route
-        to the results at all (Enter / ↓ inert, Esc tears the search down, the
-        grid was 9 Tab stops away).  Focuses the grid and — only when nothing
+        — without it, after typing a query there is no keyboard route to the
+        results at all (Esc tears the search down, the grid is 9 Tab stops
+        away).  Focuses the grid and — only when nothing
         is selected yet — selects the first tile, so repeating the gesture
         never yanks an existing selection back to the top.  Returns ``True``
         when the jump happened, so the key handler can swallow the event.
@@ -5781,8 +5864,7 @@ class PostGrid(ChildrenGrid):
         ``_build_chrome``).  Esc dismisses the popup first; a further Esc
         clears the active filter / search exactly like Esc on the grid —
         the shortcut list documents "Esc = 解除" without a focus caveat, and
-        right after typing a query the focus IS the filter box (UIレビュー
-        #17).
+        right after typing a query the focus IS the filter box.
         """
         if obj is self.filter_edit:
             # Local named ``etype`` (not ``t``) to avoid shadowing the
@@ -5810,7 +5892,7 @@ class PostGrid(ChildrenGrid):
                 and event.key() == Qt.Key_Down
                 and not event.modifiers()
             ):
-                # ↓ = 「結果へ移る」 (UIレビュー 07-25 #6).  Swallowed only when
+                # ↓ = 「結果へ移る」.  Swallowed only when
                 # the jump actually happened; otherwise (cheat-sheet showing /
                 # empty grid) the completer popup and the default handling keep
                 # their historical behaviour.
@@ -5819,7 +5901,7 @@ class PostGrid(ChildrenGrid):
         return super().eventFilter(obj, event)
 
     def _show_filter_help_auto(self) -> None:
-        """初回フォーカスの自動表示 — **短縮版**（N-116）.
+        """初回フォーカスの自動表示 — **短縮版**.
 
         表示済みフラグ（``_filter_help_autoshown``）の ``viewer_state.json``
         永続化は意図的に**しない**: 教示機会を恒久的に失う副作用があり、

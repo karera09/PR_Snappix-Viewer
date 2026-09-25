@@ -90,6 +90,7 @@ from .markdown_pipeline import (
 from .perf import recorder
 from .post_link_index import LOCAL_SCHEME, classify_post_links
 from .qimage_decode import decode_qimage, read_image_size
+from .text_decode import decode_text
 from ._runnable import GuardedStream, StreamOutcome
 from . import view_prefs
 
@@ -195,9 +196,14 @@ def _read_post_body(md_path: Path) -> StreamOutcome:
     truncated = len(raw) > limit
     if truncated:
         raw = raw[:limit]
-    # errors="replace" なので上限で切れた途中のマルチバイトは U+FFFD
-    # 1 文字になるだけ（strict デコードのように全文が化けない）。
-    text = raw.decode("utf-8", errors="replace")
+    # 符号推定は TextView と共有する（``text_decode.decode_text``）。
+    # post.md 以外の任意の .md もここへ来るので、UTF-8 固定だと BOM 付き
+    # UTF-8 は BOM が行頭に残って先頭見出しが段落になり、Shift_JIS /
+    # UTF-16（メモ帳の「Unicode」）は全文が化ける。
+    # 上限で切れた末尾の半端な多バイト文字は ``truncated`` が捨てる。
+    # 最後の手段は Latin-1 ではなく UTF-8（replace）— 書式上 UTF-8 の
+    # post.md に壊れたバイトが混じっても、その文字だけが U+FFFD になる。
+    text = decode_text(raw, truncated=truncated, last_resort="utf-8")
     if truncated:
         text += "\n\n" + t(
             "viewer.markdown_view.body_truncated",
@@ -209,7 +215,7 @@ def _read_post_body(md_path: Path) -> StreamOutcome:
 #: :func:`_render_post_body` の結末。``ready`` の値は
 #: ``(HTML with width/height baked into <img>, dict[local, QSize])`` で、
 #: 2 つ目は**元画像の実寸**。表示ボックスはビュー側が ``_layout_box`` で
-#: 現在のコンテンツ幅から導出し直す (#22)。
+#: 現在のコンテンツ幅から導出し直す。
 _MdRenderKind = Literal["ready", "failed"]
 
 
@@ -235,7 +241,7 @@ def _render_post_body(
     (webtoon strip) could otherwise decode past the LRU's
     ``max_single_bytes`` — such a QImage is silently refused by the cache
     yet stays resident in the QTextDocument, bypassing the memory budget
-    entirely and re-decoding on every reflow (#14).
+    entirely and re-decoding on every reflow.
 
     失敗も値で返す（``failed``）— 読み込み中プレースホルダが永久に残らない
     ように、ビューがエラーページへ切り替えるため。
@@ -245,7 +251,7 @@ def _render_post_body(
     headers_read = 0
     try:
         body_html = _rewrap_img_paragraphs(_md().render(text))
-        # 値は**元画像の実寸**（表示ボックスではない）— #22。
+        # 値は**元画像の実寸**（表示ボックスではない）。
         sources: dict[str, QSize] = {}
 
         def _rewrite(m: re.Match[str]) -> str:
@@ -270,7 +276,7 @@ def _render_post_body(
             source = QSize(src_w, src_h)
             # 焼き込む width/height はここでの派生値。ビュー側は
             # ``sources`` から同じ関数で導出し直すので、後からウィンドウ
-            # を広げれば表示ボックスもデコードも追従する (#22)。
+            # を広げれば表示ボックスもデコードも追従する。
             target = _layout_box(source, max_w, max_px)
             sources[local] = source
             return (
@@ -383,7 +389,7 @@ class MarkdownView(QTextBrowser):
         # Memoised ``url -> folder | None`` results for the post currently
         # shown.  ``_classified`` runs on EVERY setHtml (reflow / font size /
         # refresh_links), so without this every resize re-queried the postref
-        # index once per anchor (レビュー 2026-07-31 #23).  Invalidated on post
+        # index once per anchor.  Invalidated on post
         # switch, resolver swap and ``refresh_links`` (the index filled, so
         # previously unresolved links may now resolve).
         self._post_link_cache: dict[str, Path | None] = {}
@@ -403,7 +409,7 @@ class MarkdownView(QTextBrowser):
         # local ref → 元画像の実寸（レンダーがヘッダから読む値）。
         self._img_sources: dict[str, QSize] = {}
         # local ref → 現在のコンテンツ幅での表示ボックス。``_img_sources``
-        # からの**派生値**で、リフローのたびに導出し直す (#22)。
+        # からの**派生値**で、リフローのたびに導出し直す。
         self._img_targets: dict[str, QSize] = {}
         # 本文画像のデコード。**加算的**な投入（``submit_batch``）— 1 投稿の
         # 画像は次々に要求され、``loadResource`` / ``_refresh_visible_images``
@@ -466,23 +472,23 @@ class MarkdownView(QTextBrowser):
             self, 60, self._on_reflow_timeout, mode=DebounceMode.TRAILING
         )
         self._last_reflow_width = 0
-        # 「次のタイマー発火は強制リフロー」の 1 ビット（項目#109）。
+        # 「次のタイマー発火は強制リフロー」の 1 ビット。
         # ``_reflow_images`` の幅ガードは「ビューポート幅が変わったか」しか
         # 見られないので、幅は同じでも表示ボックス（``_img_targets``）を
-        # 書き換えた経路はガードを迂回する必要がある。以前はその迂回を
-        # 「呼ぶ側が ``_last_reflow_width = 0`` を書く」という手作業の規約で
-        # 実現していて、5 経路のうち 2 経路で片側が欠けていた（#1 / #110）。
+        # 書き換えた経路はガードを迂回する必要がある。その迂回を
+        # 「呼ぶ側が ``_last_reflow_width = 0`` を書く」という手作業の規約に
+        # すると経路ごとに片側が欠けるので、
         # 迂回の意思は ``force`` 引数で表明し、タイマー越しの経路だけがこの
         # ビットに預ける。
         self._force_reflow = False
         # Body HTML captured after the render task baked in width/height
         # per image — reused by ``_reflow_images`` to rewrite those attrs.
         self._last_body_html: str | None = None
-        # 現在の投稿のメタカード HTML（UIレビュー #8 — _on_post_read で分離、
+        # 現在の投稿のメタカード HTML（_on_post_read で分離し、
         # 非同期レンダ結果の先頭へ _apply_render が挿す）。保留ではなく
         # 「今の投稿の持ち物」— 挿しても降ろさず、投稿が変わるまで有効。
         self._current_header_html = ""
-        # ``changeEvent`` → ``_rerender_theme`` の再入ガード（#126）。
+        # ``changeEvent`` → ``_rerender_theme`` の再入ガード。
         self._theme_rerendering = False
 
         # Bounded secondary cache of decoded ``QImage``s, keyed by the
@@ -505,7 +511,7 @@ class MarkdownView(QTextBrowser):
         # per-image decoded-pixel budget the render task bakes into the HTML
         # (``_decode_px_budget``).  The cache keeps its limits private, and
         # every baked image must stay insertable or it escapes the LRU and
-        # pins unbounded memory in the QTextDocument (#14).
+        # pins unbounded memory in the QTextDocument.
         self._cache_max_single_bytes = MARKDOWN_CACHE_MAX_SINGLE_BYTES
         self._evicted_urls: set[str] = set()
 
@@ -544,14 +550,14 @@ class MarkdownView(QTextBrowser):
         # 画素予算（``_decode_px_budget``）はこの値から出るので、上限を変えた
         # ら表示ボックスも導出し直す。これが無いと上限を下げた直後のターゲット
         # が過大なまま残り、再デコードした QImage が新上限を超えて put が黙って
-        # 拒否される＝ #14 が塞いだ「予算外で QTextDocument に居座り毎リフロー
-        # 再デコード」の再来になる（下の ``_visible_timer`` がその再デコードを
+        # 拒否される＝「予算外で QTextDocument に居座り毎リフロー
+        # 再デコード」状態になる（下の ``_visible_timer`` がその再デコードを
         # 能動的に起こすので特に効く）。幅は現在適用中のもの（リフロー済みなら
-        # その幅、未リフローなら初回レンダ幅）（#20 追修正）。
+        # その幅、未リフローなら初回レンダ幅）。
         self._img_targets = self._derive_targets(
             self._last_reflow_width or self._render_max_w
         )
-        # 導出し直した表示ボックスを本文 HTML へ焼き直す（項目#110）。幅は
+        # 導出し直した表示ボックスを本文 HTML へ焼き直す。幅は
         # 変わっていないので強制リフローで蹴る — 素のリフローだと即 return
         # し、「HTML の箱は旧サイズ・デコードは新（小）サイズ」の拡大表示が
         # 残る。
@@ -575,12 +581,11 @@ class MarkdownView(QTextBrowser):
         # 退避したリソースを自分から再要求しないので、``_apply_image``
         # の退避処理と同じく可視窓の再デコードを起こす。これが無いと設定
         # ダイアログでキャッシュ上限を下げた瞬間に表示中の本文画像が全部
-        # 白いままになり、ユーザーがスクロールするまで戻らない
-        # （レビュー 2026-08-27 #20）。
+        # 白いままになり、ユーザーがスクロールするまで戻らない。
         self._visible_timer.trigger()
 
     def _derive_targets(self, max_w: int) -> dict[str, QSize]:
-        """コンテンツ幅 *max_w* での表示ボックスを全画像ぶん導出する (#22)。
+        """コンテンツ幅 *max_w* での表示ボックスを全画像ぶん導出する。
 
         レンダータスクが焼き込んだ width/height と同じ ``_layout_box`` を
         通すので、初回描画時（``_render_max_w``）に呼べば焼き込み値と一致し、
@@ -593,7 +598,7 @@ class MarkdownView(QTextBrowser):
         }
 
     def _decode_px_budget(self) -> int:
-        """Per-image decoded-pixel cap so every decode fits the LRU (#14).
+        """Per-image decoded-pixel cap so every decode fits the LRU.
 
         ``_decode_post_image`` decodes at ``target × dpr`` physical pixels, 4
         bytes each (RGB32/ARGB32) — the render task clamps its baked
@@ -640,13 +645,13 @@ class MarkdownView(QTextBrowser):
         resolve to ``_base_dir`` (the post being shown *is* downloaded — it's
         on screen), so every post's card would gain a local-copy pill + 📁 that
         just re-opens itself. Passing ``self_folder=self._base_dir`` makes
-        ``classify_post_links`` skip that self-resolution (レビュー
-        2026-08-27 #78; ロジック側の除外は post_link_index.py #66).
+        ``classify_post_links`` skip that self-resolution (the logic-side
+        exclusion lives in ``post_link_index.py``).
 
         Resolutions are memoised per post (``_post_link_cache``): a body with N
         post links would otherwise re-query the postref index N times on every
-        reflow / font-size change, all on the GUI thread (レビュー 2026-07-31
-        #23).  ``refresh_links`` drops the cache so a freshly filled index is
+        reflow / font-size change, all on the GUI thread.
+        ``refresh_links`` drops the cache so a freshly filled index is
         picked up.
         """
         resolve = self._post_link_resolver
@@ -720,9 +725,9 @@ class MarkdownView(QTextBrowser):
             #
             # ``_reflow_images`` does its own ``_render_html`` + ``setHtml``
             # + scroll-ratio restore, so it must not be preceded by one here:
-            # that made every Ctrl+wheel notch lay out the whole document
-            # twice, the first result always discarded before it could paint
-            # (レビュー 2026-08-27 #127).  The plain ``setHtml`` below stays
+            # that would make every Ctrl+wheel notch lay out the whole document
+            # twice, the first result always discarded before it could paint.
+            # The plain ``setHtml`` below stays
             # as the fallback for the cases the reflow bails out of (no
             # images, or no viewport width yet).
             if (
@@ -747,8 +752,8 @@ class MarkdownView(QTextBrowser):
         (``content_view``) はいずれも **0 = アプリ既定に従う**という規約で
         往復する。復帰項目が ``set_font_pt(_DEFAULT_FONT_PT)`` を呼ぶと
         ``font_pt_changed`` が 11 を流し、窓がそれを永続させるので、設定は
-        「11 pt」を表示し、アプリ既定が変わっても追従しなくなっていた
-        （UIレビュー 2026-09-11 N-133 — 対の片側欠落）。復帰経路だけ 0 を
+        「11 pt」を表示し、アプリ既定が変わっても追従しなくなる
+        （対の片側欠落）。復帰経路だけ 0 を
         流す。Ctrl+ホイールの一般経路 (:meth:`set_font_pt`) は実値のまま。
         """
         self._apply_font_pt(_DEFAULT_FONT_PT)
@@ -784,14 +789,14 @@ class MarkdownView(QTextBrowser):
 
         The teardown half of :meth:`set_post`, callable on its own so the
         hosting ``ContentView`` can hand the memory back when the centre pane
-        leaves the markdown page (レビュー 2026-08-27 #131).  Until then the
-        only release path was 「次の post.md を開いたとき」, so an image-heavy
+        leaves the markdown page.  Otherwise the
+        only release path would be 「次の post.md を開いたとき」, so an image-heavy
         post's decoded pixels (``MARKDOWN_CACHE_MAX_BYTES`` = 256 MiB at the
-        ceiling, plus the QTextDocument's own resource cache) stayed resident
-        for the rest of the session while the user browsed images / 動画 /
+        ceiling, plus the QTextDocument's own resource cache) would stay resident
+        for the rest of the session while the user browses images / 動画 /
         ZIP.  Nothing is lost by releasing early: :meth:`set_post` re-reads and
         re-decodes unconditionally even for the same path, so the retained
-        pixels were never reused on the way back.
+        pixels would never be reused on the way back.
 
         Idempotent and safe with no post shown — every container is simply
         already empty.
@@ -830,7 +835,7 @@ class MarkdownView(QTextBrowser):
         # this, switching from an image-heavy post to a text-only one (fast
         # path) or to the read-error page never gives the memory back until
         # the next image post's ``_apply_render`` happens to call
-        # ``doc.clear()`` (レビュー 2026-07-31 #80).  Done before
+        # ``doc.clear()``.  Done before
         # ``setBaseUrl`` so the base URL the caller sets next survives the
         # clear.
         self.document().clear()
@@ -838,7 +843,7 @@ class MarkdownView(QTextBrowser):
     def _set_post_sync(self, md_path: Path) -> None:
         self._base_dir = md_path.parent
         self._post_path = md_path
-        # Teardown half, shared verbatim with the page-leave release (#131).
+        # Teardown half, shared verbatim with the page-leave release.
         self.release_images()
         self.document().setBaseUrl(
             QUrl.fromLocalFile(str(self._base_dir) + "/")
@@ -897,7 +902,7 @@ class MarkdownView(QTextBrowser):
     def _render_post_text(self, text: str) -> None:
         """読めた本文を描く（同期の text-only 経路 / 非同期のレンダー経路）."""
         md_name = self._pending_md_name
-        # UIレビュー #8: タイトル + 生メタブロックを日本語のメタカード HTML
+        # タイトル + 生メタブロックを日本語のメタカード HTML
         # へ変換し、markdown 描画は本文のみに絞る。メタ無しの .md は素通し。
         header_html, text = _post_header_html(text)
         self._current_header_html = header_html
@@ -966,7 +971,7 @@ class MarkdownView(QTextBrowser):
                 assert_never(kind)
 
     def _apply_render(self, html: str, sources: dict) -> None:
-        # UIレビュー #8: メタカードは本文の読みで分離済み — 描画結果の
+        # メタカードは本文の読みで分離済み — 描画結果の
         # 本文 HTML の前に挿す（着地したのは同じ投稿のレンダーなので、
         # 控えてあるヘッダはこの本文のもの）。
         html = self._current_header_html + html
@@ -1063,14 +1068,14 @@ class MarkdownView(QTextBrowser):
         super().wheelEvent(event)
 
     def changeEvent(self, event):  # noqa: N802 (Qt API)
-        """テーマ切替に本文の焼き込み色を追従させる（レビュー #126）。
+        """テーマ切替に本文の焼き込み色を追従させる。
 
         ``_HTML_TEMPLATE`` の ``code``/``pre`` 背景と ``a.localpost`` の色は
         ``setHtml`` の時点で QTextDocument の文字書式へ**焼き込まれる**。
         ``apply_theme`` は QPalette / アプリ QSS / アイコンしか更新しない
         ので、表示中の投稿だけが旧テーマの色を保ち続け（暗い地に暗い引用
-        文＝コントラスト 2〜3）、投稿を開き直すまで直らなかった。常駐
-        トースト (#117) / タグチップと同じ「パレット変更で焼き直す」型で
+        文＝コントラスト 2〜3）、投稿を開き直すまで直らない。常駐
+        トースト / タグチップと同じ「パレット変更で焼き直す」型で
         塞ぐ。``StyleChange`` は拾わない（``setHtml`` 起点の再帰を招く）。
         """
         if event.type() in (
@@ -1093,8 +1098,8 @@ class MarkdownView(QTextBrowser):
         保ち続ける（``_reflow_images`` は書き換え結果をローカルに留める）
         ので、これをそのまま ``setHtml`` するとリフロー済みの寸法が捨てら
         れる。しかも ``_last_reflow_width`` は現在幅のままなので、次の
-        リフローも早期 return して復帰しない。``set_font_pt`` (#127) と
-        同じく、リフロー可能なら幅の再適用ごと委譲する（#126 追修正）。
+        リフローも早期 return して復帰しない。``set_font_pt`` と
+        同じく、リフロー可能なら幅の再適用ごと委譲する。
         """
         if self._last_body_html is None or self._theme_rerendering:
             return
@@ -1125,7 +1130,7 @@ class MarkdownView(QTextBrowser):
             self._reflow_timer.trigger()
 
     def _schedule_forced_reflow(self) -> None:
-        """デバウンス越しに強制リフローを予約する（項目#109）。
+        """デバウンス越しに強制リフローを予約する。
 
         バーストする経路（``_apply_image`` の到着ごと・設定適用）は
         ``_reflow_images`` を直接呼ばずタイマーへ束ねたいが、幅ガードは
@@ -1158,12 +1163,12 @@ class MarkdownView(QTextBrowser):
         manually.
 
         The width guard below suppresses the no-op re-layout a bare
-        ``resizeEvent`` burst would cause (#127 / #22), but it can only see
+        ``resizeEvent`` burst would cause, but it can only see
         the *width* — a caller that changed ``_img_targets`` for some other
         reason (font size, link re-classification, theme, a new cache budget,
         an image whose real size only became known at decode time) must pass
-        ``force=True`` or its new boxes are never baked into the HTML
-        (レビュー 2026-09-03 項目 #109).  Only the ``resizeEvent`` path leaves
+        ``force=True`` or its new boxes are never baked into the HTML.
+        Only the ``resizeEvent`` path leaves
         it ``False``.
         """
         if not self._last_body_html or self._base_dir is None:
@@ -1179,9 +1184,9 @@ class MarkdownView(QTextBrowser):
         if not force and abs(max_w - self._last_reflow_width) < 2:
             return
         self._last_reflow_width = max_w
-        # 表示ボックスは毎回**元画像の実寸から**導出し直す。以前は前回の
-        # 表示ボックスを縮める形だったので、狭い幅で開いた投稿はウィンドウを
-        # 広げても初回幅を超えて拡大されなかった (#22)。
+        # 表示ボックスは毎回**元画像の実寸から**導出し直す。前回の
+        # 表示ボックスを縮める形にすると、狭い幅で開いた投稿はウィンドウを
+        # 広げても初回幅を超えて拡大されない。
         self._img_targets = self._derive_targets(max_w)
 
         def _rewrite(m: re.Match[str]) -> str:
@@ -1280,7 +1285,7 @@ class MarkdownView(QTextBrowser):
     def _needs_sharper(
         self, local: str, image: QImage, target: QSize
     ) -> bool:
-        """True when *image* has fewer pixels than *target* now needs (#22).
+        """True when *image* has fewer pixels than *target* now needs.
 
         The LRU is keyed by URL only, so a decode made for a narrow window
         stays valid-looking after the user widens it — Qt would upscale it
@@ -1331,7 +1336,7 @@ class MarkdownView(QTextBrowser):
                             # ウィンドウを広げた後は表示ボックスが伸びる —
                             # 手持ちの画素で足りなければ、いま出せるものを
                             # 返しつつ背面で大きい方を焼き直す（空白を挟ま
-                            # ずに解像度だけ追いつく。#22）。
+                            # ずに解像度だけ追いつく）。
                             if self._needs_sharper(local, cached, target):
                                 self._dispatch_decode(
                                     url_key, name, candidate, target
@@ -1355,9 +1360,9 @@ class MarkdownView(QTextBrowser):
                         )
                         return self._placeholder()
                     # No cached size（ヘッダからサイズを読めなかった画像 /
-                    # ターゲット表から漏れたキー）— 以前はここだけ GUI
-                    # スレッドで原寸を**同期**デコードし、結果は LRU にも
-                    # 入らず予算契約の外に置かれていた（項目#24）。他の画像と
+                    # ターゲット表から漏れたキー）— GUI
+                    # スレッドで原寸を**同期**デコードすると、結果は LRU にも
+                    # 入らず予算契約の外に置かれる。他の画像と
                     # 同じ扱いに揃える: 原寸ターゲット（空 QSize → タスク側で
                     # target=None = 原寸デコード）の非同期タスクを積んで即
                     # プレースホルダを返す。実寸は ``_apply_image`` が
@@ -1380,6 +1385,19 @@ class MarkdownView(QTextBrowser):
                             name.toString(), name, candidate, QSize()
                         )
                         return self._placeholder()
+            if type_ == QTextDocument.ResourceType.ImageResource:
+                # 不変条件: 本文画像は Qt にデコードさせない。ここまで来るのは
+                # ディスクに無い参照・投稿フォルダ外・ローカルでない URL で、
+                # ``super().loadResource`` へは落とさない — 落とすと Qt はその空
+                # リソースに同梱の壊れ画像グリフを GUI スレッドで画像プラグイン
+                # ファクトリ経由でデコードするが、その経路は
+                # ``qimage_decode._QT_READER_LOCK`` を取らないため、ワーカーの
+                # Qt ラダー（0 バイト / 途中切れ画像の ``QImageReader.read``）と
+                # ファクトリのロック・GIL を交差して取り合い、プロセス全体が
+                # 永久停止しうる。QPainter だけで描く
+                # 「読み込めなかった画像」の枠を返す — デコード失敗の枠と揃う。
+                slow_path = "missing-image"
+                return self._broken_marker()
             slow_path = slow_path or "super-loadResource"
             return super().loadResource(type_, name)
         finally:
@@ -1389,13 +1407,13 @@ class MarkdownView(QTextBrowser):
             if elapsed_ms > self._lr_max_ms:
                 self._lr_max_ms = elapsed_ms
             # Flag slow individual calls so outliers are visible even
-            # though the aggregate summary hides them.  ``super-loadResource``
+            # though the aggregate summary hides them.  ``missing-image``
             # は「post.md が参照している画像がディスクに無い」という**日常的
-            # な**事象（取得失敗・先行書き込み）で必ず立ち、所要時間に関係なく
-            # WARNING を出していた — しかも壊れ参照 1 本につき初回描画・
+            # な**事象（取得失敗・先行書き込み）で必ず立つ。所要時間に関係なく
+            # WARNING を出すと、壊れ参照 1 本につき初回描画・
             # リフロー・フォント 1 ノッチ・refresh_links の**全 setHtml** で
             # 繰り返され、``_diag`` を作った理由（常時 INFO のログ肥大）が
-            # WARNING レベルで再演していた（レビュー 2026-08-27 #129）。
+            # WARNING レベルで再演する。
             # 無条件 WARNING は実際に遅かった呼び出しと同期デコード
             # フォールバックだけに絞り、残りは診断トグル配下へ落とす。
             if elapsed_ms >= 50.0:
@@ -1440,9 +1458,9 @@ class MarkdownView(QTextBrowser):
         url_key = url.toString()
         self._evicted_urls.discard(url_key)
         self._pending_redecode.discard(url_key)
-        # サイズ未知フォールバックの後始末（項目#24）: ``loadResource`` は
+        # サイズ未知フォールバックの後始末: ``loadResource`` は
         # ヘッダからサイズを読めなかった画像も同期デコードせず原寸の非同期
-        # タスク + プレースホルダで返すようになった。実寸はこのデコード結果で
+        # タスク + プレースホルダで返す。実寸はこのデコード結果で
         # 初めて判明するので、未登録キーを ``_img_sources`` / ``_img_targets``
         # に登録し、リフローを 1 回蹴って 1×1 プレースホルダのままのレイアウト
         # を正しい寸法へ収束させる（以降は他の画像と完全に同じ経路に乗る）。
@@ -1455,7 +1473,7 @@ class MarkdownView(QTextBrowser):
                 self._img_targets[local] = _layout_box(
                     QSize(src), max_w, self._decode_px_budget()
                 )
-                # 幅ガードを迂回する強制リフロー（項目#110/#109）: ガードは
+                # 幅ガードを迂回する強制リフロー: ガードは
                 # 「幅が変わったか」だけを門番にしているので、素の予約だと
                 # ウィンドウ幅が同じ通常ケースで必ず即 return し、
                 # ``_last_body_html`` の ``<img>`` に width/height が焼き込ま
@@ -1585,14 +1603,14 @@ class MarkdownView(QTextBrowser):
         dedupe guard and the ``_redecode_if_evicted`` in-flight guard skip
         that slot forever and the image stays blank until the post is
         reopened.  Discarding here keeps add/discard symmetric on the
-        failure path, so scrolling back re-dispatches the decode
-        (レビュー 2026-07-31 #79).
+        failure path, so scrolling back re-dispatches the decode.
 
         The slot also gets a visible "couldn't read this" frame.  A failed
         decode used to leave the shared 1×1 transparent placeholder, so a
-        broken file read as「元々そんな画像は無かった」— while a reference to
-        a *missing* file fell through to ``super().loadResource`` and drew
-        Qt's own broken-image glyph.  Both failures now show something.
+        broken file read as「元々そんな画像は無かった」.  A reference to a
+        *missing* file gets the same frame straight from ``loadResource``
+        (never Qt's own broken-image glyph, whose decode would bypass
+        ``_QT_READER_LOCK``), so both failures look alike.
         """
         url_key = url.toString()
         self._pending_redecode.discard(url_key)
@@ -1869,16 +1887,16 @@ class MarkdownView(QTextBrowser):
                     self.similar_search_requested.emit(p, None)
                 )
         menu.addSeparator()
-        # UIレビュー 07-25 #132: Ctrl+ホイールの本文フォントサイズは
+        # Ctrl+ホイールの本文フォントサイズは
         # ``ViewerState.markdown_font_pt`` へ**永続**するのに、設定 UI にも
-        # メニューにも既定へ戻す手段が無い「隠し設定」だった（誤操作で極端な
+        # メニューにも既定へ戻す手段が無いと「隠し設定」になる（誤操作で極端な
         # サイズに固定されると自力で戻せない）。変更した状態のときだけ復帰
         # 項目を出す。
         if self.font_pt() != _DEFAULT_FONT_PT:
             reset_act = menu.addAction(
                 t("viewer.markdown_view.reset_font_size")
             )
-            # N-133: 復帰は「0 = アプリ既定に従う」を永続させる専用経路へ。
+            # 復帰は「0 = アプリ既定に従う」を永続させる専用経路へ。
             reset_act.triggered.connect(lambda _=False: self.reset_font_pt())
             menu.addSeparator()
         toc_menu = self._build_toc_menu(menu)

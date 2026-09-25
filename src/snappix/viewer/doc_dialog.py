@@ -1,12 +1,12 @@
-"""Modeless in-app reader for a shipped Markdown document (UIレビュー N-86).
+"""Modeless in-app reader for a shipped Markdown document.
 
 Every other shipped document (利用規約・免責事項 / THIRD_PARTY_LICENSES /
 はじめにお読みください) is plain ``.txt``, which Windows always knows how to
 open, so :func:`snappix.common.legal_docs.open_shipped_file` hands those to the
 OS.  The AI pack's setup guide is the one ``.md`` in the product, and a bare
 Windows install has **no** association for that extension — the Help entry
-「AIタグ検索のセットアップ…」 therefore ended at an "how do you want to open this
-file?" shell prompt, or at nothing at all.
+「AIタグ検索のセットアップ…」 would otherwise end at an "how do you want to open
+this file?" shell prompt, or at nothing at all.
 
 Rendering it here keeps the heading structure the guide is written with (the
 alternative — shipping it as ``.txt`` — flattens it) and costs no new

@@ -1,24 +1,26 @@
 """Shared ``post.md`` format contract (external writers ⇄ viewer).
 
 ``post.md`` is written by *external* tools and consumed read-only by
-the viewer (this product ships no writer — see the 切り出し元との関係 notes in
-CLAUDE.md), so the format contract lives here in ``common/`` as the single
-compatibility definition:
+the viewer (this product ships no writer of its own), so the format
+contract lives here in ``common/`` as the single compatibility definition:
 
 - writer side: external tools (out of this repository) that follow the
   public spec in [docs/formats/post-md.md]
 - parser: ``viewer/post_md.py`` (tolerant inverse parse)
 
-This module centralises the pieces the parser must agree on with any writer:
+This module holds only the pieces the parser must agree on with any writer —
+no write operation lives here (a writer builds its own on top of these):
 
-- the meta-line key names (``- post_id:`` … ``- downloaded_at:``),
+- the meta-line key names (``- post_id:`` … ``- downloaded_at:``) and their
+  recommended order,
 - :func:`head_meta`, the boundary-honouring reader that extracts the leading
   meta block of an existing file back into a ``{key: value}`` dict,
 - the *leading meta block* boundary rule itself (:func:`scan_head` /
   :func:`scan_head_lines` returning a :class:`HeadScan` — **the** single
-  implementation, used by the writer-side :func:`patch_meta_lines`, the
-  reader-side :func:`head_meta`, and the viewer's ``post_md.parse_post_md`` /
-  ``post_md.read_post_ref``), and
+  implementation, used by :func:`head_meta`, the viewer's
+  ``post_md.parse_post_md`` / ``post_md.read_post_ref``, and any in-place
+  patcher that must agree with them on where the head ends),
+- the bounded head read (:func:`read_head`), and
 - the markdown link filename encoding (``urllib.parse.quote(..., safe="")``)
   and its inverse.
 
@@ -35,7 +37,7 @@ from urllib.parse import quote as _url_quote
 from urllib.parse import unquote as _url_unquote
 
 # ---------------------------------------------------------------------------
-# Meta-line key names (fixed writer output order — see post_writer.py)
+# Meta-line key names (recommended output order — docs/formats/post-md.md §3)
 # ---------------------------------------------------------------------------
 
 KEY_POST_ID = "post_id"
@@ -69,17 +71,16 @@ META_KEYS_IN_ORDER = (
 # Structural regexes (title / meta block boundary / image refs)
 # ---------------------------------------------------------------------------
 
-#: The ``# {title}`` H1 heading. ``re.MULTILINE`` so the writer can
-#: ``search``/``subn`` whole-file text; per-line ``match`` (viewer) works too.
+#: The ``# {title}`` H1 heading. ``re.MULTILINE`` so whole-file
+#: ``search``/``subn`` works; per-line ``match`` (viewer) works too.
 #:
 #: The whitespace classes are ``[^\S\n]`` (horizontal whitespace) rather than
 #: ``\s`` **on purpose**: ``\s`` matches newlines, so under ``re.MULTILINE``
 #: the trailing ``\s*`` backtracks past the heading's own line break and eats
 #: the blank line that separates the H1 from the meta block.  Per-line
-#: ``match`` callers never noticed, but ``patch_title_heading``'s whole-file
-#: ``subn`` replaced that range wholesale and silently dropped the blank line —
-#: which then made every later ``write_post_text`` see a content difference and
-#: spawn an ``old/`` archive copy for an unchanged post (項目#32).
+#: ``match`` callers never notice, but a whole-file ``subn`` that rewrites the
+#: heading would replace that range wholesale and silently drop the blank
+#: line, changing the file's bytes beyond the heading itself.
 TITLE_LINE_RE = re.compile(r"^#[^\S\n]+(.+?)[^\S\n]*$", re.MULTILINE)
 
 #: Matches any ``- key:`` meta line (key only) for callers that need the key
@@ -101,15 +102,8 @@ META_LINE_RE = re.compile(r"^-\s+([a-z_]+):\s*(.*)$")
 IMG_REF_RE = re.compile(r"!\[[^\]]*\]\(\.\/([^)]+)\)")
 
 # ---------------------------------------------------------------------------
-# Reading an existing post.md back (head_meta + value-level helpers)
+# Value-level helpers
 # ---------------------------------------------------------------------------
-
-#: Removal variant for :func:`strip_downloaded_at` — consumes the trailing
-#: newline too, so stripping the line never leaves a blank line behind.
-#: A deliberate whole-file regex (unlike :func:`head_meta`): the strip is a
-#: byte-compare normalisation, so a stray body line must be removed too or the
-#: comparison stays unequal for a reason the caller can't see.
-_DOWNLOADED_AT_STRIP_RE = re.compile(r"^- downloaded_at:.*\n?", re.MULTILINE)
 
 #: Extracts the creator id from a ``- creator:`` meta *value* ("Name (id)").
 #: The value-level twin the viewer's head scanner uses lives in
@@ -147,64 +141,12 @@ def decode_md_ref(encoded: str) -> str:
     return _url_unquote(encoded)
 
 
-#: Fallback H1 title when a post has no usable title (empty / whitespace-only).
-#: A bare ``# `` heading fails :data:`TITLE_LINE_RE`, which pushes the whole
-#: meta block into the body (2026-08 review 項目8).
-UNTITLED_HEADING = "(無題)"
-
-
-def heading_title(raw: str | None) -> str:
-    """Normalise a post title into a safe single-line H1 heading value.
-
-    The parser (:data:`TITLE_LINE_RE`) requires the ``# `` heading to sit on
-    one line with at least one non-whitespace character; otherwise the
-    leading-meta-block boundary rule folds the entire meta block into the body
-    and every meta reader comes back empty.  Titles from the wild break this
-    in two ways: they can be empty / whitespace-only (a Patreon post may have
-    no title at all), or they can contain embedded line breaks that split
-    ``# {title}`` across lines and orphan the meta block.  Collapse any line
-    break to a space and fall back to :data:`UNTITLED_HEADING` when nothing
-    printable survives.
-
-    The title twin of :func:`meta_value`, and here for the same reason: it is
-    part of the format contract that writer and parser share, not a private
-    nicety of whichever writer happens to exist.
-    """
-    if not raw:
-        return UNTITLED_HEADING
-    # ``splitlines`` covers every Unicode line break (LF / CR / VT / FF /
-    # U+2028 and friends), each of which would break the single-line heading.
-    collapsed = " ".join(raw.splitlines()).strip()
-    return collapsed or UNTITLED_HEADING
-
-
-def meta_value(raw: str | None) -> str:
-    """Normalise a string into a safe single-line meta value.
-
-    The leading meta block is contiguous ``- key: value`` lines by contract
-    (docs/formats/post-md.md §2): a value carrying an embedded line break
-    splits its line in two, so every following meta line is read as body by
-    the parser — and a crafted value like ``"Evil\\n- post_id: 999"`` would
-    even inject a meta line the parser then trusts.  Any writer-side line
-    assembly must therefore collapse line breaks to a space (the parser
-    strips surrounding whitespace anyway; ``splitlines`` covers every Unicode
-    line break).  Lives here in ``common/`` because it is part of the format
-    contract, not a private writer nicety — :func:`patch_meta_lines` applies
-    it itself, and external writers building full files should call it on
-    every value (2026-08 review 項目70; an in-process writer plugin may
-    re-export it).  Idempotent, so double application is harmless.
-    """
-    if not raw:
-        return ""
-    return " ".join(raw.splitlines()).strip()
-
-
 # ---------------------------------------------------------------------------
 # Leading-meta-block boundary rule
 # ---------------------------------------------------------------------------
 
 
-def _split_bom(text: str) -> tuple[str, str]:
+def split_bom(text: str) -> tuple[str, str]:
     """Split a leading UTF-8 BOM off *text*, returning ``(bom, rest)``.
 
     ``post.md`` is a public format written by external tools
@@ -213,13 +155,11 @@ def _split_bom(text: str) -> tuple[str, str]:
     :data:`META_LINE_RE`, which would make :func:`scan_head_lines` stop on
     the very first line and silently demote the whole head to body — the
     viewer parser already guards against exactly this
-    (``viewer/post_md.py::parse_post_md`` — ``text.lstrip("\\ufeff")``, #24),
-    and this module claims the *same* boundary rule, so it must strip it too
-    (レビュー 2026-09-03 項目 #34).
+    (``viewer/post_md.py::parse_post_md`` — ``text.lstrip("\\ufeff")``),
+    and this module claims the *same* boundary rule, so it must strip it too.
 
-    The BOM is returned rather than dropped so writer-side callers
-    (:func:`patch_meta_lines`) can put it back and keep the file's bytes
-    otherwise unchanged.
+    The BOM is returned rather than dropped so a byte-preserving writer can
+    put it back and keep the file's bytes otherwise unchanged.
     """
     rest = text.lstrip("﻿")
     return text[: len(text) - len(rest)], rest
@@ -250,12 +190,12 @@ def scan_head_lines(lines: list[str]) -> HeadScan:
     """Apply the leading-meta-block boundary rule to an already-split file.
 
     **The single implementation of the boundary rule** (docs/formats/post-md.md
-    §2), shared by the writer-side :func:`patch_meta_lines`, the reader-side
-    :func:`head_meta`, and the viewer's ``post_md.parse_post_md`` /
-    ``post_md.read_post_ref``.  Before レビュー 2026-09-03 項目 #111 the same
-    rule was hand-written three times and the copies had already drifted
-    (Unicode line separators / a lone CR were split differently), so a change
-    to the rule had to be made in three places at once.
+    §2), shared by the reader-side :func:`head_meta`, the viewer's
+    ``post_md.parse_post_md`` / ``post_md.read_post_ref``, and any in-place
+    patcher that must agree with them.  Hand-written copies of the same
+    rule drift apart
+    (Unicode line separators / a lone CR end up split differently), so a change
+    to the rule would have to be made in several places at once.
 
     The scan tolerates a single leading ``# title`` H1 (matched by
     :data:`TITLE_LINE_RE`) and blank lines above/around the block, matches
@@ -265,12 +205,13 @@ def scan_head_lines(lines: list[str]) -> HeadScan:
     body) or a deeper ``## sub`` heading is never mistaken for part of the
     meta block.
 
-    *lines* must already have the BOM split off (:func:`_split_bom`) — a
-    leading UTF-8 BOM would match neither regex and stop the scan on line 1
-    (項目 #34).  Each line is ``rstrip``-ed before matching, so CRLF files
+    *lines* must already have the BOM split off (:func:`split_bom`) — a
+    leading UTF-8 BOM would match neither regex and stop the scan on line 1.
+    Each line is ``rstrip``-ed before matching, so CRLF files
     never leak a trailing ``\\r`` into values.  Readers split with
-    :func:`scan_head` (``str.splitlines``); the byte-preserving writer splits
-    on ``"\\n"`` itself and calls this directly — see :func:`patch_meta_lines`.
+    :func:`scan_head` (``str.splitlines``); a byte-preserving writer splits
+    on ``"\\n"`` itself (so a rejoin keeps CRLF / U+2028 verbatim) and calls
+    this directly.
     """
     title = ""
     title_index: int | None = None
@@ -318,7 +259,7 @@ def scan_head(text: str) -> HeadScan:
     The reader-side entry point.  ``splitlines`` — not ``split("\\n")`` — is
     what every reader of this format uses, so a lone ``\\r`` or a Unicode line
     separator (U+2028 / U+2029 / U+0085 / VT / FF) ends a line for all of them
-    alike (項目 #111).  Strip the BOM first (:func:`_split_bom`) when the text
+    alike.  Strip the BOM first (:func:`split_bom`) when the text
     may carry one.
     """
     return scan_head_lines(text.splitlines())
@@ -327,26 +268,25 @@ def scan_head(text: str) -> HeadScan:
 def head_meta(text: str) -> dict[str, str]:
     """Read the leading meta block of *text* back as ``{key: value}``.
 
-    The reader-side counterpart of :func:`patch_meta_lines`, sharing its
-    boundary rule via ``scan_head`` — a ``- plan:`` / ``- posted_at:``
-    look-alike line in the *body* is never picked up, unlike the whole-file
-    ``re.search`` per-key regexes this replaces (2026-08 review 項目67, whose
-    failure mode was "the head lacks the key, the body has a look-alike").
+    The dict-shaped reader of the leading meta block, sharing the boundary
+    rule via ``scan_head`` — a ``- plan:`` / ``- posted_at:``
+    look-alike line in the *body* is never picked up (per-key whole-file
+    ``re.search`` regexes would misread exactly the case "the head lacks
+    the key, the body has a look-alike").
 
     Values are whitespace-stripped (CRLF-safe — the line scan ``rstrip``\\ s
     the ``\\r`` before capturing).  A malformed head that repeats a key keeps
-    the **last** occurrence, matching the viewer parser's judgement (#107) so
+    the **last** occurrence, matching the viewer parser's judgement so
     a reader and the parser can't disagree.  Absent keys are simply absent —
     callers use ``.get(KEY_…)``.
 
-    A leading UTF-8 BOM is stripped before the scan (:func:`_split_bom`), so
+    A leading UTF-8 BOM is stripped before the scan (:func:`split_bom`), so
     a BOM-carrying ``post.md`` reads back the same dict as a plain one — the
-    consumers read the file with plain ``utf-8`` (the viewer and any
-    in-process writer plugin alike), so the BOM would
-    otherwise reach line 1 and empty the whole result (項目 #34).
+    consumers may read the file with plain ``utf-8``, so the BOM would
+    otherwise reach line 1 and empty the whole result.
     """
     meta: dict[str, str] = {}
-    _bom, scan_text = _split_bom(text)
+    _bom, scan_text = split_bom(text)
     for _i, key, value in scan_head(scan_text).meta:
         meta[key] = value.strip()
     return meta
@@ -365,9 +305,9 @@ def read_head(path: Path, limit: int = HEAD_READ_LIMIT) -> str:
     """Read at most *limit* **bytes** from the start of a ``post.md`` and decode.
 
     The bounded counterpart of ``path.read_text()`` for callers that only
-    consume the leading head (:func:`head_meta` / :func:`head_title`).  An
-    unbounded read is a real cost on a library: a bulk rename walks every
-    ``post.md`` in the tree, and post bodies can carry tens of KiB of prose
+    consume the leading head (:func:`head_meta` / :func:`scan_head`).  An
+    unbounded read is a real cost on a library: a library-wide walk touches
+    every ``post.md`` in the tree, and post bodies can carry tens of KiB of prose
     each — over a network share that is the difference between one read of a
     few hundred bytes and pulling the whole library through the wire.
 
@@ -385,179 +325,3 @@ def read_head(path: Path, limit: int = HEAD_READ_LIMIT) -> str:
     """
     with path.open("rb") as fh:
         return fh.read(limit).decode("utf-8-sig", errors="replace")
-
-
-def head_title(text: str) -> str | None:
-    """Return the *leading* H1 heading's text, or ``None`` when there is none.
-
-    The title twin of :func:`head_meta`, sharing the same boundary rule via
-    ``scan_head``.  A whole-file ``TITLE_LINE_RE.search`` would happily pick
-    up a ``# 見出し`` line deep in the *body* of a post that has no heading of
-    its own — exactly the "the head lacks the key, the body has a look-alike"
-    failure the meta side retired in 2026-08 review 項目67.  The viewer parser
-    (``post_md.parse_post_md``) has always taken only the leading H1, so any
-    writer-side reader must agree or the two tools disagree about a post's
-    title.
-
-    A leading UTF-8 BOM is stripped first (:func:`_split_bom`), same as
-    :func:`head_meta`.  A blank heading (``# ``) reads as no title.
-    """
-    _bom, scan_text = _split_bom(text)
-    return scan_head(scan_text).title or None
-
-
-def patch_head_title(text: str, new_title: str) -> str:
-    """Return *text* with its leading H1 replaced by ``# {new_title}``.
-
-    The write-side twin of :func:`head_title`: only the heading line the
-    boundary rule identified as the leading H1 is rewritten, so a post whose
-    body happens to contain a ``# …`` line is left alone instead of having
-    that body line silently retitled.  *text* is returned unchanged when the
-    file has no leading H1 (the caller decides whether that is worth a write).
-
-    Byte-preserving in the same way as :func:`patch_meta_lines`: the split is
-    ``split("\\n")`` (never ``splitlines``) so a CRLF file keeps its ``\\r``
-    terminators, and *new_title* must already be normalised by the caller
-    (an embedded newline would split the heading across lines).
-    """
-    bom, body = _split_bom(text)
-    # See patch_meta_lines: ``split("\n")`` so untouched lines survive
-    # byte-for-byte (``splitlines`` would rewrite \r / U+2028 / … as \n).
-    lines = body.split("\n")
-    idx = scan_head_lines(lines).title_index
-    if idx is None:
-        return text
-    eol_suffix = "\r" if lines[idx].endswith("\r") else ""
-    lines[idx] = f"# {new_title}{eol_suffix}"
-    return bom + "\n".join(lines)
-
-
-def patch_meta_lines(text: str, updates: dict[str, str]) -> str:
-    """Return *text* with the given ``- key: value`` meta lines refreshed.
-
-    Used to refresh selected meta values (favorites / plan / price) on an
-    existing ``post.md`` **without** rewriting the body — the lock-regression
-    path needs to keep the previously-downloaded body intact while still
-    surfacing the latest post-level metadata.
-
-    For each ``key`` in *updates*: if a ``- key:`` line already exists, its
-    value is replaced in place (no line reordering — and in a malformed head
-    that repeats the key, *every* occurrence is refreshed so a first-match
-    reader and a last-match reader can't disagree); if it's absent, the line
-    is inserted right after the last existing meta line (so older ``post.md``
-    files that predate a meta field still gain it).  Values are passed through
-    :func:`meta_value` (line breaks collapsed to a space — 項目70), so a value
-    from an unconstrained source can never split its line and push the
-    following meta lines into the body.  Rewritten and inserted
-    lines keep the file's dominant EOL (LF or CRLF — both are allowed by the
-    spec), so a CRLF file never gains mixed line endings.  The title, body,
-    and any meta line not named in *updates* (notably ``- locked_contents:``,
-    which the lock-regression guard must keep at its lower recorded value) are
-    left byte-for-byte unchanged.
-
-    Only the *leading* meta block is considered, via ``scan_head_lines`` —
-    the **same boundary rule** the viewer parser
-    (``viewer/post_md.py::parse_post_md``) and the reader-side
-    :func:`head_meta` use.  All sides therefore agree on where the head ends,
-    so a body-level markdown list item (``- 補足: …``) or a deeper ``## sub``
-    heading is never mistaken for part of the meta block — a missing key is
-    inserted after the leading block, never into the body, and the refreshed
-    value is exactly what the parser reads back.
-    """
-    if not updates:
-        return text
-    # A leading UTF-8 BOM would match neither the title nor the meta regex,
-    # so the scan must not see it; it is put back verbatim on the way out so
-    # the file keeps its bytes (項目 #34 — same rule as :func:`head_meta` and
-    # the viewer parser).
-    bom, text = _split_bom(text)
-    # NOTE: ``split("\n")``, deliberately — NOT the readers' ``splitlines``.
-    # This function rebuilds the file with ``"\n".join`` and promises the
-    # untouched lines survive byte-for-byte; ``splitlines`` also breaks on
-    # ``\r`` / U+2028 / U+2029 / U+0085 / VT / FF, so rejoining would rewrite
-    # every one of them as ``\n`` — turning a CRLF ``post.md`` wholesale into
-    # LF, which is exactly the "the content changed" false positive the EOL
-    # handling below exists to avoid.  The *boundary rule* is still the shared
-    # one (:func:`scan_head_lines`); only the split differs, and only here
-    # (レビュー 2026-09-03 項目 #111).
-    lines = text.split("\n")
-    # Split/join on ``\n`` keeps each CRLF line's trailing ``\r`` inside the
-    # line, so a replaced / inserted line must carry the same terminator or the
-    # file ends up with mixed EOLs (the spec allows CRLF —
-    # [docs/formats/post-md.md] §1).  Mixed EOLs make an otherwise-unchanged
-    # file compare unequal byte-wise for external writers' "did the content
-    # change?" checks, provoking needless archival.
-    crlf = text.count("\r\n")
-    eol_suffix = "\r" if crlf > text.count("\n") - crlf else ""
-    #: key → **every** line index it occurs at.  A malformed head that repeats
-    #: a key is rewritten at all of them, because a reader that stops at the
-    #: first occurrence and the parser (which keeps the last —
-    #: ``viewer/post_md.py`` / :func:`head_meta`) would otherwise disagree.
-    #: Writing only the first would leave the parser reading the stale later
-    #: line, breaking this function's "the refreshed value is exactly what the
-    #: parser reads back" guarantee (#107).
-    key_to_idx: dict[str, list[int]] = {}
-    last_meta = -1
-    for i, key, _value in scan_head_lines(lines).meta:
-        last_meta = i
-        key_to_idx.setdefault(key, []).append(i)
-    to_insert: list[str] = []
-    for key, value in updates.items():
-        # meta_value: a value with an embedded newline would split its line in
-        # two, pushing every following meta line into the body (and letting a
-        # crafted value inject meta lines) — 項目70.
-        new_line = f"- {key}: {meta_value(value)}{eol_suffix}"
-        idxs = key_to_idx.get(key)
-        if idxs:
-            for idx in idxs:
-                lines[idx] = new_line
-        else:
-            to_insert.append(new_line)
-    # Insert any missing keys as a block after the last meta line. When the
-    # file has no meta block at all (unexpected), skip insertion rather than
-    # risk corrupting the body.
-    if to_insert and last_meta >= 0:
-        lines[last_meta + 1:last_meta + 1] = to_insert
-    return bom + "\n".join(lines)
-
-
-def strip_downloaded_at(text: str) -> str:
-    """Return *text* with the ``- downloaded_at:`` line removed.
-
-    The download timestamp changes on every run, so it must be excluded when
-    comparing an old vs new ``post.md`` to decide whether the content really
-    changed (and thus whether the old copy is worth archiving).
-
-    The whole line *including its newline* is removed — leaving an empty
-    line would make an otherwise-identical file written by an old snappix
-    version (no ``- downloaded_at:`` line at all) compare unequal and
-    trigger one spurious ``old/<date>`` archival.
-    """
-    return _DOWNLOADED_AT_STRIP_RE.sub("", text)
-
-
-def render_head(title: str, meta: dict[str, str]) -> list[str]:
-    """Build the leading ``# title`` + meta block of a ``post.md``, as lines.
-
-    The format contract's order (docs/formats/post-md.md §2) is
-    :data:`META_KEYS_IN_ORDER`, and every value goes through
-    :func:`meta_value` — a value carrying an embedded line break splits its
-    line in two and pushes every following meta line into the body.  Both
-    rules live here rather than in a writer, so a second writer cannot ship
-    its own order or forget the normalisation.
-
-    *meta* may omit keys; an absent key still gets its line, with an empty
-    value (the parser reads a missing line and an empty one the same way, and
-    a fixed shape keeps ``patch_meta_lines`` able to refresh any key in place
-    later).  Unknown keys are ignored — the block is the declared set.
-
-    The returned list ends with a blank line, so ``"\n".join(lines)`` can be
-    followed directly by the body.
-    """
-    lines = [f"# {heading_title(title)}", ""]
-    lines += [
-        f"- {key}: {meta_value(meta.get(key, ''))}"
-        for key in META_KEYS_IN_ORDER
-    ]
-    lines.append("")
-    return lines

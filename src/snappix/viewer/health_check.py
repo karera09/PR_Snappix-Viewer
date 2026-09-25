@@ -25,7 +25,7 @@ Detected categories (:data:`CATEGORY_ORDER`):
 * ``unreadable`` — a folder whose one-level scan raised ``OSError`` (access
   denied, an offline NAS share, a disconnected mount…).  Informational only:
   it tells the user that this subtree went **uninspected**, so a clean report
-  can be distinguished from "could not look" (#171).
+  can be distinguished from "could not look".
 
 Each problem is a :class:`HealthIssue`.  When the problem sits inside a
 post folder whose ``post.md`` carries a postref (service / post_id /
@@ -113,13 +113,13 @@ def category_explanation(category: str) -> str:
     """The one-line explanation for *category* (see :func:`category_label`)."""
     return t(_CATEGORY_EXPLANATION_KEYS[category])
 
-#: Categories that are **informational only** — no problem, no delete action
-#: (J04/J05).  ``old_bloat`` merely reports the size of an incremental-sync
+#: Categories that are **informational only** — no problem, no delete action.
+#: ``old_bloat`` merely reports the size of an incremental-sync
 #: shelter; ``missing_post_md`` merely notes a folder that has no ``post.md``
-#: — which is the *normal* state for a plain image library ("post.md が無い状態
-#: が基本", per the root CLAUDE.md), so flagging it as a problem would report
+#: — which is the *normal* state for a plain image library (post.md is
+#: optional by design), so flagging it as a problem would report
 #: nearly every folder of an ordinary library as broken.  ``unreadable``
-#: (#171) merely reports that a subtree could not be inspected — nothing there
+#: merely reports that a subtree could not be inspected — nothing there
 #: is known to be broken, and there is nothing to delete.  The dialog counts
 #: these separately from real problems and badges them 「情報」 so neither a big
 #: ``old/`` nor a post.md-less folder inflates the problem count.
@@ -211,15 +211,15 @@ class HealthIssue:
     the ``old/`` total) or ``None`` when size is not meaningful.  ``postref``
     is set when the problem sits inside a post folder whose ``post.md`` carries
     a postref (context only — which service/post the problem belongs to).
-    ``mtime`` is the scan-time ``st_mtime`` of a **file** issue (``part`` /
-    ``zero_byte``; ``None`` for folder issues and on stat error), taken from
+    ``mtime`` is the scan-time ``st_mtime`` of a **file** finding (``part`` /
+    ``zero_byte``; ``None`` for folder findings and on stat error), taken from
     the same cached ``DirEntry.stat`` as ``size``: the report is a scan-time
     snapshot, so a bulk delete re-checks ``(size, mtime)`` right before
     ``os.remove`` and skips a file that changed since.  A file being actively
     written (an in-process writer plugin, or an external tool) must never
     be deleted mid-download — and a download's output file is 0 bytes for as
     long as it takes the first byte to arrive, so the zero-byte category needs
-    the same snapshot the ``.part`` one does (項目#172).
+    the same snapshot the ``.part`` one does.
     """
 
     category: str
@@ -227,7 +227,7 @@ class HealthIssue:
     detail: str = ""
     size: int | None = None
     postref: PostRef | None = None
-    #: Scan-time ``st_mtime`` of a file issue (``None`` for folder issues /
+    #: Scan-time ``st_mtime`` of a file finding (``None`` for folder findings /
     #: on stat error).
     mtime: float | None = None
 
@@ -243,14 +243,13 @@ class HealthReport:
     scanned_folders: int = 0
     #: True when the scanned tree holds at least one ``post.md`` anywhere
     #: (``old/`` shelters excluded).  The dialog uses this to fold the
-    #: 「post.md 欠落」 category for post.md-less libraries (UIレビュー 07-25
-    #: #18).  Filled from the walk's own post-order fold (no second walker);
+    #: 「post.md 欠落」 category for post.md-less libraries.  Filled from the walk's own post-order fold (no second walker);
     #: defaults to **True** = "do not suppress" so a cancelled / failed scan
     #: never hides the category by accident.
     library_has_post_md: bool = True
 
     def counts(self) -> dict[str, int]:
-        """Issue count per category id (categories with 0 included)."""
+        """Finding count per category id (categories with 0 included)."""
         out = {cat: 0 for cat in CATEGORY_ORDER}
         for issue in self.issues:
             out[issue.category] = out.get(issue.category, 0) + 1
@@ -313,14 +312,13 @@ def _read_postref(md_path: Path) -> PostRef | None:
 class _RefScope:
     """The postref scope of a folder: nearest ``post.md`` + enclosing scopes.
 
-    A lazy stand-in for the eagerly-read ``PostRef`` the walk used to carry
-    (項目#75): ``HealthIssue.postref`` is context-only, so reading every
-    ``post.md`` up front made even a perfectly clean library pay one
-    open+read per post folder (+70% scan time measured on local SSD, worse
-    on NAS).  The walk now just remembers *which file would answer* and the
-    chain to fall back through (a ``post.md`` head without a valid postref
-    defers to the nearest ancestor's, matching the old ``… or inherited_ref``
-    behaviour); the read happens only when an issue is actually yielded
+    A lazy stand-in for an eagerly-read ``PostRef``: ``HealthIssue.postref``
+    is context-only, so reading every ``post.md`` up front would make even a
+    perfectly clean library pay one open+read per post folder (+70% scan time
+    measured on local SSD, worse on NAS).  The walk just remembers *which file
+    would answer* and the chain to fall back through (a ``post.md`` head
+    without a valid postref defers to the nearest ancestor's); the read
+    happens only when a finding is actually yielded
     inside the scope, memoised per file by :func:`iter_issues`.
     """
 
@@ -338,10 +336,10 @@ class _FolderScan:
     #: ``(path, size, mtime)`` per regular file, size and mtime taken from the
     #: ``scandir`` ``DirEntry.stat`` (already cached by the OS enumeration — 0
     #: extra syscalls) so the per-file categories never re-``stat`` each file
-    #: with a second ``Path.stat`` (review 2026-08-27 #76).  Size is ``-1`` and
+    #: with a second ``Path.stat``.  Size is ``-1`` and
     #: mtime ``None`` when the entry's stat failed (won't match the ``== 0``
     #: zero-byte test).  The mtime rides along for the ``part`` issues' bulk
-    #: delete re-check (項目#172).
+    #: delete re-check.
     files: list[tuple[Path, int, float | None]] = field(default_factory=list)
     subdirs: list[Path] = field(default_factory=list)
     has_post_md: bool = False
@@ -358,7 +356,7 @@ class _FolderScan:
     #: Link entries (symlink / junction) that point at a *directory*.  Kept
     #: apart from ``has_other_entries`` so the walk can say "this subtree went
     #: uninspected" instead of passing it off as nothing: the walk deliberately
-    #: does not descend through them (#108 — the bulk empty-folder delete
+    #: does not descend through them (the bulk empty-folder delete
     #: ``rmtree``\\s a junction's **target**), which would otherwise make a
     #: report read "no problems found" for a creator folder the user moved to
     #: another drive.
@@ -395,8 +393,8 @@ def _scan_folder(folder: Path) -> _FolderScan:
                 # ``is_dir(follow_symlinks=False)`` as **True**, so it must be
                 # detected explicitly *before* the directory branch — otherwise a
                 # folder holding only link structure is walked as empty subdirs
-                # and the bulk 空フォルダ delete rmtree's the user's links away
-                # (#108 / review 2026-08-27 #2).  Treat it as real content: not a
+                # and the bulk 空フォルダ delete rmtree's the user's links away.
+                # Treat it as real content: not a
                 # file for the per-file categories, but the folder is *not* empty.
                 out.has_other_entries = True
                 # A link to a *directory* also hides a whole subtree from the
@@ -418,7 +416,7 @@ def _scan_folder(folder: Path) -> _FolderScan:
                 except OSError:
                     # unknown; won't match the ==0 zero-byte test, and the
                     # part re-check treats an unknown snapshot as "can't
-                    # prove unchanged" (skip, never delete — 項目#172).
+                    # prove unchanged" (skip, never delete).
                     size, mtime = -1, None
                 out.files.append((p, size, mtime))
                 # Case-insensitive, matching folder_scan's post.md detection.
@@ -430,7 +428,7 @@ def _scan_folder(folder: Path) -> _FolderScan:
                 # (both are ``follow_symlinks=False``).  It is not a file for
                 # the per-file categories, but the folder is *not* empty —
                 # flagging it would let the bulk 空フォルダ delete rmtree the
-                # user's link構成 away (#108).
+                # user's link構成 away.
                 out.has_other_entries = True
         except OSError:
             # Unknown entry kind → err on the side of "not empty" so we never
@@ -447,7 +445,7 @@ def dir_has_any_file(folder: Path) -> bool:
     reuses the same one-level scandir + child fold-in shape as
     :func:`iter_issues` so the emptiness semantics stay identical: an
     unreadable folder counts as non-empty (we must not rmtree what we cannot
-    inspect), a symlink / junction entry likewise counts as non-empty (#108),
+    inspect), a symlink / junction entry likewise counts as non-empty,
     and ``old/`` shelters count toward their parent's emptiness just
     like every other subfolder.
 
@@ -467,7 +465,7 @@ def dir_has_any_file(folder: Path) -> bool:
     他の ``OSError`` は ``True``（＝見に行けないものは消さない）。
 
     No cycle guard: ``_scan_folder`` never puts a link into ``subdirs`` (links
-    are content, not a descent path — #108), and a directory cannot be
+    are content, not a descent path), and a directory cannot be
     hard-linked, so ``subdirs`` cannot reach the same real directory twice.
     Re-admitting links here means restoring the ``dir_identity`` dedupe with
     them.
@@ -510,27 +508,27 @@ def iter_issues(
 
     ``old/`` shelters are walked by the same traversal as everything else
     (sharing the cycle guard, the cancel polling and ``_scan_folder``'s entry
-    classification — 項目#71), but their contents are intentionally-shelved
+    classification), but their contents are intentionally-shelved
     history, not live post content: inside a shelter the per-file categories
     and the folder verdicts (``empty_folder`` / ``missing_post_md``) are
     suppressed, and only the aggregate file size is folded up post-order to
     the shelter root, where the ``old_bloat`` verdict is emitted.  The scan
-    **root** is exempt (#109): when the user explicitly points the check at an
+    **root** is exempt: when the user explicitly points the check at an
     ``old/`` folder they want its leftovers inspected.  A folder named ``old``
     is a shelter only when its **immediate parent carries a ``post.md``** —
     that is the incremental-sync convention this compatibility rule reads
     (the shelter is created as ``<post folder>/old/``).  In a plain image
     library (the product default: post.md is optional) the user's own
     ``写真/old/`` is an ordinary folder and its ``.part`` / zero-byte / empty
-    subfolders are reported normally — レビュー 2026-09-03 項目 #104.
+    subfolders are reported normally.
 
     A folder whose one-level scan failed (``OSError``) is reported as an
-    informational ``unreadable`` issue (#171) — a clean report must be
+    informational ``unreadable`` finding — a clean report must be
     distinguishable from "could not look" — and still counts as non-empty.
 
     ``on_root_facts`` is invoked once, at the root's post-order visit, with
     "does the tree hold any ``post.md``" (``old/`` excluded) — a fact the fold
-    already computes, exported so the dialog needs no second walker (項目#71).
+    already computes, exported so the dialog needs no second walker.
     Not invoked when the walk is cancelled before the root completes.
 
     Traversal is **post-order** so each directory's ``os.scandir`` runs exactly
@@ -542,8 +540,8 @@ def iter_issues(
     only the folder-level verdicts wait for the children to report back.
     """
     scanned = 0
-    # Lazy postref resolution (項目#75): scopes name the ``post.md`` that
-    # *would* answer; the bounded head read runs only when an issue inside the
+    # Lazy postref resolution: scopes name the ``post.md`` that
+    # *would* answer; the bounded head read runs only when a finding inside the
     # scope is actually yielded, at most once per file (memoised here).
     ref_cache: dict[Path, PostRef | None] = {}
 
@@ -572,8 +570,8 @@ def iter_issues(
         #: True when a *strict* ancestor carries a ``post.md`` — a content
         #: subfolder beneath a post folder is a legitimate layout
         #: (docs/formats/post-md.md §1: post.md sits at the post root, media may
-        #: live in subfolders), so it must not be flagged missing_post_md
-        #: (review 2026-08-27 #73).  Distinct from ``scope``, which may resolve
+        #: live in subfolders), so it must not be flagged missing_post_md.
+        #: Distinct from ``scope``, which may resolve
         #: to None when the ancestor's post.md carries no valid postref even
         #: though the file exists.
         ancestor_has_md: bool
@@ -587,7 +585,7 @@ def iter_issues(
 
     stack: list[_Frame] = [_Frame(root, None, False, False, False, None)]
     # No cycle guard here: ``_scan_folder`` classifies every symlink / junction
-    # as content and never adds it to ``subdirs`` (#108 — the bulk empty-folder
+    # as content and never adds it to ``subdirs`` (the bulk empty-folder
     # delete would rmtree a junction's target), and a directory cannot be
     # hard-linked, so the descent can never reach the same real directory by
     # two names.  Paying a ``dir_identity`` stat per subdirectory to dedupe a
@@ -671,7 +669,7 @@ def iter_issues(
             # missing post.md: content-bearing folder with no post.md here, no
             # post.md in any descendant (else it's a container of posts), and no
             # post.md in any ancestor (else it's a media subfolder of a post —
-            # a legitimate layout, review 2026-08-27 #73).
+            # a legitimate layout).
             if (
                 not has_md_here
                 and content_here
@@ -710,14 +708,14 @@ def iter_issues(
 
         # old/ shelter boundary — case-insensitive, matching post.md detection
         # (on Windows an "Old/" / "OLD/" shelter is the same folder).  The scan
-        # root is exempt (#109; see the docstring).  ``parent_has_md`` is what
+        # root is exempt (see the docstring).  ``parent_has_md`` is what
         # makes this an actual writer-side shelter rather than a folder the user
         # happened to name "old": the incremental-sync convention puts the
         # shelter directly under a **post folder**.
         # Without that condition, a plain image library — the product's default,
-        # since post.md is optional — had every ``.part`` / zero-byte /
-        # empty-folder issue under the user's own ``写真/old/`` silently dropped
-        # (レビュー 2026-09-03 項目 #104).
+        # since post.md is optional — would have every ``.part`` / zero-byte /
+        # empty-folder finding under the user's own ``写真/old/`` silently
+        # dropped.
         if (
             old_root is None
             and folder.name.lower() == OLD_DIR_NAME
@@ -731,13 +729,13 @@ def iter_issues(
 
         # The postref scope for problems inside this folder: a post.md here
         # wins, otherwise inherit the nearest ancestor's.  The file is NOT
-        # read here (項目#75) — ``_resolve_ref`` reads it lazily at the first
-        # issue yielded inside the scope, so a clean library reads nothing.
+        # read here — ``_resolve_ref`` reads it lazily at the first
+        # finding yielded inside the scope, so a clean library reads nothing.
         folder_scope = inherited_scope
         if scan.post_md_path is not None:
             folder_scope = _RefScope(scan.post_md_path, inherited_scope)
 
-        # A folder we could not (fully) enumerate: surface the fact (#171) —
+        # A folder we could not (fully) enumerate: surface the fact —
         # informational, no delete action — instead of silently passing an
         # uninspected subtree off as clean.
         if scan.unreadable:
@@ -750,7 +748,7 @@ def iter_issues(
             )
 
         # A junction / symlink to a directory is content we deliberately do
-        # not walk through (#108), so its subtree is uninspected in exactly
+        # not walk through, so its subtree is uninspected in exactly
         # the sense ``unreadable`` exists to report: without this row a
         # library whose creator folders were offloaded to another drive and
         # linked back reads as 「問題は見つかりませんでした」.  Informational,
@@ -767,7 +765,7 @@ def iter_issues(
         if in_old:
             # Shelved history: no per-file issues, only the size (folded up to
             # the shelter root's old_bloat verdict in post-order).  Sizes come
-            # from the scandir DirEntry (review 2026-08-27 #76) — no re-stat.
+            # from the scandir DirEntry — no re-stat.
             size = 0
             for _f, fsize, _fmtime in scan.files:
                 if fsize > 0:
@@ -778,7 +776,7 @@ def iter_issues(
             # Sizes come from the ``scandir`` DirEntry captured in
             # ``_scan_folder`` (already cached by the OS enumeration), so
             # neither the .part nor the zero-byte verdict re-``stat``s the
-            # file (review 2026-08-27 #76).
+            # file.
             for f, fsize, fmtime in scan.files:
                 if f.suffix.lower() == PART_SUFFIX:
                     yield HealthIssue(
@@ -813,7 +811,7 @@ def iter_issues(
         # post-order frame and descend (children inherit postref scope).
         # An unreadable folder counts as "has file" so it's never flagged empty
         # (we couldn't inspect it), matching the old _dir_has_any_file guard.
-        # A symlink / junction likewise keeps its folder non-empty (#108).
+        # A symlink / junction likewise keeps its folder non-empty.
         own_has_file[folder] = (
             bool(scan.files) or scan.unreadable or scan.has_other_entries
         )
@@ -830,7 +828,7 @@ def iter_issues(
         )
         # Children see this folder as an ancestor: a post.md *here* means every
         # descendant is a media subfolder of this post, not a missing-post_md
-        # anomaly (review 2026-08-27 #73).
+        # anomaly.
         child_ancestor_has_md = ancestor_has_md or scan.has_post_md
         for sub in scan.subdirs:
             stack.append(
@@ -882,12 +880,12 @@ def _wrap_progress(
 
 
 def paths_for_category(issues: list[HealthIssue], category: str) -> list[Path]:
-    """*category* の issue が指すパス（重複排除・順序維持）。
+    """*category* の検出行が指すパス（重複排除・順序維持）。
 
-    (UIレビュー07-25 追修) 「重複排除して出現順を保つ」という規約の唯一の
-    実装。:func:`deletable_paths` と、ダイアログの ``zero_byte`` 一括削除
-    （#87 で追加。:func:`deletable_paths` の対象外なので直接こちらを使う）が
-    共有する — 以前はダイアログ側が同じループを書き写していた。
+    「重複排除して出現順を保つ」という規約の唯一の実装。
+    :func:`deletable_paths` と、ダイアログの ``zero_byte`` 一括削除
+    （:func:`deletable_paths` の対象外なので直接こちらを使う）が共有する —
+    ダイアログ側に同じループを書き写さない。
     """
     seen: set[Path] = set()
     out: list[Path] = []
@@ -908,7 +906,7 @@ def deletable_paths(issues: list[HealthIssue], category: str) -> list[Path]:
     ``shutil.rmtree``) are answered here; any other category returns an empty
     list.  ``old_bloat`` intentionally has no delete action and
     missing-post_md is a per-row decision.  ``zero_byte`` も一括削除自体は
-    持つ（UIレビュー 07-25 #87）が、削除直前に「走査後に中身が書かれたか」を
+    持つが、削除直前に「走査後に中身が書かれたか」を
     再確認する別扱いなので、この関数ではなく :func:`paths_for_category` を
     直接使う（``health_dialog._deletable_for`` が振り分ける）。
     De-duplicated, order-preserving.

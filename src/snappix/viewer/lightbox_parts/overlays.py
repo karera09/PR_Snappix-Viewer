@@ -106,7 +106,7 @@ class _CounterOverlay(OverlayPill):
 
     **自動消灯は使わない**: 基底の ``present()`` はタイマーを起動するので、
     常設面であるこのピルは :meth:`set_info` で ``show`` / ``raise_`` を自分で
-    行う（``present`` を呼ぶと 1 秒台で消える回帰になる）。
+    行う（``present`` を呼ぶと 1 秒台で消えてしまう）。
     """
 
     #: 左右の画面端から空ける量（:meth:`LightboxWindow._position_counter` と共有）。

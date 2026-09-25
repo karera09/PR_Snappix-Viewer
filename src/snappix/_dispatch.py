@@ -7,7 +7,7 @@ viewer — this indirection exists so argument handling / windowed-build error
 logging live in exactly one place.
 
 Two ways to point the viewer at a folder are accepted, so Explorer's native
-gestures work (L02):
+gestures work:
 
 * ``--root <path>`` — the explicit flag (used by the dev launcher / tests).
 * a bare positional ``<path>`` — what Windows passes when a folder is dropped
@@ -65,7 +65,7 @@ def parse_viewer_args() -> argparse.Namespace:
     # frozen windowed builds launched without a console).
     parser.add_argument("--no-plugins", action="store_true", default=False)
     # Positional fallback for Explorer folder-drop / file association / shell
-    # verb (L02).  Distinct dest from ``--root`` so both can coexist; ``run()``
+    # verb.  Distinct dest from ``--root`` so both can coexist; ``run()``
     # prefers the explicit flag when both are supplied.
     parser.add_argument("root_pos", nargs="?", default=None)
     try:

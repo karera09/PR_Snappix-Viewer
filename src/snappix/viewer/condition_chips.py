@@ -11,6 +11,8 @@
 * :func:`rows` — AI パック帰属の行フィルタを掛けた表
 * :func:`chips` — 表 → 描くチップ列（:class:`ChipSpec`）
 * :func:`visible_chips` / :func:`summary_text` / :func:`chips_that_fit`
+* :func:`state_from_payload` — 保存した検索のペイロード → 観測値（保存検索の
+  要約 ``describe_search_payload`` がライブと**同じ表**を通るための入口）
 
 だけを持つ。``PostGrid`` 側は観測値を束ねて渡し、返った ``key`` を
 :data:`ACTION_IDS` のコールバック表で自分の ``_clear_dim_*`` へ戻すだけの層に
@@ -30,13 +32,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import math
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import Any, NamedTuple, TypeVar
 
 from ..common.i18n import t
+from .advanced_search_parts.query import AiQuery, query_mode
 from .filter_predicates import FilterBarCriteria
-from .search_dimensions import chip_text
+from .filter_query import _parse_query, strip_owned_control_tokens
+from .search_dimensions import (
+    DEFAULT_TAG_THRESHOLD,
+    chip_text,
+    payload_key,
+    token_fields,
+    value_label,
+)
 from .search_dimensions import get as _dim_get
 
 __all__ = [
@@ -50,7 +61,9 @@ __all__ = [
     "chips",
     "chips_that_fit",
     "engaged_keys",
+    "payload_num",
     "rows",
+    "state_from_payload",
     "summary_text",
     "visible_chips",
 ]
@@ -405,3 +418,127 @@ def chips_that_fit(
             break
         used, keep = nxt, keep + 1
     return keep
+
+
+# ------------------------------------------------ 保存した検索のペイロード
+
+_NumT = TypeVar("_NumT", int, float)
+
+
+def payload_num(value: object, cast: Callable[[Any], _NumT]) -> _NumT | None:
+    """壊れたペイロードの数値を ``None`` へ落とす（その軸だけ省くため）。
+
+    ``deserialize_search_snapshot`` は setattr を ``try``/``except`` で包んで
+    「新ビルド / 手編集の値でも raise しない」を契約として宣言しているので、
+    同じ dict を読む :func:`state_from_payload` の ``float`` / ``int`` も同じ
+    寛容さで読む（無保護だと、保存した検索の一覧・ツールチップ・既定名を作る
+    3 面がまとめて例外で落ちる）。``shared_prefs`` は 2 インスタンスから書かれ
+    得るので、読み手を寛容にするのが正しい方向 — 落とすのは**その軸のチップ
+    だけ**で、名前と残りの条件は見えたままにする。
+    """
+    if value is None:
+        return None
+    try:
+        return cast(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _payload_choice(data: Mapping, dim_id: str) -> str:
+    """コンボ軸の保存値。未知値（手編集 / 新ビルド）は中立へ落とす。
+
+    ラベルを引けない値でチップを立てると「軸名だけのチップ」になる — 旧要約
+    がそうしていたとおり、その軸を省く。
+    """
+    dim = _dim_get(dim_id)
+    neutral = (dim.neutral if dim is not None else None) or "all"
+    stored = str(data.get(payload_key(dim_id), neutral) or neutral)
+    return stored if value_label(dim_id, stored) is not None else neutral
+
+
+def state_from_payload(
+    data: Mapping, *, ai_available: bool, floor: float | None = None,
+) -> ConditionState:
+    """保存した検索のペイロード → :class:`ConditionState`.
+
+    保存検索の要約（``describe_search_payload``）はウィジェットもストアも
+    触らない純関数である必要がある（別ライブラリで保存した検索にも使う）ので、
+    ライブの ``PostGrid._condition_state`` と同じ観測値をペイロードだけから
+    組む。これで要約は :func:`chips` を通り、AI 軸の可用性ゲート（:func:`rows`）
+    ・絞り込み欄からの次元トークン除去・母集合 scope・行順がライブと同じ表から
+    出る — 手書きの要約が軸ごとに規則を写し損ねる形（ゲート欠落・``type:`` の
+    二重表示・AI 中の範囲チップ）を構造的に作れない。
+
+    ペイロードだけでは知り得ない値の扱い:
+
+    * tags.db の有無 — *ai_available* を代理にする（AI タグ語か年齢区分が
+      あれば ``"tags"``、種別が all / image 以外なら ``"media"``）。意味検索は
+      保存しない（``serialize_search_snapshot``）ので現れない。
+    * 精度の中立点 — 記録 floor は tags.db 側の値なので、*floor* を渡せる
+      呼び出し側だけが判定できる。渡せなければ ``+inf``（精度チップを出さない）。
+    * コンボの表示文字列 — 台帳の値ラベル（:func:`~.search_dimensions.
+      value_label`）。
+    """
+    rating = _payload_choice(data, "rating")
+    ai_media = _payload_choice(data, "ai_media")
+    ai_text = str(data.get(payload_key("ai_tags"), "") or "").strip()
+    mode = (
+        query_mode(
+            AiQuery(
+                text=ai_text, enabled=True, media_type=ai_media,
+                rating_key=rating,
+            ),
+            has_tag_index=True,
+        )
+        if ai_available else None
+    )
+    includes, excludes = _parse_query(ai_text)
+    if not bool(data.get(payload_key("ai_unit", 0), True)):
+        unit = "file"
+    elif not bool(data.get(payload_key("ai_unit", 1), True)):
+        unit = "folder_strict"
+    else:
+        unit = "folder_coverage"
+    threshold = payload_num(data.get(payload_key("ai_precision")), float)
+    media = _payload_choice(data, "media")
+    date = _payload_choice(data, "date")
+    # 絞り込み欄は「自分の次元チップを持つトークン」を除いた残りだけ
+    # （ライブの ``_plain_filter_label`` と同じ台帳から引く。AI 帰属の
+    # ``rating:`` / ``score:`` はパックが無ければコントロールへ届かないので
+    # 残す）。
+    owned = {tok.field for tok in token_fields(ai=ai_available) if tok.control}
+    filter_text = str(data.get(payload_key("filter"), "") or "").strip()
+    return ConditionState(
+        bar=FilterBarCriteria(
+            media=media,
+            star_min=max(
+                0, payload_num(data.get(payload_key("star"), 0) or 0, int) or 0,
+            ),
+            later=bool(data.get(payload_key("later"))),
+            user_tag=str(data.get(payload_key("usertag"), "") or "").strip(),
+            recursive=bool(data.get(payload_key("recursive"))),
+            rating=rating,
+            date_preset=date,
+            locked_only=bool(data.get(payload_key("locked"))),
+        ),
+        ai_available=ai_available,
+        query_mode=mode,
+        ai_includes=tuple(includes),
+        ai_excludes=tuple(excludes),
+        tag_threshold=(
+            threshold if threshold is not None else DEFAULT_TAG_THRESHOLD
+        ),
+        precision_neutral=(
+            max(float(floor), DEFAULT_TAG_THRESHOLD)
+            if floor is not None else math.inf
+        ),
+        display_unit=unit,
+        ai_media=ai_media,
+        plain_filter=strip_owned_control_tokens(filter_text, owned),
+        rating_label=value_label("rating", rating) or "",
+        media_label=value_label("media", media) or "",
+        date_label=value_label("date", date) or "",
+        unit_label=value_label("ai_unit", unit) or "",
+        ai_media_label=value_label("ai_media", ai_media) or "",
+        view_scope="advanced" if mode is not None else "plain",
+    )

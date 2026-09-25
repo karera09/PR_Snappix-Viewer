@@ -131,7 +131,7 @@ _SLIDESHOW_VIDEO_SLACK_MS = 3000
 
 
 class MediaResume(NamedTuple):
-    """動画の再生位置の引き継ぎ 1 件（中央プレビュー ⇄ 全画面の往復。N-142）.
+    """動画の再生位置の引き継ぎ 1 件（中央プレビュー ⇄ 全画面の往復）.
 
     ``position_ms`` の ``0`` は番兵ではなく「先頭へ戻す」という正当な位置で、
     「引き継ぎ無し」は**値そのものが無いこと**（``Pending`` が armed でない /
@@ -155,9 +155,11 @@ class LightboxWindow(QWidget):
     に委譲する。
     """
 
-    #: 閉じたとき (folder: Path | None, image: Path | None) — メインウィンドウが
-    #: 最後に見ていた投稿/ファイルへ選択を追従させる。
-    closed = Signal(object, object)
+    #: 閉じたとき (folder: Path | None, image: Path | None, crossed: bool) —
+    #: メインウィンドウが最後に見ていた投稿/ファイルへ選択を追従させる。
+    #: *crossed* は閉じたときのフォルダが入場フォルダと違うか（投稿横断、または
+    #: 検索結果の確定プレイリストで別フォルダのファイルへ進んだ）。
+    closed = Signal(object, object, bool)
     #: 投稿横断遷移が確定したとき (folder, 最初に表示した画像)。
     post_changed = Signal(Path, Path)
     #: 数字キー 0–5 が押されたとき (star, 対象の現在ファイル)。ホストが
@@ -174,13 +176,13 @@ class LightboxWindow(QWidget):
     #: 遅延生成した MediaView の音量スライダをユーザーが動かしたとき (0–100)。
     #: ホストが ``ViewerState.media_volume`` へ永続化する（同上）。
     media_volume_changed = Signal(int)
-    #: 再生速度 (N-136) — loop / volume と同じ再送出。
+    #: 再生速度 — loop / volume と同じ再送出。
     media_playback_rate_changed = Signal(float)
     #: 内部 ImageView の右クリックメニューで「ズーム維持」を切り替えたとき。
     #: ホストが ``ViewerState.image_zoom_persist`` へ永続化する
-    #: （中央ペインの ``ContentView.image_zoom_persist_toggled`` と揃える —
-    #: UIレビュー 2026-08-28 N-78。メニューは両インスタンス共用なので全画面でも
-    #: 押せるのに、配線が中央ペインにしか無く黙って捨てられていた）。
+    #: （中央ペインの ``ContentView.image_zoom_persist_toggled`` と揃える。
+    #: メニューは両インスタンス共用なので全画面でも
+    #: 押せる — 配線が中央ペインにしか無いと黙って捨てられる）。
     image_zoom_persist_toggled = Signal(bool)
     #: 同じく「ミニマップ表示」トグル。``ViewerState.image_minimap_enabled`` へ。
     image_minimap_toggled = Signal(bool)
@@ -197,6 +199,8 @@ class LightboxWindow(QWidget):
         self._images: list[Path] = []
         self._index = -1
         self._folder: Path | None = None
+        # 開いたときのフォルダ（``closed`` の *crossed* の比較元）。
+        self._entry_folder: Path | None = None
         self._post_provider: Callable[[], list[Path]] | None = None
         self._root_provider: Callable[[], Path | None] | None = None
         self._thumb_provider: Callable[[Path], QPixmap | None] | None = None
@@ -229,26 +233,31 @@ class LightboxWindow(QWidget):
         # 投稿横断スキャン（off-thread、トークンガード）— 深さ優先で root
         # 部分木を辿る。root 境界と root 直下の表示順は dispatch 時に snapshot
         # してワーカーへ渡すため、方向だけを結果コールバック用に保持する。
-        # 走査は**専用の単一スレッドストリーム**で行う（項目#81 / #46）:
+        # 走査は**専用の単一スレッドストリーム**で行う:
         # 深さ優先の投稿横断もプレイリスト列挙も、コールドな NAS では 1 本の
         # スレッドを分単位で握る。グローバルプールへ載せると、アプリ全体が
         # 共有する短命な stat / decode probe を飢えさせる（post_grid の
         # ``_recent_pool`` が同じ判断をコメント付きで持つ。GuardedStream は
         # プール + トークン + 完了シグナルを 1 つにまとめた共通形で、
         # ``ViewerWindow._drain_loader_pools`` の findChildren 列挙にも自動で
-        # 乗る = 閉じるときの有界ドレインが片側欠落しない（項目#54））。
+        # 乗る = 閉じるときの有界ドレインが片側欠落しない）。
         self._cross_inflight = False
         self._cross_direction = 0
+        # 走行中の横断がスライドショー自身の送り（``_slideshow_advance``）で
+        # 投げられたか。自動送りの横断は自動送りの一部なので、停止（S /
+        # 手動送り）と一緒に捨てる — 手動で投げた横断は利用者の意図なので
+        # スライドショーの停止では捨てない（``_stop_slideshow``）。
+        self._cross_auto = False
         self._cross_stream = GuardedStream(self)
         self._cross_stream.bind(self._on_cross_scanned)
         # 兄弟リスト未供給時の初期フォルダスキャン（off-thread）
         self._open_stream = GuardedStream(self)
         self._open_stream.bind(self._on_open_scanned)
-        # open_folder が渡した 1 回きりの予告文（N-21）。着地時に表示して消す。
+        # open_folder が渡した 1 回きりの予告文。着地時に表示して消す。
         self._open_notice = ""
         # メディアビュー構築失敗のスタックトレースは 1 セッション 1 回だけ出す
         # （環境要因なので毎回同じ結果になる — ContentView._lazy_view_unavailable
-        # と同じ抑制。項目#76）。
+        # と同じ抑制）。
         self._media_unavailable_logged = False
 
         # --- 背景 = 最暗トークン --------------------------------------
@@ -264,8 +273,8 @@ class LightboxWindow(QWidget):
         # 自前クローム（前後・カウンタ・フィルムストリップ）を持つため、内部
         # ImageView のホバーバーが没入表示に二重に重なるのを防ぐ。
         self._view.set_control_bar_enabled(False)
-        # 右クリックにこの態からの**出口**を出す (N-142)。Esc / F11 / 上部バーの
-        # 閉じるしか出口が無く、そのどれも右クリックからは見えなかった。
+        # 右クリックにこの態からの**出口**を出す。Esc / F11 / 上部バーの
+        # 閉じるだけでは、どれも右クリックからは見えない。
         self._view.set_fullscreen_exit_mode(True)
         self._view.fullscreen_requested.connect(self.close)
         vpal = self._view.palette()
@@ -282,7 +291,7 @@ class LightboxWindow(QWidget):
         self._media_placeholder = QWidget(self._stack)
         self._media_placeholder.setAutoFillBackground(False)
         self._stack.addWidget(self._media_placeholder)  # page 1 = 動画（遅延差替）
-        # page 2 = 空プレイリストの常設カード（N-86）。1.5 秒で消えるタイトル
+        # page 2 = 空プレイリストの常設カード。1.5 秒で消えるタイトル
         # オーバーレイと違い、出したままにする面。
         self._empty_view = EmptyPlaylistView(self._stack)
         self._empty_view.close_requested.connect(self.close)
@@ -301,7 +310,7 @@ class LightboxWindow(QWidget):
         self._strip.request_thumb.connect(self._on_strip_thumb_requested)
         if self._loader is not None:
             self._loader.loaded.connect(self._on_strip_thumb_loaded)
-            # 失敗も必ず受ける（項目#128）: 未接続だと mark_failed が呼ばれず、
+            # 失敗も必ず受ける: 未接続だと mark_failed が呼ばれず、
             # 一度 request したパスは set_images（＝投稿の移動）まで再要求
             # されないので、破損 JPEG / 0 バイトファイルのセルが「読み込み中」
             # に見える平坦なプレースホルダのまま残る。ステージ帯
@@ -311,8 +320,8 @@ class LightboxWindow(QWidget):
         # 常時表示の位置カウンタ（G02）とセッション初回ヒント（G05）。
         self._counter = _CounterOverlay(self)
         self._hint = _HintOverlay(self)
-        # 常設オンスクリーン操作カプセル（前後送り・フィット⇄実寸・ズーム表示
-        # — UIレビュー #25）。上部バーと同じオートハイドに連動する。
+        # 常設オンスクリーン操作カプセル（前後送り・フィット⇄実寸・ズーム表示）。
+        # 上部バーと同じオートハイドに連動する。
         self._capsule = LightboxControlCapsule(self)
         self._capsule.prev_clicked.connect(lambda: self._nav_key(-1))
         self._capsule.next_clicked.connect(lambda: self._nav_key(1))
@@ -321,7 +330,7 @@ class LightboxWindow(QWidget):
         # ダブルクリック / 非同期デコードのフィット確定）に%表示を追従させる。
         self._view.zoom_changed.connect(self._on_view_zoom_changed)
         # 右クリックメニューのビュー設定トグル（ズーム維持 / ミニマップ）を
-        # ホストへ返す。中央ペインと同じ image_view 側の集約点を通す（N-78）。
+        # ホストへ返す。中央ペインと同じ image_view 側の集約点を通す。
         connect_image_view_writeback(
             self._view,
             zoom_persist=self.image_zoom_persist_toggled.emit,
@@ -330,8 +339,8 @@ class LightboxWindow(QWidget):
 
         # --- スライドショー -------------------------------------------
         self._slideshow_interval_ms = 5000
-        # ホストが渡す「中央プレビューで一時停止した動画と、その位置」
-        # (N-142)。一致するパスの初回表示で 1 度だけ消費する。
+        # ホストが渡す「中央プレビューで一時停止した動画と、その位置」。
+        # 一致するパスの初回表示で 1 度だけ消費する。
         self._resume_media: Pending[MediaResume] = Pending()
         self._slideshow_active = False
         self._slideshow_timer = QTimer(self)
@@ -404,15 +413,15 @@ class LightboxWindow(QWidget):
     ) -> None:
         """現在ファイルの star を返すプロバイダの注入.
 
-        常時表示カウンタの ★N 併記（UIレビュー 07-25 #46）と数字キー押下時の
+        常時表示カウンタの ★N 併記と数字キー押下時の
         確認表示に使う。同期のインメモリ参照（左ペインの ``_user_meta_map``）で
         あることが前提 — 描画のたびに呼ぶので sqlite / NAS へは触らないこと。
         未注入なら ★ は出ない（素の閲覧はそのまま動く）。
         """
         self._star_provider = provider
-        # 下端ストリップの兄弟セルにも★の有無マークを出す (N-72) —
+        # 下端ストリップの兄弟セルにも★の有無マークを出す —
         # カウンタは「現在の 1 枚」しか映さないので、どれを評価済みか
-        # 一望する手段が無かった。値は描かず有無だけ。
+        # 一望する手段が無い。値は描かず有無だけ。
         self._strip.set_curation_provider(
             None if provider is None
             else (lambda path: (provider(path), False))
@@ -426,8 +435,8 @@ class LightboxWindow(QWidget):
 
         :meth:`set_star_provider` の上位互換: 同じ同期のインメモリ参照から
         ★も「あとで見る」も読めるようにし、画像ビューの右クリックに印の節を
-        出す口（``_curation_hooks``）も同時に揃える（UIレビュー 2026-09-11
-        N-16 / N-19 — 全画面だけ ``L`` が死に、右クリックに印が無かった）。
+        出す口（``_curation_hooks``）も同時に揃える（全画面だけ ``L`` が
+        効かない・右クリックに印が無い、という片側欠落を防ぐ）。
         """
         self._curation_provider = provider
         self._top_bar.strip.set_store_available(provider is not None)
@@ -471,7 +480,7 @@ class LightboxWindow(QWidget):
 
         ホストのトーストは親ウィンドウに出て全画面の裏に隠れるので、
         ``_set_star`` と同じ「書いた後にプロバイダを読み直して判定する」流儀
-        （#53 残り）でここが告知する。プロバイダ未注入なら判定できないので黙る。
+        でここが告知する。プロバイダ未注入なら判定できないので黙る。
         """
         self.curation_requested.emit(path, kind, value)
         self._sync_chrome()
@@ -514,13 +523,13 @@ class LightboxWindow(QWidget):
     def refresh_curation(self) -> None:
         """キュレーション変更後の再描画フック（カウンタの ★N を取り直す）."""
         # ImageView 上に star バッジは描かない（没入表示を汚さない）が、
-        # 左下の常時カウンタは現在画像の評価を映す (UIレビュー 07-25 #46)。
+        # 左下の常時カウンタは現在画像の評価を映す。
         self._sync_chrome()
-        # 下端ストリップの★マークも取り直す (N-72)。
+        # 下端ストリップの★マークも取り直す。
         self._strip.update()
 
     def set_resume_media(self, resume: "MediaResume | None") -> None:
-        """中央プレビューで一時停止した動画の位置を引き継ぐ (N-142).
+        """中央プレビューで一時停止した動画の位置を引き継ぐ.
 
         ``None`` は「引き継ぎ無し」で、armed な保留があれば捨てる（入場の
         たびにホストが必ず呼ぶので、前のセッションの保留は持ち越さない）。
@@ -559,12 +568,12 @@ class LightboxWindow(QWidget):
 
     def set_slideshow_interval(self, seconds: int) -> None:
         self._slideshow_interval_ms = max(1, int(seconds)) * 1000
-        # 再生中の動画に対して止めてあったタイマーを復活させない（項目#27）—
+        # 再生中の動画に対して止めてあったタイマーを復活させない —
         # 現在ページの判断は _sync_slideshow_timer に一元化してある。
         self._sync_slideshow_timer()
 
     def _nudge_slideshow_interval(self, delta_sec: int) -> None:
-        """[ / ] で間隔を ±1 秒し、中央メッセージで新しい値を告げる (N-139).
+        """[ / ] で間隔を ±1 秒し、中央メッセージで新しい値を告げる.
 
         値の永続化はしない（``ViewerState.slideshow_interval_sec`` は設定
         ダイアログが唯一の書き手のまま）— ここは「いま見ている流れの速さを
@@ -606,8 +615,8 @@ class LightboxWindow(QWidget):
         **開いたフォルダも横断先も常にフォルダの全メディア**という一貫した意味論に
         なる。
 
-        母集合の包含契約 (UIレビュー 07-25 #52 / #137 — 追修で「一致」から
-        訂正): 列挙 (:func:`list_playlist_sorted`) は ``#thumb#…`` を除いた
+        母集合の包含契約（「一致」ではなく包含）:
+        列挙 (:func:`list_playlist_sorted`) は ``#thumb#…`` を除いた
         **``PLAYLIST_SUFFIXES``（画像 + 動画）のみ**。分割・最大化側の
         ``n/m``・画像トラック・‹ › が歩く ``ChildrenGrid.tile_paths`` は
         ``post.md`` / ``#thumb#…`` を落とすだけなので、``.pdf`` / ``.zip`` /
@@ -621,7 +630,7 @@ class LightboxWindow(QWidget):
         （検索結果の流し見）。
         """
         self._begin_open()
-        self._folder = path.parent
+        self._folder = self._entry_folder = path.parent
         if playlist is not None:
             # G07: 明示プレイリスト（左ペインの表示順）をそのまま使う。
             self._playlist_locked = True
@@ -654,7 +663,7 @@ class LightboxWindow(QWidget):
         完全列挙（:func:`list_playlist_sorted`）が landing してから先頭に着地する
         （:meth:`_on_open_scanned` の folder-open 経路）。
 
-        *notice* を渡すと着地後に中央オーバーレイで一言告げる（N-21 — 非メディア
+        *notice* を渡すと着地後に中央オーバーレイで一言告げる（非メディア
         表示中の F11 が「別のファイルを無言で開いた」ように見えるのを防ぐ）。
         着地前に出すと ``_show_index`` の描画に上書きされるので、表示は
         :meth:`_on_open_scanned` まで遅らせる。
@@ -663,7 +672,7 @@ class LightboxWindow(QWidget):
         # _begin_open が前セッションの予告を消すので、代入はその後。
         self._open_notice = notice
         self._playlist_locked = False
-        self._folder = folder
+        self._folder = self._entry_folder = folder
         self._images = []
         self._index = -1
         self._open_stream.submit(lambda f=folder: list_playlist_sorted(f))
@@ -671,8 +680,8 @@ class LightboxWindow(QWidget):
         # クロームは _show_index 経由でしか更新されず、ここは列挙が着地する
         # まで（空フォルダなら永久に）_show_index に到達しない。ライトボックス
         # は使い回されるので、明示的に落とさないと前セッションの
-        # 「2 / 3 ・ b.png」「post」が空案内カードの上に常設で残る（項目#74）。
-        # 状態（空リスト・index -1）から導出する 1 本へ寄せてある（項目#75）。
+        # 「2 / 3 ・ b.png」「post」が空案内カードの上に常設で残る。
+        # 状態（空リスト・index -1）から導出する 1 本へ寄せてある。
         self._sync_chrome()
         self._show_fullscreen()
 
@@ -682,7 +691,7 @@ class LightboxWindow(QWidget):
         # 前セッションの着地予告（open_folder の notice）を持ち越さない。着地が
         # 空フォルダだったり着地前に閉じたりすると消費されずに残り、
         # _maybe_show_hint がそれを「予告と重なる」と読んで初回ヒントを
-        # 二度と出さなくなる（PR #189 レビュー）。
+        # 二度と出さなくなる。
         self._open_notice = ""
         self._latch.reset()
         self._nav_gate.reset()
@@ -699,11 +708,12 @@ class LightboxWindow(QWidget):
         :meth:`GuardedStream.bind` が「セッションが生きている ∧ 世代一致」で
         行うので、この cancel の後に古い結果が ``_apply_cross`` へ届くことは
         無い（``token != latest_token()`` を手で書くと、走査を一度も投げて
-        いない窓で素通りする — 項目#56 でトークンが単なる int からセッション
-        世代になったときの意味論の差。項目#81 追補）。
+        いない窓で素通りする — トークンが単なる int ではなくセッション
+        世代であることによる意味論の差）。
         """
         self._cross_stream.cancel()
         self._cross_inflight = False
+        self._cross_auto = False
 
     def _show_fullscreen(self) -> None:
         """呼び出し元ウィンドウのスクリーンで全画面表示する（マルチモニタ対応）。"""
@@ -718,7 +728,7 @@ class LightboxWindow(QWidget):
         self._view.setFocus()
         self._install_filters()
         self._maybe_show_hint()
-        # 開いた直後は必ずクロームを点灯させる (UIレビュー 07-25 #2)。
+        # 開いた直後は必ずクロームを点灯させる。
         # ``_poke_activity`` の条件（``changed or not top_bar.isVisible()``）は
         # 初回だけ両方 False になる（AutoHideEngine.visible の初期値 True +
         # top_bar は一度も hide されていない = 論理状態と実可視の乖離）ため、
@@ -736,7 +746,7 @@ class LightboxWindow(QWidget):
         """セッション初回のみ操作ヒントを数秒表示する（G05）。
 
         予告（``_open_notice`` — 「先頭の画像から再生します」）が待っている回は
-        見送る（N-140）。ヒントは 5 秒・予告は 1.5 秒で 2 面が重なり、状況固有で
+        見送る。ヒントは 5 秒・予告は 1.5 秒で 2 面が重なり、状況固有で
         今しか意味を持たない予告のほうが先に消えてしまう。``_hint_shown`` は
         **消費しない**ので、次に全画面へ入ったときにヒントが出る。
         """
@@ -761,7 +771,7 @@ class LightboxWindow(QWidget):
         if current is None:
             # folder-open 経路（open_folder）: 先頭メディアへ着地する。
             if not images:
-                # N-86: 1.5 秒で消えるタイトルオーバーレイだけだと、以降は
+                # 1.5 秒で消えるタイトルオーバーレイだけだと、以降は
                 # マウスを動かすまで手掛かりが自発的に出ない（常設カウンタも
                 # ``total <= 0`` で自分を隠す）。消えないカード + [終了] を
                 # 出して行き止まりにしない。
@@ -769,7 +779,7 @@ class LightboxWindow(QWidget):
                 # 着地先が無いので予告も消費先が無い — 残すと次セッションの
                 # 初回ヒントを黙らせる。
                 self._open_notice = ""
-                # 空で確定した状態からクロームを導出し直す（項目#75）—
+                # 空で確定した状態からクロームを導出し直す —
                 # open_folder 側で落としてあるが、着地でこの分岐だけ
                 # 塗り直しを欠く形にはしない。
                 self._sync_chrome()
@@ -778,7 +788,7 @@ class LightboxWindow(QWidget):
             self._strip.set_images(self._images)
             self._show_index(0)
             if self._open_notice:
-                # 着地後に予告を出す（N-21）。_show_index の描画を上書き
+                # 着地後に予告を出す。_show_index の描画を上書き
                 # しないよう順序はこの通り。1 回きりなので即クリアする。
                 self._title_overlay.show_message(self._open_notice)
                 self._open_notice = ""
@@ -812,7 +822,7 @@ class LightboxWindow(QWidget):
 
     def _on_strip_cell_clicked(self, index: int) -> None:
         """フィルムストリップのセルクリック = 手動送り（N-83②で停止する）."""
-        self._stop_slideshow_for_manual_nav()
+        self._begin_manual_nav()
         self._show_index(index)
 
     def _show_index(self, index: int, step: int = 0) -> None:
@@ -840,8 +850,8 @@ class LightboxWindow(QWidget):
             path = self._images[index]
             if self._playlist_locked:
                 # G07（検索 / 絞り込み結果の明示プレイリスト）は**複数フォルダ
-                # に跨る**ファイル列なので、現在フォルダを 1 歩ごとに追随させる
-                # （項目#23）。追随しないと上部バーが最初の投稿名を出し続け、
+                # に跨る**ファイル列なので、現在フォルダを 1 歩ごとに追随させる。
+                # 追随しないと上部バーが最初の投稿名を出し続け、
                 # closeEvent の closed(folder, image) が「フォルダと画像が矛盾
                 # した ペア」をホストへ渡す — ホストは古いフォルダを選択した
                 # うえで別フォルダの画像を選ぼうとして必ず失敗し、pending が
@@ -857,7 +867,7 @@ class LightboxWindow(QWidget):
                 break
             # 遅延構築（QtMultimedia）に失敗 = 動画ページは出せない。巻き戻さ
             # ないと「表示は前の画像のまま、index だけ 1 つ進んだ」状態が残り、
-            # 次の → が 2 枚先へ飛ぶ（項目#76）。
+            # 次の → が 2 枚先へ飛ぶ。
             if not step:
                 self._index = prev_index
                 self._folder = prev_folder
@@ -865,18 +875,17 @@ class LightboxWindow(QWidget):
                 return
             index += step
         # クローム（カプセルのフィット表示 / ズーム% / ストリップ選択 /
-        # 題名 / カウンタ）は状態から一括導出する（項目#75）。
+        # 題名 / カウンタ）は状態から一括導出する。
         self._sync_chrome()
         # 画像を移動したので下端の画像リストを一瞬表示（その後自動消灯）。
         self._show_strip()
         # ページが変わったので自動送りタイマーを張り直す（動画の残り尺
-        # ウォッチドッグへの張り直しも _sync_slideshow_timer の一元判断 —
-        # 項目#26）。**2026-08-28 のユーザー裁定で 07-25 #26 の
-        # 「手動ナビでもタイマーは止めない」は改定された**（N-83②）: 手動送りは
+        # ウォッチドッグへの張り直しも _sync_slideshow_timer の一元判断）。
+        # 手動送りは
         # ``_stop_slideshow_for_manual_nav`` が入口側で完全停止させるので、
         # ここへ到達する時点で ``_slideshow_active`` は False = 早期 return。
         # つまりこの呼び出しはスライドショー自身の送り（_slideshow_advance /
-        # _apply_cross）専用の張り直しになった。
+        # _apply_cross）専用の張り直し。
         self._sync_slideshow_timer()
 
     def _abort_unplayable_slideshow(self) -> None:
@@ -907,8 +916,8 @@ class LightboxWindow(QWidget):
         構築できたら True。``MediaView.__init__`` は QtMultimedia を遅延
         import するので、Qt6Multimedia.dll 欠落 / AV 隔離環境では構築自体が
         失敗する — 中央ペインの ``ContentView.show_media`` と同じく降格させ、
-        呼び出し元（:meth:`_show_index`）が位置を巻き戻せるよう False を返す
-        （項目#76）。ガードが無いと例外がスロット境界へ抜けて握り潰され、
+        呼び出し元（:meth:`_show_index`）が位置を巻き戻せるよう False を返す。
+        ガードが無いと例外がスロット境界へ抜けて握り潰され、
         「画面は前の画像のまま・index だけ進む」無言の不整合になる。
         """
         media = self._ensure_media()
@@ -927,12 +936,12 @@ class LightboxWindow(QWidget):
                 t("viewer.lightbox.media_unavailable")
             )
             return False
-        # スライドショー中はループ再生設定を一時停止する（#13）: ネイティブ
+        # スライドショー中はループ再生設定を一時停止する: ネイティブ
         # 無限ループでは EndOfMedia が発生せず、playback_finished の前倒し
         # 次送りが永久に来ない。設定・ボタン状態は変えず、スライドショー
         # 停止で復帰。
         media.set_loop_suppressed(self._slideshow_active)
-        # 静止画ページを離れる = アニメ GIF / WebP の QMovie を止める（項目#130）。
+        # 静止画ページを離れる = アニメ GIF / WebP の QMovie を止める。
         # 隠れた QMovie は停止しない限り GUI スレッドでフレームをデコードし
         # 続け、全画面の動画再生と同じスレッドを奪い合う。静止画へ戻る経路は
         # 必ず show_image を通って QMovie を作り直すので resume は不要
@@ -941,8 +950,8 @@ class LightboxWindow(QWidget):
         self._view.pause_animation()
         self._stack.setCurrentWidget(media)
         # 中央プレビューから引き継いだ再生位置があれば、その動画の
-        # **1 回目の表示にだけ**当てる (UIレビュー 2026-08-28 N-142)。
-        # 従来は全画面が必ず 0 から流し直していた。パスが違う表示では
+        # **1 回目の表示にだけ**当てる。
+        # パスが違う表示では
         # 保留を**降ろさない** — 引き継ぎ先はその動画の初回表示だけで、
         # 途中に別のページを挟んでも食い潰されない。
         resume = self._resume_media.take_if(lambda r: r.path == path)
@@ -950,7 +959,7 @@ class LightboxWindow(QWidget):
         return True
 
     def _on_capsule_fit_toggle(self) -> None:
-        """カプセルの「フィット / 実寸」ボタン（UIレビュー #25）.
+        """カプセルの「フィット / 実寸」ボタン.
 
         内部 ImageView の非公開トグルを直接呼ぶ — このウィンドウは既に
         ``self._view`` を専有しており、動画ページの再生 / 一時停止でも同様に
@@ -980,14 +989,14 @@ class LightboxWindow(QWidget):
         """MediaView を遅延生成してスタックの動画ページへ差し込む（構築失敗は ``None``）.
 
         構築とホストへの配線は :func:`~snappix.viewer.media_view.build_media_view`
-        が一手に負う（項目#71）— 中央ペイン ``ContentView._ensure_media`` と
-        手書きで重複していた配線（遅延 import / navigate_requested / loop /
+        が一手に負う — 中央ペイン ``ContentView._ensure_media`` と
+        手書きで重複しがちな配線（遅延 import / navigate_requested / loop /
         volume / rate の再送出 / 保留設定の当て込み / 構築失敗の降格）を
-        1 箇所へ寄せた。ここに残るのはこのウィンドウ固有の差分だけ:
+        1 箇所へ寄せてある。ここに残るのはこのウィンドウ固有の差分だけ:
         プレースホルダとのスタック差し替え、終端 / 尺の購読（スライドショー）、
         遅延生成した部分木へのイベントフィルタ設置。media_view.py の
-        **公開シグナル / 公開 API のみ**を使う（private ``_player`` の購読は
-        項目#26 で撤去）。
+        **公開シグナル / 公開 API のみ**を使う（private ``_player`` は
+        購読しない）。
         """
         if self._media is None:
             from .media_view import build_media_view  # noqa: PLC0415 (lazy QtMultimedia)
@@ -998,12 +1007,12 @@ class LightboxWindow(QWidget):
                 # 発火する navigate_requested を 1 ステップナビへ配線する。
                 on_navigate=self._on_media_navigate,
                 # ループ / 音量 / 速度のユーザー変更をホストへ再送出し、
-                # ViewerState へ永続化させる（item 8 / N-136）。
+                # ViewerState へ永続化させる。
                 on_loop=self.media_loop_toggled.emit,
                 on_volume=self.media_volume_changed.emit,
                 on_rate=self.media_playback_rate_changed.emit,
-                # 再生終端（EndOfMedia / InvalidMedia — MediaView 側で正規化、
-                # 項目#26）→ スライドショーの前倒し次送り。
+                # 再生終端（EndOfMedia / InvalidMedia — MediaView 側で正規化）
+                # → スライドショーの前倒し次送り。
                 on_finished=self._on_playback_finished,
                 # 尺が判明したらウォッチドッグを「残り尺 + 余裕」へ張り直す。
                 on_duration=self._on_media_duration_changed,
@@ -1042,14 +1051,14 @@ class LightboxWindow(QWidget):
         self._media.apply_settings(state)
 
     def apply_view_state(self, state: "ViewerState") -> None:
-        """ImageView 系のユーザー設定を内部 ImageView へ一括反映する（項目#29）.
+        """ImageView 系のユーザー設定を内部 ImageView へ一括反映する.
 
         閲覧モードは中央ペインとは**別インスタンス**の ImageView を持つため、
         中央ペインと同じ fan-out（``image_view.apply_state``）をここでも通さ
         ないと、設定ダイアログの ImageView 設定（キャッシュ予算 3 種 /
         先読み枚数 / ズーム維持 / ミニマップ）が閲覧モードにだけ届かず、
-        モジュール既定のまま動き続ける（項目#21 / #34 で実測）。個別項目の
-        手配線は繰り返し取りこぼしを生んだので、ImageView への設定は必ず
+        モジュール既定のまま動き続ける。個別項目の
+        手配線は取りこぼしを生むので、ImageView への設定は必ず
         共通関数側に足すこと。
         """
         apply_image_view_state(self._view, state)
@@ -1068,7 +1077,7 @@ class LightboxWindow(QWidget):
 
         終端判定（EndOfMedia / InvalidMedia / ループ継続の除外）は MediaView
         側の :attr:`~snappix.viewer.media_view.MediaView.playback_finished`
-        が一手に負う（項目#26）。ここでは「スライドショー中の動画ページか」
+        が一手に負う。ここでは「スライドショー中の動画ページか」
         だけを見る。ウォッチドッグ（間隔タイマー）はこの通知が来なくても
         有限時間で次へ送る保険として常時武装している。
         """
@@ -1079,18 +1088,18 @@ class LightboxWindow(QWidget):
             self._slideshow_advance()
 
     def _on_media_duration_changed(self, _dur: int) -> None:
-        """動画の尺が判明 → ウォッチドッグを「残り尺 + 余裕」へ張り直す（項目#26）."""
+        """動画の尺が判明 → ウォッチドッグを「残り尺 + 余裕」へ張り直す."""
         self._sync_slideshow_timer()
 
     def _sync_chrome(self) -> None:
-        """クロームの**内容**を現在状態から一括で導出する（項目#75）.
+        """クロームの**内容**を現在状態から一括で導出する.
 
         表示される文字・選択・アイコンは全て ``(self._images, self._index,
         self._folder, self._slideshow_active, 現在ファイルの★)`` から一意に
-        決まる純粋な派生値なのに、導出関数が無かったため「状態を変える 9 つの
-        入口が、それぞれどのクロームを塗り直すかを個別に選ぶ」形になっており、
-        **呼び忘れが正しさの単一障害点**になっていた（``open_folder`` が前
-        セッションの「2 / 3 ・ b.png」を残した項目#74 はその発現）。状態を
+        決まる純粋な派生値なので、「状態を変える 9 つの
+        入口が、それぞれどのクロームを塗り直すかを個別に選ぶ」形にすると
+        **呼び忘れが正しさの単一障害点**になる（``open_folder`` が前
+        セッションの「2 / 3 ・ b.png」を残す、など）。状態を
         変える入口は末尾でこの 1 本を呼ぶ。
 
         **可視（setVisible）には一切触れない** — 上部バー / カプセルの
@@ -1105,7 +1114,7 @@ class LightboxWindow(QWidget):
         """
         path = self.current_image()
         # フィット⇄実寸・ズーム表示は静止画専用の概念 — 動画ページと空状態
-        # では隠す（UIレビュー #25 のカプセル。隠れた ImageView の古い状態を
+        # では隠す（隠れた ImageView の古い状態を
         # 誤って読ませないための内容切替で、オートハイドとは別軸）。
         self._capsule.set_fit_controls_visible(
             path is not None and not is_video_path(path)
@@ -1115,8 +1124,8 @@ class LightboxWindow(QWidget):
         # 上部バーの再生/一時停止アイコン（常設カウンタ側の実行中表示は
         # _update_counter が同じ _slideshow_active から描く — N-83①）。
         self._top_bar.set_slideshow_running(self._slideshow_active)
-        # 歩ける先（= プレイリストが空でない）の有無を送り / 再生ボタンの活性へ
-        # （N-21）。``setEnabled`` は可視ではないので上の「setVisible に触れない」
+        # 歩ける先（= プレイリストが空でない）の有無を送り / 再生ボタンの活性へ反映する。
+        # ``setEnabled`` は可視ではないので上の「setVisible に触れない」
         # 契約には抵触しない。
         walkable = bool(self._images)
         self._capsule.set_step_enabled(walkable, walkable)
@@ -1133,7 +1142,7 @@ class LightboxWindow(QWidget):
             return
         # 上部バーは**投稿タイトルのみ**（+ 印ストリップ — E2）。n/m とファイル名は
         # 常時表示カウンタへ一本化した（オートハイドで消える面と常設面で同じ情報を
-        # 二重に持たない — UIレビュー 07-25 #91）。
+        # 二重に持たない）。
         self._top_bar.set_text(
             self._folder.name if self._folder is not None else ""
         )
@@ -1158,15 +1167,14 @@ class LightboxWindow(QWidget):
             return None
 
     def _current_star(self) -> int:
-        """現在ファイルのスター（プロバイダ未注入・失敗時は 0）(UIレビュー 07-25 #46)."""
+        """現在ファイルのスター（プロバイダ未注入・失敗時は 0）."""
         value = self._read_star()
         return 0 if value is None else value
 
     def _update_counter(self) -> None:
         """常時表示カウンタ（G02）を現在位置 + ★N で更新する.
 
-        上部バーが隠れていても n/N・ファイル名・スター評価が読める唯一の面
-        (UIレビュー 07-25 #91 / #46)。
+        上部バーが隠れていても n/N・ファイル名・スター評価が読める唯一の面。
         """
         path = self.current_image()
         if path is None:
@@ -1192,9 +1200,12 @@ class LightboxWindow(QWidget):
         """
         if not self._images:
             return
-        self._stop_slideshow_for_manual_nav()
         new = self._index + delta
-        if 0 <= new < len(self._images):
+        in_range = 0 <= new < len(self._images)
+        # 投稿内の移動は走行中の横断を捨てる。端での押し直しは同じ向きの
+        # 横断だけ生かす（``_start_cross`` が「探索中」を告げて待つ）。
+        self._begin_manual_nav(0 if in_range else delta)
+        if in_range:
             self._latch.reset()
             # 出せないページ（構築できない動画）は同じ向きへ読み飛ばす。
             self._show_index(new, delta)
@@ -1266,6 +1277,7 @@ class LightboxWindow(QWidget):
             return
         self._cross_inflight = True
         self._cross_direction = direction
+        self._cross_auto = self._slideshow_active
         # 探索中の告知（着地で別のメッセージに置き換わる）。
         self._title_overlay.show_message(t("viewer.lightbox.cross_searching"))
         self._cross_stream.submit(
@@ -1328,30 +1340,30 @@ class LightboxWindow(QWidget):
             return
         self._slideshow_active = True
         # 上部バーの再生/一時停止アイコンと、消えない面（常設カウンタ）の
-        # 実行中表示（N-83①）— どちらも _slideshow_active からの派生値なので
-        # 導出 1 本に任せる（項目#75）。
+        # 実行中表示 — どちらも _slideshow_active からの派生値なので
+        # 導出 1 本に任せる。
         self._sync_chrome()
-        # 既に動画を再生中に S で開始したケースも次送りを保証する（#13）。
+        # 既に動画を再生中に S で開始したケースも次送りを保証する。
         if self._media is not None:
             self._media.set_loop_suppressed(True)
-        # 開始時点のページも _show_index と同じ判断を通す（項目#27）— 動画を
+        # 開始時点のページも _show_index と同じ判断を通す — 動画を
         # 見ながら S を押す＝最も自然な開始操作で、その 1 本目だけが
-        # slideshow_interval_sec（既定 5 秒）で打ち切られていた。
+        # slideshow_interval_sec（既定 5 秒）で打ち切られてしまう。
         self._sync_slideshow_timer()
 
     def _sync_slideshow_timer(self) -> None:
-        """自動送りタイマーを現在ページに合わせて張り直す（項目#26 / #25 / #27）.
+        """自動送りタイマーを現在ページに合わせて張り直す.
 
         スライドショー中の唯一のタイマー制御点で、**タイマーは決して止めない**
         — 「どの再生状態でも有限時間で次へ進む」を構造的に保証するウォッチ
-        ドッグとして常時武装する。以前は動画ページで止めて ``EndOfMedia`` に
-        一点依存し、沈黙経路（ネイティブループ #13 / InvalidMedia C10 /
-        自動再生 OFF #25）が見つかるたびに条件を 1 つ足していた。
+        ドッグとして常時武装する。動画ページで止めて ``EndOfMedia`` に
+        一点依存すると、沈黙経路（ネイティブループ / InvalidMedia /
+        自動再生 OFF）ごとに条件を足し続けることになる。
 
         * 静止画 / 再生していない動画（自動再生 OFF・一時停止・見終わった
-          動画で S）: 固定間隔で送る（項目#25 / #27 の挙動を保存）。
+          動画で S）: 固定間隔で送る。
         * 実再生中の動画: ``max(間隔, 残り尺 + 余裕)`` で武装 — 尺の長い動画
-          を間隔で打ち切らない（項目#27）。正常なら ``playback_finished`` が
+          を間隔で打ち切らない。正常なら ``playback_finished`` が
           先に来て前倒しで進み、来ない未知の経路でもこのタイマーが送る。
           尺が未判明の間は固定間隔のフロアで待ち、判明した時点で
           ``duration_changed`` → ここが呼ばれて張り直される。
@@ -1369,23 +1381,49 @@ class LightboxWindow(QWidget):
     def _stop_slideshow(self) -> None:
         self._slideshow_active = False
         self._slideshow_timer.stop()
-        # ループ再生設定の一時停止を解除（ユーザー設定へ復帰、#13）。
+        # 自動送りが投げた投稿横断は自動送りの一部 — 止めた後に着地して
+        # 次の投稿へ連れ去らないよう一緒に捨てる（N-83②: 止めたつもりが
+        # 止まっていない、を作らない）。
+        if self._cross_inflight and self._cross_auto:
+            self._invalidate_cross()
+        # ループ再生設定の一時停止を解除（ユーザー設定へ復帰）。
         if self._media is not None:
             self._media.set_loop_suppressed(False)
         # 上部バーのアイコンと常設カウンタの実行中表示を落とす（N-83①）。
         self._sync_chrome()
 
-    def _stop_slideshow_for_manual_nav(self) -> None:
-        """手動送りでスライドショーを**完全停止**する（N-83②）.
-
-        **2026-08-28 ユーザー裁定で 07-25 #26 の「タイマーは止めない」を改定**:
-        手動で送ったのに数秒後に自動送りが割り込むのは、一般的なビューアの
-        慣習（手動操作で自動送りは止まる）から外れており、「止めたつもりが
-        止まっていない」体験になっていた。再開は S / 上部バーの再生ボタン。
-        Esc は従来どおり**全画面終了**であって停止ではない。
+    def _begin_manual_nav(self, cross_direction: int = 0) -> None:
+        """手動送りの入口: スライドショーを止め、走行中の投稿横断を捨てる.
 
         呼び出し元は手動ナビの入口だけ（``_nav_key`` / Home / End /
-        フィルムストリップのセルクリック）。スライドショー自身の送り
+        フィルムストリップのセルクリック）。探索中に利用者が投稿内の別の
+        位置へ移ったのに、遅れて着地した横断結果が ``_apply_cross`` で次の
+        投稿へ連れ去る（``post_changed`` で主窓の選択まで動く）のを防ぐ。
+        着地の選別は ``GuardedStream.bind`` が世代で行うので、ここで
+        ``_invalidate_cross`` すれば古い結果は届かない。
+
+        *cross_direction* は「この操作自体が投稿の端での同じ向きの押し直し
+        になり得る」ときの向き（``_nav_key`` の端分岐）。手動で投げた同じ
+        向きの横断は利用者の意図どおりなので生かす。0 は常に捨てる。
+        スライドショーが投げた横断は ``_stop_slideshow`` が先に捨てる。
+        """
+        self._stop_slideshow_for_manual_nav()
+        if self._cross_inflight and (
+            cross_direction == 0 or cross_direction != self._cross_direction
+        ):
+            self._invalidate_cross()
+
+    def _stop_slideshow_for_manual_nav(self) -> None:
+        """手動送りでスライドショーを**完全停止**する.
+
+        手動送りでは自動送りも止める:
+        手動で送ったのに数秒後に自動送りが割り込むのは、一般的なビューアの
+        慣習（手動操作で自動送りは止まる）から外れており、「止めたつもりが
+        止まっていない」体験になる。再開は S / 上部バーの再生ボタン。
+        Esc は従来どおり**全画面終了**であって停止ではない。
+
+        呼び出し元は手動ナビの入口 :meth:`_begin_manual_nav` だけ。
+        スライドショー自身の送り
         （``_slideshow_advance`` → ``_show_index`` / ``_start_cross``）は
         ``_nav_key`` を通らないので巻き込まれない。
         """
@@ -1482,26 +1520,26 @@ class LightboxWindow(QWidget):
             Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.KeypadModifier
         ):
             # 別トップレベル窓なのでメインウィンドウの ``L`` は届かない —
-            # 0-5 と同じくここで受けて全画面の席で解決する（N-16）。
+            # 0-5 と同じくここで受けて全画面の席で解決する。
             self._toggle_later()
             return True
         if key == Qt.Key.Key_Right:
             self._nav_key(1)
             return True
         if key == Qt.Key.Key_Home:
-            self._stop_slideshow_for_manual_nav()  # 手動送り (N-83②)
+            self._begin_manual_nav()  # 手動送り (N-83②)
             self._latch.reset()
             self._show_index(0)
             return True
         if key == Qt.Key.Key_End:
-            self._stop_slideshow_for_manual_nav()  # 手動送り (N-83②)
+            self._begin_manual_nav()  # 手動送り (N-83②)
             self._latch.reset()
             self._show_index(len(self._images) - 1)
             return True
         if key == Qt.Key.Key_Space:
             # 動画ページ表示中の Space は再生/一時停止（MediaView 単体・
             # ショートカット一覧と同じ割り当て）。「止めようとしたら次へ
-            # 飛ぶ」誤爆を防ぐ（UIレビュー #18）。フォーカスが静止画ページに
+            # 飛ぶ」誤爆を防ぐ。フォーカスが静止画ページに
             # 残ったままでもここで委譲されるので確実に効く。
             if (
                 self._media is not None
@@ -1511,11 +1549,11 @@ class LightboxWindow(QWidget):
                 return True
             if self._stack.currentWidget() is self._empty_view:
                 # 空プレイリストのカード表示中は Space に意味が無い
-                # （``_nav_key`` は画像ゼロで即 return する）のに、消費だけは
-                # していた。フィルタは自分と全子ウィジェットに掛かっているので
+                # （``_nav_key`` は画像ゼロで即 return する）ので消費しない。
+                # フィルタは自分と全子ウィジェットに掛かっているので、消費すると
                 # フォーカスのある [終了] ボタンへ KeyPress が届かず、
-                # N-86 が「行き止まりにしない」ために置いた唯一の可視アクション
-                # がマウス専用になっていた。素通しして押せるようにする。
+                # 「行き止まりにしない」ために置いた唯一の可視アクション
+                # がマウス専用になる。素通しして押せるようにする。
                 return False
             # G04: Space = 次の画像（一般ビューア慣習）。旧 Space=スライドショーは
             # S へ移動した。末尾では ←/→ と同じく投稿横断ラッチに従う。
@@ -1526,9 +1564,9 @@ class LightboxWindow(QWidget):
             self.toggle_slideshow()
             return True
         if key in (Qt.Key.Key_BracketLeft, Qt.Key.Key_BracketRight):
-            # [ / ] = スライドショー間隔を ±1 秒 (UIレビュー 2026-08-28 N-139)。
-            # 従来は設定ダイアログ（実行できない画面）が唯一の変更点で、
-            # 「遅すぎる / 速すぎる」と気づいた場所から直せなかった。
+            # [ / ] = スライドショー間隔を ±1 秒。
+            # 設定ダイアログ（実行できない画面）だけが変更点だと、
+            # 「遅すぎる / 速すぎる」と気づいた場所から直せない。
             self._nudge_slideshow_interval(
                 -1 if key == Qt.Key.Key_BracketLeft else 1
             )
@@ -1541,7 +1579,7 @@ class LightboxWindow(QWidget):
             # 数字 0–5 で現在ファイルのスターを設定 / 解除する。GalleryView と
             # 同じく素（またはテンキーのみ）の修飾キーでガードし、Ctrl+2〜5 や
             # Alt+数字といったショートカットが黙ってスターを書き換えて user_meta
-            # に永続化されるのを防ぐ（レビュー項目 20）。
+            # に永続化されるのを防ぐ。
             self._set_star(key - Qt.Key.Key_0)
             return True
         return False
@@ -1549,8 +1587,8 @@ class LightboxWindow(QWidget):
     def _set_star(self, star: int) -> None:
         """数字キー 0–5 で現在ファイルにスターを設定 / 解除する。
 
-        書き込みが**永続化できなかったとき**は要求値のオーバーレイを出さない
-        (#53 残り)。ホスト側の単一書き手（``PostGrid._apply_curation``）は失敗時
+        書き込みが**永続化できなかったとき**は要求値のオーバーレイを出さない。
+        ホスト側の単一書き手（``PostGrid._apply_curation``）は失敗時
         にインメモリマップを据え置くので、スタープロバイダ（同じマップの同期
         読み取り）の値が要求値と食い違うことが「ディスクに届かなかった」の判定に
         なる。ホストの警告トーストは親ウィンドウに出て全画面の裏に隠れるため、
@@ -1562,16 +1600,16 @@ class LightboxWindow(QWidget):
             return
         self.star_key_requested.emit(star, current)
         # ホストの書き込み（同期）後に常時カウンタの ★N を取り直す — 0-5 が
-        # 即時に読める面へ反映される (UIレビュー 07-25 #46)。ホストからは
+        # 即時に読める面へ反映される。ホストからは
         # ``refresh_curation`` でも同じ更新が届くが、プロバイダだけ注入された
-        # 単体構成でも即時反映されるようここでも更新する（項目#75 の導出 1 本）。
+        # 単体構成でも即時反映されるようここでも更新する（導出 1 本）。
         self._sync_chrome()
         self._show_star_result(star)
 
     def _show_star_result(self, star: int) -> None:
         # 照合は丸めない読み取り（``_read_star``）で行う: 例外で読めなかった
         # ときに 0 へ丸めると、star=0 の要求だけが「書けたか分からない」を
-        # 「要求どおり 0 になった」と取り違えて成功の体裁になる（#53 残り）。
+        # 「要求どおり 0 になった」と取り違えて成功の体裁になる。
         if self._star_provider is not None and self._read_star() != star:
             self._title_overlay.show_message(
                 t("viewer.lightbox.star_write_failed")
@@ -1637,11 +1675,11 @@ class LightboxWindow(QWidget):
     def force_show_chrome(self) -> None:
         """Pin the full chrome (top bar / capsule / filmstrip) on screen.
 
-        Screenshot-harness hook (tools/ui_review — the offscreen platform has
+        Screenshot-harness hook (the offscreen platform has
         no hover, and the cursor is parked at (0,0), so the auto-hide timers
         would blank everything before ``grab()``).  Mirrors
         ``ContentView.force_show_stage_capsule``: stop both auto-hide timers
-        and show every chrome layer so a review shot can capture the lightbox
+        and show every chrome layer so a screenshot can capture the lightbox
         the way a user sees it right after moving the mouse.  Not used by
         product code paths.
         """
@@ -1710,7 +1748,7 @@ class LightboxWindow(QWidget):
         # ``loaded`` が二度と届かず、64px 未満の画像セルが「読み込み中」に
         # 見えるプレースホルダのまま固定される（同じ帯・同じフォルダで
         # 全画面を開き直すたびに再現する）。children_grid / folder_preview_view
-        # が持つ再シード（#10）の 3 番目のホスト。
+        # が持つ再シードの 3 番目のホスト。
         img = self._loader.cached_image(key)
         if img is not None and not img.isNull():
             self._strip.set_thumb(path, QPixmap.fromImage(img))
@@ -1731,7 +1769,7 @@ class LightboxWindow(QWidget):
         self._strip.set_thumb(path, QPixmap.fromImage(image))
 
     def _on_strip_thumb_failed(self, key: str) -> None:
-        """デコード失敗セルを静的グリフで確定させる（項目#128）.
+        """デコード失敗セルを静的グリフで確定させる.
 
         ``FilmstripView`` の空セルは平坦なプレースホルダ塗りで、失敗しても
         「読み込み中」と区別が付かない。``mark_failed`` で pixmap を常駐させて
@@ -1746,7 +1784,7 @@ class LightboxWindow(QWidget):
         self._strip.mark_failed(path, self._strip_failed_glyph())
 
     def _strip_failed_glyph(self) -> QPixmap:
-        """失敗確定セル用の「壊れた画像」グリフを 1 枚描く（項目#128）.
+        """失敗確定セル用の「壊れた画像」グリフを 1 枚描く.
 
         色は帯と同じ固定オーバーレイパレット（``common/ui/overlay.py``）から
         取る — ライトボックスの帯は画像コンテンツ上のオーバーレイなので
@@ -1776,7 +1814,7 @@ class LightboxWindow(QWidget):
     # ------------------------------------------------------------ layout
 
     def _counter_width_budget(self) -> int:
-        """常時カウンタが伸びてよい幅 = 下端中央の操作カプセルの手前まで（N-110）.
+        """常時カウンタが伸びてよい幅 = 下端中央の操作カプセルの手前まで.
 
         カウンタは左下、カプセルは下端中央に置かれるので、親幅いっぱいを許すと
         長いファイル名がカプセルの下へ潜り込む。カプセルは隠れていても
@@ -1805,7 +1843,7 @@ class LightboxWindow(QWidget):
         self._position_counter()
         # ストリップの高さ分を常に確保して配置する — ストリップの表示/非表示に
         # 関わらず一定の位置になり、一瞬出てもカプセルと重ならない
-        # （_position_counter と同じ考え方 — UIレビュー #25）。
+        # （_position_counter と同じ考え方）。
         self._capsule.reposition(strip_h)
         # フィット中の実効ズームはビューポート寸法に依存する — %も追従させる。
         self._refresh_capsule_zoom()
@@ -1825,7 +1863,7 @@ class LightboxWindow(QWidget):
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
         self._stop_slideshow()
         self._invalidate_cross()
-        # open/close symmetry (#12): also invalidate any in-flight open scan.
+        # open/close symmetry: also invalidate any in-flight open scan.
         # ``open_folder`` issues an off-thread ``list_playlist_sorted`` — if
         # the user closes before it lands, ``_on_open_scanned`` would still
         # match the token, take the folder-open branch (``current_image()`` is
@@ -1840,9 +1878,13 @@ class LightboxWindow(QWidget):
         self._set_chrome_visible(True)  # カーソルを必ず復元して閉じる
         if not self._closed_emitted:
             self._closed_emitted = True
-            self.closed.emit(self._folder, self.current_image())
+            self.closed.emit(
+                self._folder,
+                self.current_image(),
+                self._folder != self._entry_folder,
+            )
         self._view.clear_image()
-        # デコード済み原寸 PIL も返す（項目#28）: close = hide でこのウィンドウは
+        # デコード済み原寸 PIL も返す: close = hide でこのウィンドウは
         # ViewerWindow._lightbox に生き続けるため、clear_image（表示中の
         # QPixmap/QImage を落とすだけ）では最大 IMAGEVIEW_CACHE_MAX_BYTES ぶんの
         # 原寸 PIL が非表示ウィンドウのキャッシュに残り、セッション中ずっと

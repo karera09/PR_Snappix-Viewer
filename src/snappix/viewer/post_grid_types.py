@@ -11,7 +11,8 @@ re-export するので、既存の ``from .post_grid import SearchSnapshot`` 等
 * :class:`_ViewDim` — グリッドの絞り込み次元 1 行分の台帳型。
 * :class:`SearchSnapshot` とその直列化（保存した検索 / ナビ履歴）。
 * :func:`describe_search_payload` / :func:`saved_search_tooltip` — 保存した
-  検索の 1 行要約（条件チップバーと同じ語彙を条件次元レジストリから引く）。
+  検索の 1 行要約（ペイロードを :func:`.condition_chips.state_from_payload`
+  で観測値へ組み直し、ライブの条件チップと同じ表を通す）。
 * キャプション組み立て（:func:`_format_subtitle` / :func:`split_rel_caption`）。
 * ユーザータグ編集欄のトークン単位補完（:class:`_UserTagCompleter`）。
 * 並び順ラベル表 / NSFW 抑制バンド表などの台帳定数。
@@ -20,21 +21,17 @@ re-export するので、既存の ``from .post_grid import SearchSnapshot`` 等
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, NamedTuple, TypeVar
+from typing import Callable, NamedTuple
 
 from PySide6.QtWidgets import QCompleter, QLineEdit
 
 from ..common.format import format_bytes
 from ..common.i18n import t
+from . import ai_pack, condition_chips
 from ._indicator import LOCKED_CAPTION_GLYPH
+from .condition_chips import payload_num as _payload_num
 from .folder_scan import FolderEntry
-from .search_dimensions import (
-    DEFAULT_TAG_THRESHOLD,
-    chip_text,
-    token_fields,
-    value_label,
-)
-from .search_dimensions import payload_key as _pkey
+from .search_dimensions import token_fields
 from .state import ViewerState
 
 
@@ -204,7 +201,7 @@ FILTER_HELP_POPUP_NAME = "filterSyntaxHelp"
 SUBTITLE_SEP = " · "
 
 #: ユーザータグ編集欄の区切り。``user_meta.USER_TAG_SEPARATOR_RE``
-#: (``[\s,]``) が実際に割る文字であること — 表示用の読点 (``common.sep.comma``)
+#: が実際に割る文字であること — 表示用の読点 (``common.sep.comma``)
 #: を使うと 1 語として取り込まれる。
 _TAG_INPUT_SEP = ", "
 
@@ -439,36 +436,17 @@ def deserialize_search_snapshot(data: dict) -> SearchSnapshot:
     )
 
 
-_NumT = TypeVar("_NumT", int, float)
-
-
-def _payload_num(value: object, cast: Callable[[Any], _NumT]) -> _NumT | None:
-    """壊れたペイロードの数値を ``None`` へ落とす（その軸だけ省くため）。
-
-    ``deserialize_search_snapshot`` は setattr を ``try``/``except`` で包んで
-    「新ビルド / 手編集の値でも raise しない」を契約として宣言しているので、
-    同じ dict を読む :func:`describe_search_payload` の ``float`` / ``int``
-    も同じ寛容さで読む（無保護だと、保存した検索の一覧・ツールチップ・既定名
-    を作る 3 面がまとめて例外で落ちる）。``shared_prefs`` は 2 インスタンス
-    から書かれ得るので、読み手を寛容にするのが正しい方向 — 落とすのは
-    **その軸のチップだけ**で、名前と残りの条件は見えたままにする。
-    """
-    if value is None:
-        return None
-    try:
-        return cast(value)
-    except (ValueError, TypeError):
-        return None
-
-
 def describe_search_payload(data: dict, *, floor: float | None = None) -> str:
     """保存した検索の「実際に何を探すのか」1 行要約。
 
-    語彙はライブの条件チップバー（:meth:`~.post_grid.PostGrid.
-    _condition_dimensions`）と**同じ**— 同じ i18n キー・同じ ``・`` 区切り・
-    同じ軸順 — なので、保存した検索はそれが生むチップ行のように読める。この
-    1 関数が 3 面を賄う: 管理ダイアログの条件列、行 / レールのツールチップ、
-    保存時に埋める既定名。
+    ライブの条件チップバーと**同じ表**（:func:`.condition_chips.chips`）を
+    通す — ペイロードを :func:`.condition_chips.state_from_payload` で観測値へ
+    組み直すので、語彙・区切り・軸順だけでなく、AI 軸の可用性ゲート
+    （``ai_pack.available()``）・絞り込み欄からの次元トークン除去・母集合
+    scope（AI クエリ中は範囲チップを出さない / 種別走査が乗っ取るときは
+    タグ・精度・表示単位を並べない）もライブと一致する。この 1 関数が 3 面を
+    賄う: 管理ダイアログの条件列、行 / レールのツールチップ、保存時に埋める
+    既定名。
 
     直列化されたペイロードだけを見る純関数（ウィジェットもストアも触らない）
     ので、別セッションで別ライブラリに対して保存された検索でも動く。認識でき
@@ -476,80 +454,14 @@ def describe_search_payload(data: dict, *, floor: float | None = None) -> str:
 
     精度チップの成立条件は「既定値（と記録 floor の高い方）より上」で、floor は
     tags.db 側の値 — ペイロードには無いため、呼び出し側が *floor* を渡せたとき
-    だけ載せる（渡せない面 = 保存検索ダイアログ等では省略）。軸順もライブの
-    チップ順（rating は media_recursive の後）へ揃え、種別走査がクエリを乗っ
-    取るペイロード（``_query_mode`` の media 優先と同じ）では実際に使われない
-    タグ・精度・表示単位を並べない。
-
-    軸名・値ラベル・書式は条件次元レジストリ（:mod:`.search_dimensions` の
-    :func:`~.search_dimensions.chip_text` / :func:`~.search_dimensions.
-    value_label`）経由、**ペイロードのキーも同じ台帳**
-    (:func:`~.search_dimensions.payload_key`) から引く — 手書きの文字列
-    リテラルにすると、軸を足した人が台帳だけ更新してこの要約に足し忘れる。
+    だけ載せる（渡せない面 = 保存検索ダイアログ等では省略）。
     """
-    parts: list[str] = []
-    query = str(data.get(_pkey("ai_tags"), "") or "").strip()
-    rating = str(data.get(_pkey("rating"), "all") or "all")
-    rating_label = value_label("rating", rating)
-    media_recursive = str(data.get(_pkey("ai_media"), "all") or "all")
-    # ``_query_mode`` と同じ優先: 非 all/image の種別は拡張子走査で、タグ・
-    # 精度・表示単位はクエリに参加しない（載せると「効かない条件」を約束
-    # してしまう）。
-    is_media_walk = media_recursive not in ("all", "image")
-    tags_engaged = bool(query) or rating_label is not None
-    if query and not is_media_walk:
-        parts.append(chip_text("ai_tags", terms=query))
-    if tags_engaged and not is_media_walk:
-        # 精度 — floor を知る呼び出し側だけが正しく「既定値以外」を判定できる。
-        thr = _payload_num(data.get(_pkey("ai_precision")), float)
-        if (
-            floor is not None and thr is not None
-            and thr - max(float(floor), DEFAULT_TAG_THRESHOLD) > 1e-6
-        ):
-            parts.append(chip_text("ai_precision", value=thr))
-        # 表示単位 — 既定 (folder_coverage) 以外のときだけ（ライブと同条件）。
-        folder_mode = bool(data.get(_pkey("ai_unit", 0), True))
-        coverage = bool(data.get(_pkey("ai_unit", 1), True))
-        if not folder_mode:
-            unit = value_label("ai_unit", "file")
-        elif not coverage:
-            unit = value_label("ai_unit", "folder_strict")
-        else:
-            unit = None
-        if unit is not None:
-            parts.append(chip_text("ai_unit", value=unit))
-    ai_media = value_label("ai_media", media_recursive)
-    if ai_media is not None:
-        parts.append(chip_text("ai_media", value=ai_media))
-    if rating_label is not None:
-        parts.append(chip_text("rating", value=rating_label))
-    media = value_label(
-        "media", str(data.get(_pkey("media"), "all") or "all")
+    state = condition_chips.state_from_payload(
+        data, ai_available=ai_pack.available(), floor=floor,
     )
-    if media is not None:
-        parts.append(chip_text("media", value=media))
-    star_min = _payload_num(data.get(_pkey("star"), 0) or 0, int) or 0
-    if star_min > 0:
-        parts.append(chip_text("star", n=star_min))
-    if data.get(_pkey("later")):
-        parts.append(chip_text("later"))
-    user_tag = str(data.get(_pkey("usertag"), "") or "").strip()
-    if user_tag:
-        parts.append(chip_text("usertag", value=user_tag))
-    date = value_label(
-        "date", str(data.get(_pkey("date"), "all") or "all")
+    return t("common.sep.middot").join(
+        spec.label for spec in condition_chips.chips(state)
     )
-    if date is not None:
-        parts.append(chip_text("date", value=date))
-    # 🔒 ロックありのみ — 条件チップバーと同じ語彙・同じ軸順。
-    if data.get(_pkey("locked")):
-        parts.append(chip_text("locked"))
-    if data.get(_pkey("recursive")):
-        parts.append(chip_text("recursive"))
-    text = str(data.get(_pkey("filter"), "") or "").strip()
-    if text:
-        parts.append(chip_text("filter", text=text))
-    return t("common.sep.middot").join(parts)
 
 
 def saved_search_tooltip(entry: dict) -> str:

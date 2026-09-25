@@ -60,7 +60,7 @@ _available = False
 #: ``create_vector_scanner(vector_index=, folder_cache=, parent=)`` を持つこと。
 #: 任意メソッド: ``open_tag_index_status(data_dir)``（開けない理由まで返す）、
 #: ``models_doc_path() -> Path | None``（パック同梱のセットアップガイドの
-#: 実パス — 本体がパック内部のフォルダ構成を知らずに済むための口。#178）。
+#: 実パス — 本体がパック内部のフォルダ構成を知らずに済むための口）。
 _provider = None
 
 #: :func:`register_provider` に渡された所有者トークン（通常は登録した
@@ -70,7 +70,7 @@ _provider = None
 #: 「activate より後に登録された provider」も所有者が分かる。
 _provider_owner = None
 
-#: 直近の :func:`open_tag_index` が下した判定（UIレビュー 07-25 #114）:
+#: 直近の :func:`open_tag_index` が下した判定:
 #: ``"unavailable"``（パック無効 / provider 不在）/ ``"missing"``（tags.db が
 #: 無い）/ ``"empty"``（開けたがまだ画像が入っていない）/ ``"error"``
 #: （ファイルはあるが開けない = 壊れている疑い）/ ``"ok"``。
@@ -84,7 +84,7 @@ _tag_index_status = "unavailable"
 #: 再読込をぶら下げる。
 _provider_callbacks: list[Callable[[], None]] = []
 
-#: 直近の登録/解除コールバック発火で購読者が失敗したか（項目#189）。
+#: 直近の登録/解除コールバック発火で購読者が失敗したか。
 #: register_provider は購読者例外を握って続行する（1 購読者の失敗で activate
 #: 全体を落とさない）ため、「provider は登録されたのに UI 反映（インデックス
 #: 再読込 → バナー/タイトル更新）が途中で死んだ」状態が無記録のまま残り得た。
@@ -106,9 +106,9 @@ def register() -> None:
 def unregister() -> None:
     """AI 機能パックを無効化する（テスト用）。
 
-    (UIレビュー07-25 追修) 併せて :func:`tag_index_status` を初期値
+    併せて :func:`tag_index_status` を初期値
     ``"unavailable"`` へ戻す — 無効化後も直前の ``"ok"`` / ``"error"`` が
-    残ると、パック不在の状態で「索引が壊れています」等の案内が出得た
+    残ると、パック不在の状態で「索引が壊れています」等の案内が出得る
     （:func:`open_tag_index` が同じ状況で書く値と一致させる）。
     """
     global _available, _tag_index_status
@@ -126,7 +126,7 @@ def provider():
 def models_doc_path() -> "Path | None":
     """パック同梱のセットアップガイド（tagger-models.md 相当）の実パス。
 
-    provider の任意メソッド ``models_doc_path()`` に委譲する（#178: 本体は
+    provider の任意メソッド ``models_doc_path()`` に委譲する（本体は
     「どのパックが何というファイルをどこに持つか」を知らない — パスの知識は
     パック側にある）。provider 未登録・メソッド未実装・解決失敗は ``None``
     （ヘルプ側は「ファイルが見つかりません」案内へ劣化する）。
@@ -168,7 +168,7 @@ def register_provider(p, *, owner=None) -> None:
 
 
 def provider_ui_sync_failed() -> bool:
-    """直近のコールバック発火で購読者（UI 反映）が失敗したか（項目#189）.
+    """直近のコールバック発火で購読者（UI 反映）が失敗したか.
 
     True のとき provider 自体は登録済みだが、MainWindow のインデックス
     再読込〜UI 点灯が途中で例外死しており、AI UI は劣化シーム（表示されるが
@@ -178,7 +178,7 @@ def provider_ui_sync_failed() -> bool:
 
 
 def _fire_provider_callbacks(event: str) -> None:
-    """登録/解除コールバックを発火し、失敗を記録する（項目#189）.
+    """登録/解除コールバックを発火し、失敗を記録する.
 
     例外は従来どおり握って続行する（1 購読者の失敗でプラグインの activate
     全体を失敗＝自動無効化させないため）が、握り潰しを無記録にしない:
@@ -212,7 +212,7 @@ def unregister_provider(*, owner=None) -> None:
     プラグインが登録した provider を巻き添えで落とせる）。所有者が違う／
     既に別の登録に入れ替わっている場合は何もしない。
 
-    (UIレビュー07-25 追修) :func:`tag_index_status` も初期値へ戻す —
+    :func:`tag_index_status` も初期値へ戻す —
     provider 不在は :func:`open_tag_index` が ``"unavailable"`` と判定する
     状態なので、解除の時点で古い判定（``"ok"`` / ``"error"``）を捨てる。
     """
@@ -289,7 +289,7 @@ def tag_index_status() -> str:
     """直近の :func:`open_tag_index` の判定（:data:`_TAG_INDEX_STATUSES` のいずれか）。
 
     UI（AI ポップオーバーのバナー・0 件/エラーカード）が「索引が無い」と
-    「索引が壊れている」を出し分けるための唯一の情報源（UIレビュー 07-25 #114）。
+    「索引が壊れている」を出し分けるための唯一の情報源。
     ``None`` 返却だけでは両者を区別できないため、開いた側でここへ記録する。
     """
     return _tag_index_status
@@ -308,7 +308,7 @@ def open_tag_index(data_dir: Path):
     tags.db を 1 バイトも読まないうちに :class:`ImportError` が飛ぶ。これを
     ``error``（= ファイルはあるが壊れている疑い）に丸めると、UI が
     ``broken_db_banner``「ファイルが壊れている可能性があります…再スキャン」を
-    出して**何をしても直らない**案内になる（項目#118）。import 失敗は provider
+    出して**何をしても直らない**案内になる。import 失敗は provider
     不在と同じエンジンシームの劣化なので ``unavailable`` へ落とし、``error`` は
     ファイルに触れた後の失敗専用に残す（兄弟の :func:`open_vector_index` と同型）。
     """
@@ -325,7 +325,7 @@ def open_tag_index(data_dir: Path):
             status = "ok" if index is not None else "missing"
     except ImportError as exc:
         # engine の遅延 import が解決できない = エンジン不在。tags.db の破損では
-        # ないので「壊れている」文言へは落とさない（項目#118）。
+        # ないので「壊れている」文言へは落とさない。
         logger.warning(
             "tags.db provider unavailable (import of {!r} failed): {}",
             getattr(exc, "name", None) or "?", exc,
@@ -359,7 +359,7 @@ def open_vector_index(data_dir: Path):
         # 遅延 import の失敗は numpy 欠損とは限らない（パックの engine/ 欠落・
         # vector_index.py の欠損も同じ枝へ落ちる）。原因モジュールを見ずに
         # 「numpy」と決め打ちすると、ログを一次情報にする不具合調査を誤誘導
-        # する（項目#192）。
+        # する。
         name = getattr(exc, "name", None) or ""
         if name == "numpy" or name.startswith("numpy."):
             logger.warning(

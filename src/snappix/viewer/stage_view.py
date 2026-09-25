@@ -47,6 +47,7 @@ from ..common.ui import (
     FONT_CAPTION_PT,
     PANEL_HEADER_HEIGHT,
     ElidedLabel,
+    FocusBandMixin,
     current_tokens,
     hint_style,
     set_icon,
@@ -67,10 +68,10 @@ class StageFilmstrip(FilmstripView):
     THUMB_EDGE = FILMSTRIP_HEIGHT - 2 * FilmstripView._PAD
 
     # ---------------------------------------------------- colour overrides
-    # メインウィンドウの UI 面に常設される帯だが、ステージ演出 (Phase 3-1)
+    # メインウィンドウの UI 面に常設される帯だが、ステージ演出
     # では中央プレビューと同じ ``bg_stage`` 地色を敷いて「展示台」を中央〜
     # 下端でひと続きに見せる。トークン参照 (current_tokens) なのでテーマに
-    # 追従する（docs/claude/design.md: 色のハードコード禁止）。
+    # 追従する（色はハードコードしない）。
 
     def _bg_color(self) -> QColor:
         return QColor(current_tokens().bg_stage)
@@ -85,7 +86,7 @@ class StageFilmstrip(FilmstripView):
         return c
 
     def _mat_color(self) -> QColor:
-        # 読み込み済みセルの台紙 (N-127)。α8 は placeholder（α18）より薄く、
+        # 読み込み済みセルの台紙。α8 は placeholder（α18）より薄く、
         # 「読めている / まだ読めていない」の 2 段を保ったまま額装できる。
         c = QColor(self.palette().text().color())
         c.setAlpha(8)
@@ -93,7 +94,7 @@ class StageFilmstrip(FilmstripView):
 
     # ------------------------------------------------- double-click 封じ込め
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt API)
-        """帯上のダブルクリックは親（``PreviewColumn``）へ渡さない（項目#112）.
+        """帯上のダブルクリックは親（``PreviewColumn``）へ渡さない.
 
         ``FilmstripView.mousePressEvent`` はセルに当たったときだけ accept し、
         外れると ignore して親へ伝播する。``QWidget`` 既定の
@@ -111,7 +112,7 @@ class StageFilmstrip(FilmstripView):
         super().mouseDoubleClickEvent(event)
 
 
-class StageHeader(QWidget):
+class StageHeader(FocusBandMixin, QWidget):
     """プレビュー列上端の常設ヘッダー（PanelHeader 規格 28px）.
 
     分割時: ``[‹] [›]  タイトル ・ n/m  [⤢ 最大化 (E)]``。
@@ -119,11 +120,16 @@ class StageHeader(QWidget):
     右端の最大化ボタンが ``[⛶ 全画面 (F11)]`` に入れ替わる
     （:meth:`set_maximized`）。囲みの髪の毛線は qss の ``#panelHeader``
     （透明背景 + 1px 下境界）をそのまま使い、ボタンはツールバー規約どおり
-    フラット QToolButton。色・フォントサイズはトークン経由（design.md）。
+    フラット QToolButton。色・フォントサイズはトークン経由。
 
     送りボタンは「投稿」ではなく**グリッドの前後の項目**を歩む中立の導線
-    （UIレビュー 07-25 #15）で、歩ける先が無いとき（無選択・端・空グリッド）は
+    で、歩ける先が無いとき（無選択・端・空グリッド）は
     ホストが :meth:`set_step_enabled` で無効化する。
+
+    フォーカス帯（``FocusBandMixin``）は PanelHeader と同じ文法 — プレビュー列に
+    フォーカスがあるとき地色が一段変わり、左マージン内に ▸、題名が帯のインク色。
+    左マージンは ▸ の席（``FOCUS_MARK_X + FOCUS_MARK_WIDTH``）を常時空けて
+    おく（フォーカスで幅を変えない = 中身が動かない）。
     """
 
     back_requested = Signal()
@@ -131,7 +137,7 @@ class StageHeader(QWidget):
     maximize_requested = Signal()
     prev_post_requested = Signal()
     next_post_requested = Signal()
-    #: post.md 本文表示中の「‹ 画像に戻る」（N-87）。ホストがこの項目の
+    #: post.md 本文表示中の「‹ 画像に戻る」。ホストがこの項目の
     #: 先頭の画像・動画へ選択を戻す。
     back_to_media_requested = Signal()
     #: 印ストリップの要求 (path, kind, value) — ホストが単一 funnel へ渡す。
@@ -148,7 +154,7 @@ class StageHeader(QWidget):
         self.setFixedHeight(PANEL_HEADER_HEIGHT)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 0, 4, 0)
+        layout.setContentsMargins(8, 0, 4, 0)
         layout.setSpacing(6)
 
         # 出口ボタン（最大化時のみ表示）。テキスト付きだがツールバーの検索
@@ -168,7 +174,7 @@ class StageHeader(QWidget):
         # 項目送り（常設）: グリッド選択を前後の項目へ歩む。分割時の
         # 「プレビューだけ見て次へ」の主導線（Ctrl+←/→ は最大化中の
         # ショートカット — ツールチップに併記）。
-        # (UIレビュー 07-25 #15) 文言は「前の投稿 / 次の投稿」から中立の
+        # 文言は「前の投稿 / 次の投稿」から中立の
         # 「前へ / 次へ」へ — 実体はグリッド選択の ±1 送りで、post.md の無い
         # フォルダにも裸のファイルにも着地する（「post.md が無い状態が基本」）。
         self._prev_btn = QToolButton(self)
@@ -198,11 +204,13 @@ class StageHeader(QWidget):
         # :class:`ElidedLabel`）に寄せる — 席ごとに自前で持つと、同じ直しが
         # 1 コピーにしか当たらない。
         self._title_label = ElidedLabel(parent=self, elide=Qt.ElideRight)
+        # フォーカス帯中の色は qss の ``#panelHeader[focusBand] #panelHeaderTitle``
+        # （PanelHeader と同じ規則。題名は inline 色を持たないので外す物が無い）。
+        self._title_label.setObjectName("panelHeaderTitle")
         layout.addWidget(self._title_label, 1)
 
-        # 印ストリップ（compact）— 旧 ★N ラベルの席（UIレビュー 2026-09-11 E2）。
-        # 「いま何に★が付いているか」を見せるだけだった面を、★ / あとで見る /
-        # タグをその場で付けられる面にする。最大化中だけ出す（分割時のヘッダーは
+        # 印ストリップ（compact）— ★ / あとで見る / タグをその場で付けられる
+        # 面。最大化中だけ出す（分割時のヘッダーは
         # 幅 ≈400px で入らず、隣の情報パネルが full 版を常設で持つ）。店が無ければ
         # 隠れる。高さ増は 0（28px ヘッダー内）。
         self._strip = CurationStrip(self, mode=MODE_COMPACT)
@@ -211,20 +219,20 @@ class StageHeader(QWidget):
 
         self._pos_label = QLabel(self)
         self._pos_label.setStyleSheet(hint_style(font_pt=FONT_CAPTION_PT))
-        # (UIレビュー07-25 追修 #15) ‹ › は**グリッドの項目**を歩くのに対し、
+        # ‹ › は**グリッドの項目**を歩くのに対し、
         # この n/m は**開いている項目の中の画像**の位置 — 隣り合っているので
         # 「次へ」を押せば n が 1 進むと読めてしまう。どちらの軸かを両側の
-        # ツールチップで名指しする（#15 の裁定どおり「投稿」の語は使わない —
+        # ツールチップで名指しする（「投稿」の語は使わない —
         # post.md 不在が基本なので、軸は「グリッドの項目」と「中の画像」）。
         self._pos_label.setToolTip(t("viewer.stage_view.position_tooltip"))
         layout.addWidget(self._pos_label)
 
-        # post.md 本文を表示中の戻り導線（UIレビュー 2026-08-28 N-87）。
+        # post.md 本文を表示中の戻り導線。
         # post.md は歩く母集合（tile_paths）の外なので n/m もトラックの
-        # ハイライトも消え、最大化中の現在地が完全に無所属になっていた。
+        # ハイライトも消え、最大化中の現在地が完全に無所属になる。
         # 位置カウンタの席に「投稿本文」を出したうえで、隣に「画像へ戻る」を
         # 常設せず**本文表示中だけ**出す。図像はカプセルと同じ「ファイル移動」
-        # 語彙の arrow-left（項目送りの chevron とは別軸 — N-47）。
+        # 語彙の arrow-left（項目送りの chevron とは別軸）。
         self._back_media_btn = QToolButton(self)
         set_icon(self._back_media_btn, "arrow-left")
         self._back_media_btn.setText(t("viewer.stage_view.back_to_media"))
@@ -238,7 +246,7 @@ class StageHeader(QWidget):
 
         # 最大化への入口（分割時のみ・右端）。出口 [◧ 分割に戻す] と同じ
         # 文法・同じ席に置くことで入口/出口が対称になり、(E) の併記で
-        # キーも学べる (UIレビュー 07-25 #16)。
+        # キーも学べる。
         self._maximize_btn = QToolButton(self)
         set_icon(self._maximize_btn, "maximize")
         self._maximize_btn.setText(t("viewer.stage_view.maximize"))
@@ -250,10 +258,9 @@ class StageHeader(QWidget):
         layout.addWidget(self._maximize_btn)
 
         self._fullscreen_btn = QToolButton(self)
-        # UIレビュー 07-25 #104: external-link は「既定アプリで開く（アプリ外）」
-        # の図像で、アプリ内に留まる全画面と正反対の意味を兼ねていた。expand 系
-        # （4 方向に開く矢印）へ差し替え、ラベルも「閲覧モード」からキー併記の
-        # 「全画面 (F11)」（既存の ``viewer.image_view.ctrl_fullscreen`` を再利用）
+        # external-link は「既定アプリで開く（アプリ外）」の図像で、アプリ内に
+        # 留まる全画面と正反対の意味になるので使わない。expand 系（4 方向に開く
+        # 矢印）を使い、ラベルもキー併記の「全画面 (F11)」（既存の ``viewer.image_view.ctrl_fullscreen`` を再利用）
         # にして「どこへ行くのか」をボタン自体が説明するようにする。
         # 「閲覧モード」の語自体はメニュー・ヘルプ側でそのまま維持する。
         set_icon(self._fullscreen_btn, "expand")
@@ -274,14 +281,19 @@ class StageHeader(QWidget):
 
     # ------------------------------------------------------------------ API
 
+    def _apply_focus_band_title(self, on: bool) -> None:
+        # 題名の色は app シートの規則が祖先の動的プロパティで切り替える
+        # （inline 色は無い）ので、ここでは何も差し替えない。
+        del on
+
     def set_maximized(self, maximized: bool) -> None:
         """モードに応じてヘッダーの両端を組み替える.
 
         * 左端 — 最大化中のみ ``[◧ 分割に戻す (G)]``。
         * 右端 — 分割時は ``[⤢ 最大化 (E)]``、最大化時は同じ席が
-          ``[⛶ 全画面 (F11)]`` に入れ替わる (UIレビュー 07-25 #16 / #104)。
-        * 送りボタン — 分割時はアイコンのみに畳んで幅をタイトルへ返す
-          (UIレビュー 07-25 #96)。最大化時はラベル付き（幅に余裕がある）。
+          ``[⛶ 全画面 (F11)]`` に入れ替わる。
+        * 送りボタン — 分割時はアイコンのみに畳んで幅をタイトルへ返す。
+          最大化時はラベル付き（幅に余裕がある）。
         """
         self._back_btn.setVisible(maximized)
         self._fullscreen_btn.setVisible(maximized)
@@ -298,7 +310,7 @@ class StageHeader(QWidget):
 
     @staticmethod
     def _trim_step_button(btn: QToolButton, maximized: bool) -> None:
-        """ラベル付き送りボタンの余幅を落とす (UIレビュー 2026-09-11 N-108).
+        """ラベル付き送りボタンの余幅を落とす.
 
         ``QToolButton`` の ``TextBesideIcon`` は ``sizeHint`` にラベル幅の
         両脇へ空白 2 つ分を足す。``_next_btn`` は「次へ ›」の並びを作るため
@@ -324,8 +336,7 @@ class StageHeader(QWidget):
 
         非メディア（``.part`` / ZIP / PDF / テキスト）を表示中の F11 は、
         いま見ているものではなくフォルダの先頭メディアを開く（G05 の意図した
-        機能）。挙動は変えず、ボタン自身にそれを予告させる
-        （UIレビュー 2026-08-28 N-21）。
+        機能）。挙動は変えず、ボタン自身にそれを予告させる。
         """
         if folder_mode:
             self._fullscreen_btn.setText(
@@ -347,7 +358,7 @@ class StageHeader(QWidget):
         return self._fullscreen_btn.text()
 
     def set_step_enabled(self, can_prev: bool, can_next: bool) -> None:
-        """送りボタンの活性を歩ける先の有無に同期する (UIレビュー 07-25 #15).
+        """送りボタンの活性を歩ける先の有無に同期する.
 
         無選択・端・空グリッドでは押せる見た目のまま無反応だったため、ホスト
         （``_update_stage_header``）が計算した可否をそのまま反映する。
@@ -462,7 +473,7 @@ class StageHeader(QWidget):
         """現在地（投稿タイトル / フォルダ名）と位置カウンタを更新する.
 
         *position* は通常 ``n/m``（画像・動画の位置）だが、表示中が画像・動画
-        でないときはホストが種別ラベルや「投稿本文」を渡す（N-22② / N-87）。
+        でないときはホストが種別ラベルや「投稿本文」を渡す。
         軸の説明が変わるので *position_tooltip* も併せて受け取る（空なら
         既定の ``position_tooltip``）。*back_to_media* は post.md 本文表示中の
         戻り導線の表示可否。

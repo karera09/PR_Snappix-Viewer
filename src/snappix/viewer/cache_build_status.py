@@ -73,10 +73,10 @@ class CacheBuildStatusWidget(QWidget):
         self._bar.setRange(0, 0)  # busy/indeterminate until the first total
         row.addWidget(self._bar)
 
-        # UIレビュー 07-25 #72: 絵文字グリフ（⏸ / ▶ / ✕）+ 箱型 QPushButton は
-        # design.md の 2 規約（アイコンは icons.py の SVG / ステータスバーの
-        # 補助操作はフラットなツールボタン）違反 — QToolButton + set_icon へ
-        # 置換（テーマ切替時の再着色も set_icon の登録に乗る）。
+        # 絵文字グリフ（⏸ / ▶ / ✕）+ 箱型 QPushButton ではなく、アイコンは
+        # icons.py の SVG・ステータスバーの補助操作はフラットなツールボタン
+        # という規約に従い QToolButton + set_icon で組む（テーマ切替時の
+        # 再着色も set_icon の登録に乗る）。
         self._pause_btn = QToolButton()
         set_icon(self._pause_btn, "pause")
         self._pause_btn.setToolTip(t("viewer.cache_build_status.tooltip_pause"))
@@ -100,7 +100,7 @@ class CacheBuildStatusWidget(QWidget):
         self._last_update = 0.0
         self._last_done = 0
         self._last_total = 0
-        set_icon(self._pause_btn, "pause")  # (UIレビュー 07-25 #72)
+        set_icon(self._pause_btn, "pause")
         self._pause_btn.setToolTip(t("viewer.cache_build_status.tooltip_pause"))
         self._pause_btn.setEnabled(True)
         self._cancel_btn.setEnabled(True)
@@ -168,7 +168,7 @@ class CacheBuildStatusWidget(QWidget):
     def set_paused(self, paused: bool) -> None:
         """Reflect the builder's paused state on the button + label."""
         self._paused = bool(paused)
-        # (UIレビュー 07-25 #72) 状態表現も SVG グリフの差し替えで行う。
+        # 状態表現も SVG グリフの差し替えで行う。
         if self._paused:
             set_icon(self._pause_btn, "play")
             self._pause_btn.setToolTip(t("viewer.cache_build_status.tooltip_resume"))

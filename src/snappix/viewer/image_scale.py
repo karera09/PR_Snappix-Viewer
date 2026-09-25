@@ -91,7 +91,7 @@ def pil_to_qimage(pil: Image.Image) -> QImage:
     Callers that only need a ``QImage`` (clipboard payloads, worker
     threads) must use this instead of ``pil_to_qpixmap(...).toImage()``:
     the pixmap round-trip costs a second full-pixel copy plus a platform
-    surface allocation that is thrown away immediately (レビュー #144).
+    surface allocation that is thrown away immediately.
     """
     if pil.mode != "RGBA":
         pil = pil.convert("RGBA")

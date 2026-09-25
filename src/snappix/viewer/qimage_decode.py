@@ -1,12 +1,12 @@
 """Shared worker-thread image decoding for the viewer.
 
-Centralises two Qt bugs whose workarounds were originally proven in
-``thumbnail_loader.py`` (diagnostic history: a faulthandler snapshot during
+Centralises workarounds for two Qt defects in worker-thread decoding
+(evidence: a faulthandler snapshot during
 the fast-scroll freeze showed every worker stuck inside ``QImageReader``
 while the main thread sat in ``app.exec`` with no Python frames — the
 hallmark of GIL contention):
 
-1. **SMB/CJK path bug** — Qt 6's ``QImageReader(str(path))`` fails with
+1. **SMB/CJK path failure** — Qt 6's ``QImageReader(str(path))`` fails with
    "File not found" on some SMB/NAS paths containing CJK characters plus
    full-width brackets/commas.  Workaround: read the bytes with Python's
    ``open()`` (which handles those paths fine) and decode from memory
@@ -70,8 +70,8 @@ _EXIF_ORIENTATION_TAG = 0x0112
 
 # Serialises every ``QImageReader`` decode/probe across worker threads.
 #
-# Workaround (3) — process-wide deadlock (review 2026-07-16 item 1, verified
-# 5/5 by real render): when several thumbnail workers fall into the
+# Workaround (3) — process-wide deadlock (reproduced 5/5 by a real
+# render): when several thumbnail workers fall into the
 # QImageReader fallback concurrently on files Pillow can't identify (0-byte
 # JPEGs, extension-spoofed PNGs, truncated JPEGs — the typical output of an
 # interrupted download), PySide6's ``QImageReader.size()`` / ``.read()`` hold

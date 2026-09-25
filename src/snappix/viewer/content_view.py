@@ -55,10 +55,7 @@ from .content.pdf_view import PdfView, _PdfTooLarge, _read_pdf_bytes
 from .content.text_view import (
     TEXT_SUFFIXES,
     TextView,
-    _decode_text,
     _read_text_preview,
-    _trim_incomplete_utf8_tail,
-    _trim_incomplete_utf16_tail,
 )
 from .content.zip_view import ZipView
 from .context_menus import CurationHooks
@@ -101,7 +98,7 @@ _LAZY_MEDIA = "メディア"
 
 
 def has_dedicated_view(path: Path) -> bool:
-    """Whether a *file* path routes to a real preview sub-view (L07).
+    """Whether a *file* path routes to a real preview sub-view.
 
     Kept in lockstep with ``ContentView.show_path``'s suffix routing — the two
     live in the same module for exactly that reason.  Every branch show_path
@@ -145,7 +142,7 @@ class ContentView(QWidget):
     markdown_font_pt_changed = Signal(int)      # MarkdownView Ctrl+wheel font
     media_loop_toggled = Signal(bool)           # MediaView loop toggle
     media_volume_changed = Signal(int)          # MediaView volume slider (F07)
-    media_playback_rate_changed = Signal(float)  # MediaView rate combo (N-136)
+    media_playback_rate_changed = Signal(float)  # MediaView rate combo
     # 「開いて閲覧」 on the ZIP preview (F08) — the window drills into the archive.
     zip_open_requested = Signal(Path)
     # Full dimensions (W, H) of the currently-previewed image, or (0, 0) when
@@ -153,7 +150,7 @@ class ContentView(QWidget):
     image_info_changed = Signal(int, int)
     # The image decode for this path failed (error card is up) — forwarded
     # from ImageView so the window can retry with the next representative
-    # candidate when *it* (not the user) picked the file (#84).
+    # candidate when *it* (not the user) picked the file.
     image_load_failed = Signal(Path)
     # "この画像に類似を検索" (C-10 extension) — forwarded from ImageView (the
     # central image preview) and MarkdownView (inline post.md images).
@@ -169,22 +166,22 @@ class ContentView(QWidget):
     # 「フォルダを開く…」 on the first-run welcome card (A02) — the window
     # routes this to its root picker.
     open_folder_requested = Signal()
-    # 「上の階層へ」 on the empty-folder card (UIレビュー #6) — the window
+    # 「上の階層へ」 on the empty-folder card — the window
     # routes this to its go-up navigation.
     go_up_requested = Signal()
     # 「操作の基本 (F1)」 on the welcome card (E1) — the window opens the guide.
     help_requested = Signal()
-    # [◧ 分割ビューに戻す (G)] on the maximised-empty card (N-85) — the window
+    # [◧ 分割ビューに戻す (G)] on the maximised-empty card — the window
     # routes this to the same ``_exit_stage_to_browse`` G / Esc / ヘッダー use,
     # so the history symmetry of leaving the maximised preview is unchanged.
     restore_split_requested = Signal()
-    # Digit 0–5 star rating for the previewed image (UIレビュー #11): forwarded
+    # Digit 0–5 star rating for the previewed image: forwarded
     # from ImageView (focus inside the image) and also caught by this widget's
     # own keyPressEvent (stage mode focuses the ContentView itself), so the
     # star keys work anywhere on the stage.  The window persists to user_meta.
     star_key_requested = Signal(int)
-    # 最大化プレビューを全画面（閲覧モード）とキー集合で揃えるための 2 本
-    # （UIレビュー 07-25 #22）。Space = 次の画像は既存の ``navigate_requested``
+    # 最大化プレビューを全画面（閲覧モード）とキー集合で揃えるための 2 本。
+    # Space = 次の画像は既存の ``navigate_requested``
     # を +1 で再利用するので新設不要。``jump_edge_requested`` は Home/End で、
     # 引数 True = 末尾 / False = 先頭。母集合（現在フォルダのファイル一覧）は
     # ウィンドウが持つため、ここは意図だけを伝えるダムなシグナル。
@@ -201,13 +198,13 @@ class ContentView(QWidget):
     PAGE_FOLDER = 8
     PAGE_WELCOME = 9
     PAGE_EMPTY_FOLDER = 10
-    #: 空フォルダ／空ライブラリの**静音**プレースホルダ (UIレビュー 07-25 #51)。
+    #: 空フォルダ／空ライブラリの**静音**プレースホルダ。
     #: 見出し + [フォルダを開く…] を持つ案内カード（9 / 10）はグリッド席が
     #: 畳まれている時だけ出し、分割中はこちらへ格下げする。空状態
-    #: オーケストレータの ``SECONDARY`` 役の描画先でもある（N-101 — アイコン
+    #: オーケストレータの ``SECONDARY`` 役の描画先でもある（アイコン
     #: 無し 1 行。文言は割当ごとに :meth:`show_empty_secondary` が差し替える）。
     PAGE_EMPTY_QUIET = 11
-    #: 最大化中に主案内の行き場が無いときのカード (N-85) — 幅 0 のグリッドを
+    #: 最大化中に主案内の行き場が無いときのカード — 幅 0 のグリッドを
     #: 指す案内の代わりに [◧ 分割ビューに戻す (G)] を出す。
     PAGE_EMPTY_MAXIMIZED = 12
 
@@ -216,10 +213,9 @@ class ContentView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # UIレビュー 07-25 #5: このコンテナは既定の ``Qt.NoFocus`` のままで、
-        # ``setFocus()`` が**完全な no-op** だった（最大化時の
-        # 「フォーカスをプレビューへ」が実際には何も起きていなかった根本原因の
-        # もう半分）。フォーカスを受けられないページ（案内カード等）を表示中の
+        # このコンテナが既定の ``Qt.NoFocus`` のままだと ``setFocus()`` が
+        # **完全な no-op** になり、最大化時の「フォーカスをプレビューへ」が
+        # 何も起こさない。フォーカスを受けられないページ（案内カード等）を表示中の
         # フォールバック先として、また自前 keyPressEvent（0-5 / Space /
         # Home / End）の受け皿として、明示的にフォーカスを受け取れるようにする。
         self.setFocusPolicy(Qt.StrongFocus)
@@ -231,11 +227,11 @@ class ContentView(QWidget):
             self.open_folder_requested.emit
         )
         self._welcome.help_requested.connect(self.help_requested.emit)
-        # 静音プレースホルダ (UIレビュー 07-25 #51): グリッド席が見えている
+        # 静音プレースホルダ: グリッド席が見えている
         # 間の「空フォルダ」側。案内カード本体（見出し + 次の一手）は操作文脈
         # を持つグリッドが 1 枚だけ出し、こちらはアイコン + 1 行に留める。
-        # N-101: 従属面は**アイコン無し 1 行**（主カードと同じ大きさの
-        # フォルダアイコンが 3 面に並ぶのをやめる）。
+        # 従属面は**アイコン無し 1 行**（主カードと同じ大きさの
+        # フォルダアイコンを 3 面に並べない）。
         self._empty_quiet = _EmptyView(
             t("viewer.content_view.empty_quiet"),
             icon_name=None,
@@ -261,7 +257,7 @@ class ContentView(QWidget):
         self._image = ImageView()
         self._image.navigate_requested.connect(self._on_navigate_requested)
         # ビュー内トグル → ホストへの書き戻しは image_view 側の集約点を通す
-        # （apply_state の対。全画面側の配線漏れ = N-78 を構造で塞ぐ）。
+        # （apply_state の対。片側だけの配線漏れを構造で塞ぐ）。
         connect_image_view_writeback(
             self._image,
             zoom_persist=self.image_zoom_persist_toggled.emit,
@@ -279,7 +275,7 @@ class ContentView(QWidget):
             self.preview_maximize_requested.emit
         )
         self._image.star_key_requested.connect(self.star_key_requested.emit)
-        # ステージ演出 (redesign 2026-07 Phase 3-1): the central image preview
+        # ステージ演出: the central image preview
         # is always the "stage" (the browse grid lives elsewhere, markdown is a
         # document page), so give it the bg_stage backdrop + hairline frame.
         self._image.enable_stage_background()
@@ -315,9 +311,23 @@ class ContentView(QWidget):
         self._folder_preview.navigate_requested.connect(
             self._on_navigate_requested
         )
+        # フォルダプレビューの中央画像は 3 つ目の ImageView。
+        # ビュー内トグル（ズーム維持 / ミニマップ）の書き戻しも中央プレビューと
+        # 同じ集約点を通す — 繋がないと、この面の右クリックでのトグルが
+        # 黙って捨てられる。
+        connect_image_view_writeback(
+            self._folder_preview.centre_image,
+            zoom_persist=self.image_zoom_persist_toggled.emit,
+            minimap=self.image_minimap_toggled.emit,
+        )
         # Grace-period gating for at-edge wheel navigation — shared logic
         # with the fullscreen lightbox (see edge_nav.WheelNavGate).
         self._nav_gate = WheelNavGate()
+        # いま葉ビューへ載っている ``(ページ, パス)`` — :meth:`show_path` の
+        # 同一パス早道の判定材料。葉の ``show_*`` ラッパーだけが立て、
+        # ページが変われば :meth:`_on_page_changed` が落とす（離脱した葉は
+        # そこで解放されるので、戻りは必ず読み直しになる）。
+        self._shown: tuple[int, Path] | None = None
 
         self._stack.addWidget(self._empty)             # 0
         self._stack.addWidget(self._markdown)          # 1
@@ -339,9 +349,9 @@ class ContentView(QWidget):
         layout.addWidget(self._stack)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        # 端到達の案内オーバーレイ (UIレビュー 07-25 #106) — 全画面（閲覧
-        # モード）が「もう一度 → で次の投稿へ」と教えるのに、プレビュー最大化
-        # では列の端で ←→ が完全に無反応だった。**全画面と同じ部品**
+        # 端到達の案内オーバーレイ — 全画面（閲覧モード）が「もう一度 → で
+        # 次の投稿へ」と教えるのと同じく、プレビュー最大化でも列の端の ←→ に
+        # 反応を返す。**全画面と同じ部品**
         # （``lightbox.CenterMessageOverlay``）を使って体裁を揃える。
         # ページの上に浮かせるので stack ではなくこのコンテナの子。
         self._message_overlay = CenterMessageOverlay(self)
@@ -351,8 +361,8 @@ class ContentView(QWidget):
     def show_center_message(self, text: str) -> None:
         """中央に大きめの案内メッセージを一瞬出す（1.5 秒で自動消灯）。
 
-        プレビュー最大化中の「列の端で ←→ を押した」等の状況説明用
-        (UIレビュー 07-25 #106)。閲覧モードのタイトル/予告オーバーレイと同一
+        プレビュー最大化中の「列の端で ←→ を押した」等の状況説明用。
+        閲覧モードのタイトル/予告オーバーレイと同一
         の部品なので、2 つのモードで同じ見た目・同じ寿命になる。
         """
         self._message_overlay.show_message(text)
@@ -370,23 +380,23 @@ class ContentView(QWidget):
         Used when the library root has settled with no entries — the plain
         "select a folder from the grid" hint has nothing to select, so the
         centre pane offers 「フォルダを開く…」 directly.  *default_library* adds
-        the note explaining the auto-created 「library」 folder (UIレビュー #6).
+        the note explaining the auto-created 「library」 folder.
         """
         self._welcome.set_default_library(default_library)
         self._stack.setCurrentIndex(self.PAGE_WELCOME)
 
     def show_empty_folder(self, *, can_go_up: bool = True) -> None:
-        """Show the empty-folder card (UIレビュー #6) for a drilled-into
+        """Show the empty-folder card for a drilled-into
         folder with no entries — 「上の階層へ」 first, welcome card never.
 
         *can_go_up* False（ライブラリ境界）ではその主アクションを隠す
-        (UIレビュー07-25 追修 #6 — :meth:`_EmptyFolderView.set_can_go_up`)。
+        （:meth:`_EmptyFolderView.set_can_go_up`）。
         """
         self._empty_folder.set_can_go_up(can_go_up)
         self._stack.setCurrentIndex(self.PAGE_EMPTY_FOLDER)
 
     def show_empty_quiet(self) -> None:
-        """空フォルダ時の**静音**プレースホルダを出す (UIレビュー 07-25 #51).
+        """空フォルダ時の**静音**プレースホルダを出す.
 
         グリッド席が見えている間、案内カード（見出し + [上の階層へ] /
         [フォルダを開く…]）はグリッド側の 1 枚だけが持つ。プレビュー列は
@@ -408,7 +418,7 @@ class ContentView(QWidget):
         self._stack.setCurrentIndex(self.PAGE_EMPTY_QUIET)
 
     def show_empty_maximized(self, *, scan_error: bool = False) -> None:
-        """最大化中に主案内の行き場が無いときのカードを出す（N-85）.
+        """最大化中に主案内の行き場が無いときのカードを出す.
 
         グリッド席が幅 0 の間は「グリッドから選んでください」が見えない面を
         指すので、代わりに [◧ 分割ビューに戻す (G)] を出して行き止まりを
@@ -434,19 +444,22 @@ class ContentView(QWidget):
     def show_markdown(self, md_path: Path) -> None:
         self._markdown.set_post(md_path)
         self._stack.setCurrentIndex(self.PAGE_MARKDOWN)
+        self._shown = (self.PAGE_MARKDOWN, md_path)
 
     def show_image(self, path: Path) -> None:
-        # ページ切替を**先に**行う（他の show_* と順序を揃える — 項目#70）。
+        # ページ切替を**先に**行う（他の show_* と順序を揃える）。
         # 逆順だと、先読み済み（``_pil_cache`` ヒット）の画像は show_image の
         # 中で同期的に _on_loaded → _refresh まで走り切るため、まだ隠れて
         # いる ImageView 上で ``_is_pannable()``（スクロールバー範囲依存）が
         # 前の画像の値を返し、カーソル / ミニマップが取り違えられる。
         self._stack.setCurrentIndex(self.PAGE_IMAGE)
         self._image.show_image(path)
+        self._shown = (self.PAGE_IMAGE, path)
 
     def show_file_info(self, path: Path) -> None:
         self._file_info.show_file(path)
         self._stack.setCurrentIndex(self.PAGE_FILE)
+        self._shown = (self.PAGE_FILE, path)
 
     def _ensure_pdf(self) -> "PdfView":
         """Return the PdfView, constructing it on first call.
@@ -518,14 +531,17 @@ class ContentView(QWidget):
             return
         view.show_pdf(path)
         self._stack.setCurrentIndex(self.PAGE_PDF)
+        self._shown = (self.PAGE_PDF, path)
 
     def show_zip(self, path: Path) -> None:
         self._zip.show_zip(path)
         self._stack.setCurrentIndex(self.PAGE_ZIP)
+        self._shown = (self.PAGE_ZIP, path)
 
     def show_text(self, path: Path) -> None:
         self._text.show_text(path)
         self._stack.setCurrentIndex(self.PAGE_TEXT)
+        self._shown = (self.PAGE_TEXT, path)
 
     def _ensure_media(self) -> "MediaView | None":
         """Return the MediaView, constructing it on first call (``None`` = 構築失敗).
@@ -535,9 +551,9 @@ class ContentView(QWidget):
         multimedia plugins won't crash at viewer startup.
 
         構築とホストへの配線は :func:`~snappix.viewer.media_view.build_media_view`
-        が一手に負う（項目#71）— 全画面側 ``LightboxWindow._ensure_media`` と
-        手書きで重複していた 5 点（遅延 import / navigate_requested / loop /
-        volume / rate の再送出 / 保留設定の当て込み）を 1 箇所へ寄せた集約点。
+        が一手に負う — 全画面側 ``LightboxWindow._ensure_media`` と共有する
+        5 点（遅延 import / navigate_requested / loop / volume / rate の
+        再送出 / 保留設定の当て込み）の集約点。
         MediaView への配線を増やすときは必ず工場関数側へ足すこと。
         """
         if self._media is None:
@@ -579,6 +595,7 @@ class ContentView(QWidget):
             return
         view.show_media(path)
         self._stack.setCurrentIndex(self.PAGE_MEDIA)
+        self._shown = (self.PAGE_MEDIA, path)
 
     def show_folder(
         self,
@@ -599,6 +616,7 @@ class ContentView(QWidget):
         """
         self._folder_preview.set_folder(path, placeholder_icon=placeholder_icon)
         self._stack.setCurrentIndex(self.PAGE_FOLDER)
+        self._shown = (self.PAGE_FOLDER, path)
 
     def apply_media_settings(self, state: "ViewerState") -> None:
         if self._media is None:
@@ -619,14 +637,13 @@ class ContentView(QWidget):
         so the lazy-construction stashing is respected).
         """
         # ImageView 分（ズーム維持 / ミニマップ + キャッシュ）は共通 fan-out
-        # （image_view.apply_state — 項目#29）へ委譲。閲覧モード側の 2 つ目の
+        # （image_view.apply_state）へ委譲。閲覧モード側の 2 つ目の
         # インスタンスと同じ入口を通ることで、設定が増えても片側だけ取り
         # 残されない。
-        apply_image_view_state(self._image, state)
-        # 0 = アプリ既定に従う。設定ダイアログから既定へ戻せるように
-        # なった (N-138) ので、0 のときも**既定へ引き戻す**必要がある
-        # （従来は 0 を「何もしない」と読んでいたため、一度大きくすると
-        # 設定側から既定へ戻しても表示が戻らなかった）。
+        self._apply_image_view_state(state)
+        # 0 = アプリ既定に従う。設定ダイアログから既定へ戻せるので、0 のときも
+        # **既定へ引き戻す**（0 を「何もしない」と読むと、一度大きくした後に
+        # 設定側から既定へ戻しても表示が戻らない）。
         self._markdown.set_font_pt(
             state.markdown_font_pt or DEFAULT_MARKDOWN_FONT_PT
         )
@@ -634,10 +651,18 @@ class ContentView(QWidget):
         # apply_settings keeps the three in one place and honours the lazy
         # construction stash.
         self.apply_media_settings(state)
-        # フォルダプレビューの中央画像も F03（等倍以上に拡大しない）の対象
-        # （項目#61）。設定値は view_prefs のモジュール変数から live に読むが、
-        # **表示中の 1 枚**はここで測り直さないと次のリサイズまで変わらない。
-        self._folder_preview.refresh_fit()
+
+    def _apply_image_view_state(self, state: "ViewerState") -> None:
+        """ペインが持つ ImageView 全部へ ``image_view.apply_state`` を配る.
+
+        中央プレビューとフォルダプレビューの中央画像（どちらも
+        ImageView）。キャッシュ予算・先読み半径・ズーム維持・
+        ミニマップ・F03 の再フィットが同じ入口で両方へ届くので、フォルダ
+        プレビューだけ設定から取り残される形（未配線の LRU）が
+        構造的に起きない。
+        """
+        for view in (self._image, self._folder_preview.centre_image):
+            apply_image_view_state(view, state)
 
     def copy_current_image(self) -> bool:
         """Copy the previewed image to the clipboard when one is shown.
@@ -659,7 +684,7 @@ class ContentView(QWidget):
             self._media.clear_media()
 
     def pause_media_playback(self) -> bool:
-        """再生中の動画を一時停止する（アンロードはしない — 項目#30）.
+        """再生中の動画を一時停止する（アンロードはしない）.
 
         別ウィンドウ（全画面の閲覧モード）が同じファイルの 2 つ目の
         ``QMediaPlayer`` を持って前面に出るとき、中央プレビュー側を黙って
@@ -678,20 +703,33 @@ class ContentView(QWidget):
         ページ切替でしか働かない。全画面（閲覧モード）は**別ウィンドウ**で
         ページを切り替えないので、同じアニメを 2 つの QMovie がデコードし
         続けていた（``pause_media_playback`` が動画について解いているのと
-        同じ形の片側欠落）。復帰は ``show_image`` / 再選択が担う。
+        同じ形の片側欠落）。復帰は :meth:`resume_image_animation` が担う —
+        全画面を同じ画像のまま閉じると再選択は emit されず ``show_image`` を
+        通らないので、止めた側が戻さないと中央の GIF が止まったまま残る。
         """
-        self._image.pause_animation()
+        self._image.suspend_animation()
+        self._folder_preview.suspend_animation()
+
+    def resume_image_animation(self) -> None:
+        """:meth:`pause_image_animation` で止めた QMovie を再開する（全画面の復路）.
+
+        止めたときに再生中だったものだけが動き出す。中央が別の画像へ移って
+        いれば QMovie は作り直されているので何もしない。
+        """
+        self._image.resume_animation()
+        if self._stack.currentIndex() == self.PAGE_FOLDER:
+            self._folder_preview.resume_animation()
 
     def media_playback_position(self) -> int:
-        """一時停止した動画の再生位置 (ms)。全画面への引き継ぎ用 (N-142)。"""
+        """一時停止した動画の再生位置 (ms)。全画面への引き継ぎ用。"""
         return 0 if self._media is None else self._media.playback_position()
 
     def media_current_path(self):
-        """いま MediaView が開いているファイル（無ければ ``None``）— N-142."""
+        """いま MediaView が開いているファイル（無ければ ``None``）."""
         return None if self._media is None else self._media.current_path()
 
     def seek_media(self, position_ms: int) -> None:
-        """全画面から戻ったときの位置合わせ (N-142)。"""
+        """全画面から戻ったときの位置合わせ。"""
         if self._media is not None:
             self._media.seek(position_ms)
 
@@ -714,7 +752,7 @@ class ContentView(QWidget):
         self._markdown.set_post_link_resolver(resolve)
 
     def set_folder_thumbnail_loader(self, loader) -> None:
-        """Wire the FolderPreviewView's child-tile ThumbnailLoader (項目#14).
+        """Wire the FolderPreviewView's child-tile ThumbnailLoader.
 
         Transparent pass-through, same decoupling pattern as the two image
         providers above — the window owns the loader (and drains it at
@@ -758,7 +796,7 @@ class ContentView(QWidget):
         self._image.set_fullscreen_available(available)
 
     def set_fullscreen_button_visible(self, visible: bool) -> None:
-        """ホバーカプセルの全画面ボタンだけを出し入れする (UIレビュー 07-25 #104).
+        """ホバーカプセルの全画面ボタンだけを出し入れする.
 
         最大化中はプレビューヘッダーの ``[⛶ 全画面 (F11)]`` と重複するため
         ホストが畳む。右クリックメニューの項目は残る。
@@ -789,7 +827,7 @@ class ContentView(QWidget):
         self._image.invalidate_sibling_cache()
 
     def shutdown_folder_preview(self, timeout_ms: int = 2000) -> None:
-        """フォルダプレビューの専用プールを close 前に有界ドレインする（項目#136）.
+        """フォルダプレビューの専用プールを close 前に有界ドレインする.
 
         ``ViewerWindow.closeEvent`` の他のワーカードレイン（``_zip_drill`` /
         ``_cache_ctrl`` / サムネローダー）と同じ列に並べるための薄い委譲。
@@ -800,12 +838,12 @@ class ContentView(QWidget):
         return self._image.is_cached(path)
 
     def image_decode_settled(self, path: Path) -> bool:
-        """右ペインの pending スピナーを出さなくてよいか（項目#60）.
+        """右ペインの pending スピナーを出さなくてよいか.
 
         ``ViewerWindow`` が ``FileListView.set_cache_check`` へ挿す述語。
-        かつては :meth:`image_is_cached`（＝ ImageView の LRU 残留）をそのまま
-        挿していたが、LRU は選択中 ± 先読み半径しか持たないため、半径の外の
-        行は何も進行していないのにスピナーを回し続けていた。判定は
+        :meth:`image_is_cached`（＝ ImageView の LRU 残留）では代用できない —
+        LRU は選択中 ± 先読み半径しか持たないため、半径の外の行は何も
+        進行していないのにスピナーが回り続ける。判定は
         ``ImageView.is_decode_pending`` の 1 箇所に寄せる。
         """
         return not self._image.is_decode_pending(path)
@@ -827,22 +865,50 @@ class ContentView(QWidget):
             max_entries=max(1, state.markdown_cache_max_entries),
             max_single_bytes=max(1, state.markdown_cache_max_single_mib) * mib,
         )
-        # ImageView 分は共通 fan-out（image_view.apply_state — 項目#29）へ。
+        # ImageView 分は共通 fan-out（image_view.apply_state）へ。
         # キャッシュ以外の 2 項目も一緒に流れるが冪等なので害はない。
-        apply_image_view_state(self._image, state)
+        self._apply_image_view_state(state)
+
+    def invalidate_shown_path(self) -> None:
+        """次の :meth:`show_path` を同一パスでも読み直させる.
+
+        中身が変わったかもしれない経路（F5 / 外部ツールの書き換え通知）
+        専用。選択の往復だけの経路は呼ばない — それが同一パス早道の意味。
+        """
+        self._shown = None
 
     def show_path(self, path: Path) -> None:
         """Route a clicked file path to the appropriate sub-view.
 
-        **拡張子で決まるものは I/O ゼロで振り分ける (レビュー 2026-07-31 #73)**:
-        以前は先頭で無条件に ``path.is_dir()`` を呼んでいたが、この関数は
-        右ペインの選択が動くたび（矢印キー連打・ホイール送り）に走るホット
-        パスで、高遅延 NAS では 1 選択 = 1 stat ぶんフレームが止まっていた
-        （同じ理由で FileInfoView / TextView の stat・読み取り
-        （``GuardedStream``）や ``_read_zip_listing`` は軒並みワーカーへ移してある）。ディレクトリはプレビュー可能な拡張子
+        **同じパスが既に載っていれば何もしない**（冪等）。1 つの選択
+        ジェスチャが複数の経路から同じパスを届ける — 左グリッドの選択が
+        中央へ即表示した後に右一覧の pending-select 解決が ``file_selected``
+        で同じパスをもう一度流す、ダブルクリックの 1 打目の選択と
+        activate が続けて来る — ため、呼び出し側ごとに同一パスのガードを
+        手書きする代わりにここで 1 本に吸収する。読み直すと動画は 0:00 から
+        再生し直し、画像は回転・パッチ状態を失い、PDF / 本文 / テキスト /
+        ZIP 一覧はワーカーで同じファイルをもう一度読む。判定は
+        ``(ページ, パス)`` で、ページが変われば :meth:`_on_page_changed` が
+        記録を落とすので往復は必ず読み直しになる。個別の ``show_*`` を
+        直接呼ぶ経路（代表画像・post.md の本文表示）は従来どおり無条件。
+        中身が変わった経路は :meth:`invalidate_shown_path` で記録を落とす。
+
+        **拡張子で決まるものは I/O ゼロで振り分ける**:
+        この関数は右ペインの選択が動くたび（矢印キー連打・ホイール送り）に
+        走るホットパスで、先頭で無条件に ``path.is_dir()`` を呼ぶと高遅延 NAS
+        では 1 選択 = 1 stat ぶんフレームが止まる（同じ理由で FileInfoView /
+        TextView の stat・読み取り（``GuardedStream``）や
+        ``_read_zip_listing`` はワーカーで走る）。ディレクトリはプレビュー可能な拡張子
         を持たないので、``is_dir`` の判定は拡張子で決まらなかった場合の
         フォールバック分岐だけに残す。
         """
+        shown = self._shown
+        if (
+            shown is not None
+            and shown[1] == path
+            and shown[0] == self._stack.currentIndex()
+        ):
+            return
         suffix = path.suffix.lower()
         if path.name.lower() == "post.md" or suffix == ".md":
             self.show_markdown(path)
@@ -866,24 +932,27 @@ class ContentView(QWidget):
             self.show_file_info(path)
 
     def _on_page_changed(self, index: int) -> None:
+        # 離脱した葉は下で解放されるので、同一パス早道の記録も落とす。
+        if self._shown is not None and self._shown[0] != index:
+            self._shown = None
         if index != self.PAGE_MEDIA and self._media is not None:
             self._media.clear_media()
-        # Leaving a leaf preview page → hand its resources back (レビュー
-        # 2026-08-27 #121).  Each leaf already owns a symmetric teardown, but
-        # nothing ever called it: PdfView kept the whole PDF in a QBuffer plus
-        # the parsed QPdfDocument, ZipView up to 5000 tree rows and TextView up
-        # to 2 MiB of body text — all resident until the *next* file of that
-        # kind was opened.  Safe on the return trip: every ``show_*`` wrapper
-        # reloads unconditionally (no same-path fast path), so a cleared page is
-        # repopulated the moment it is shown again.
+        # Leaving a leaf preview page → hand its resources back via each
+        # leaf's symmetric teardown.  Otherwise PdfView keeps the whole PDF in
+        # a QBuffer plus the parsed QPdfDocument, ZipView up to 5000 tree rows
+        # and TextView up to 2 MiB of body text — all resident until the
+        # *next* file of that kind is opened.  Safe on the return trip: every ``show_*`` wrapper
+        # reloads unconditionally, and ``show_path``'s same-path fast path is
+        # keyed on the page (its record is dropped at the top of this slot), so
+        # a cleared page is repopulated the moment it is shown again.
         #
-        # FolderPreviewView is deliberately **not** in this list (追修正
-        # 2026-08-27): unlike the others its ``set_folder`` *does* have a
+        # FolderPreviewView is deliberately **not** in this list: unlike the others its ``set_folder`` *does* have a
         # same-path fast path, and ``clear()`` drops ``_folder`` — so clearing
         # here turns every X→画像→X round trip into a fresh worker scan of the
         # real directory plus a「読み込み中…」flash.  It would not even buy
-        # anything: the memory that matters is the shared 256 MiB ``_thumb_cache``
-        # which ``clear()`` never touches.
+        # anything worth the rescan.  Its centre ImageView's QMovie is only
+        # suspended / resumed below (the same-path fast path means the return
+        # trip never goes through ``show_image`` to restart it).
         if index != self.PAGE_PDF and self._pdf is not None:
             self._pdf.clear()
         if index != self.PAGE_ZIP:
@@ -892,13 +961,11 @@ class ContentView(QWidget):
             self._text.clear_text()
         if index != self.PAGE_FILE:
             self._file_info.clear_file()
-        # Same contract for the post.md page (レビュー 2026-08-27 #131): the
-        # MarkdownView's decoded body images (a 256 MiB LRU at the ceiling plus
-        # the QTextDocument resource cache) were released only when the *next*
-        # post.md was opened, so an image-heavy post's pixels sat resident for
-        # the rest of the session.  ``set_post`` re-reads and re-decodes
-        # unconditionally even for the same path, so nothing was ever reused on
-        # the way back — the retention was pure waste.
+        # Same contract for the post.md page: the MarkdownView's decoded body
+        # images (a 256 MiB LRU at the ceiling plus the QTextDocument resource
+        # cache) would otherwise stay resident until the *next* post.md is
+        # opened.  ``set_post`` re-reads and re-decodes unconditionally even
+        # for the same path, so nothing would be reused on the way back.
         if index != self.PAGE_MARKDOWN:
             self._markdown.release_images()
         # Leaving the image page → pause any animated GIF/WebP so its QMovie
@@ -907,10 +974,14 @@ class ContentView(QWidget):
         # long as the user browses other content), and hand back the Qt-side
         # pixel mirrors.  ``release_pixels`` は同じ対の残り: 原寸 QPixmap は
         # 8000×4000 で 128 MB あり、``_pil_cache`` のバイト予算にも入らない
-        # 無予算の常駐だった。戻りは ``show_image`` が無条件に作り直すので
+        # 無予算の常駐になる。戻りは ``show_image`` が無条件に作り直すので
         # 抱えていても再利用はされない（他の葉と同じ契約）。
         if index != self.PAGE_IMAGE:
             self._image.release_pixels()
+        if index == self.PAGE_FOLDER:
+            self._folder_preview.resume_animation()
+        else:
+            self._folder_preview.suspend_animation()
         # Leaving the image page → clear the status-bar resolution readout.
         # (ImageView only emits real dimensions on load, so a page switch that
         # doesn't reload it would otherwise leave a stale W×H showing.)
@@ -918,7 +989,7 @@ class ContentView(QWidget):
             self.image_info_changed.emit(0, 0)
 
     def focus_current_page(self) -> None:
-        """現在ページのサブビューへキーボードフォーカスを移す（UIレビュー #5）。
+        """現在ページのサブビューへキーボードフォーカスを移す。
 
         最大化時にこのコンテナへ setFocus していると、ImageView 配下スコープ
         (``WidgetWithChildrenShortcut``) の + / − / R / Shift+R / F が最大化
@@ -934,11 +1005,11 @@ class ContentView(QWidget):
             self.setFocus()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt API)
-        # Stage mode focuses the current sub-view (UIレビュー 07-25 #5); keys
+        # Stage mode focuses the current sub-view; keys
         # it doesn't accept propagate up to this container, so the handling
         # below covers both the focused-container and focused-sub-view cases.
         #
-        # Digit 0–5 star keys (UIレビュー #11).  Restricted to the pages that
+        # Digit 0–5 star keys.  Restricted to the pages that
         # preview one media file (image / video): the star target is the
         # previewed file, exactly like the grid's "selected tile" gate.
         # Modifier gating mirrors GalleryView / ImageView (bare or
@@ -947,20 +1018,18 @@ class ContentView(QWidget):
         bare = event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier)
         page = self._stack.currentIndex()
         on_image = page == self.PAGE_IMAGE
-        # (UIレビュー 09-11 N-138) ★は動画ページでも打てる — 全画面
-        # （``lightbox._handle_key``）はページを問わず ``_set_star`` するので、
-        # 同じ動画で最大化のときだけ無反応になっていた。★の対象はファイルで
+        # ★は動画ページでも打てる — 全画面（``lightbox._handle_key``）は
+        # ページを問わず ``_set_star`` するので、最大化でも揃える。★の対象はファイルで
         # あって「画像であること」には依存しない。
         # **Space / Home / End は広げない**: 動画ページの Space は
-        # ``MediaView`` の再生 / 一時停止（07-25 #18 の裁定）。
+        # ``MediaView`` の再生 / 一時停止。
         starrable = page in (self.PAGE_IMAGE, self.PAGE_MEDIA)
         if Qt.Key_0 <= key <= Qt.Key_5 and bare and starrable:
             self.star_key_requested.emit(key - Qt.Key_0)
             event.accept()
             return
-        # UIレビュー 07-25 #22: 最大化プレビューと全画面（閲覧モード）の
-        # キー集合を揃える — Space（次の画像）/ Home / End は全画面にしか
-        # 無かった。0-5 と同じ流儀で画像ページに限定する（メディアページの
+        # 最大化プレビューと全画面（閲覧モード）のキー集合を揃える —
+        # Space（次の画像）/ Home / End。0-5 と同じ流儀で画像ページに限定する（メディアページの
         # Space は MediaView の再生/一時停止、テキスト系の Home/End は
         # キャレット移動なので奪わない）。
         if bare and on_image:
@@ -1017,12 +1086,9 @@ __all__ = [
     "view_prefs",
     "_PdfTooLarge",
     "_build_entry_menu",
-    "_decode_text",
     "_popup_entry_menu",
     "_read_pdf_bytes",
     "_read_text_preview",
-    "_trim_incomplete_utf8_tail",
-    "_trim_incomplete_utf16_tail",
     "get_pdf_preview_size_limit",
     "get_preview_scroll_pixels",
     "get_text_preview_max_bytes",

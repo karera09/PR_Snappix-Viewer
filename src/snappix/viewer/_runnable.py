@@ -6,21 +6,19 @@ Across the viewer, a recurring pattern moves a small blocking call (a single
 via a Qt signal — with a *generation / token guard* so that when the user
 navigates on before the worker finishes, the stale result is dropped instead
 of overwriting the current view.  Every such site hand-rolled its own
-``_XxxSignals(QObject)`` + ``_XxxTask(QRunnable)`` pair (see #134); this module
+``_XxxSignals(QObject)`` + ``_XxxTask(QRunnable)`` pair; this module
 factors out the common "one integer token + one payload object" shape so the
 call sites shrink to a single :class:`GuardedStream` field plus one
 ``submit`` call.
 
-Scope (拡張 — レビュー 2026-09-03 項目 #56).  当初この helper は「1 つの
-callable が 1 つの ``(token, payload)`` を返す」場合だけを担い、*複数シグナル*
-（進捗つき）や *協調キャンセル* を要するタスクは bespoke に逃がしていた。その
-判断は ``post_grid`` の 4 組（body / nsfw / recent / curation-meta）が全部
-「例外」側に落ち、そのうち 1 組が実際に shutdown 配線を落としたところで破綻した
-（項目 #2 の実害）。そこで :class:`GuardedStream` に
+Scope.  「1 つの callable が 1 つの ``(token, payload)`` を返す」場合だけを
+担い、*複数シグナル*（進捗つき）や *協調キャンセル* を要するタスクを bespoke に
+逃がす形では、多くの利用箇所が「例外」側に落ち、手書きの側で shutdown 配線が
+漏れる。そこで :class:`GuardedStream` は
 
 * **ストリーム所有の協調キャンセル** — :class:`~.cancel_token.SessionOwner` を
-  内側に持ち、世代（token）と ``CancelToken`` が常に一緒に動く（項目#35 で
-  スキャナ側が学んだ不変条件をそのまま再利用する）。
+  内側に持ち、世代（token）と ``CancelToken`` が常に一緒に動く（スキャナ側と
+  同じ不変条件）。
 * **進捗シグナル** ``progress(token, payload)`` — ワーカーは :class:`StreamJob`
   の ``report()`` から投げる（分オーダーの走査が「探しています…」で固まらない）。
 * **加算的な投入** :meth:`GuardedStream.submit_batch` — 「先行を捨てずに積む」
@@ -28,7 +26,7 @@ callable が 1 つの ``(token, payload)`` を返す」場合だけを担い、*
   保つための口。その帳簿そのものは
   :class:`~.keyed_resolver.KeyedResolver` が持つ。
 
-を足し、bespoke の除外条件を無くした。**新しい off-thread タスクは
+も持ち、bespoke の除外条件を持たない。**新しい off-thread タスクは
 :class:`GuardedStream` を使うこと** — 窓の ``_drain_loader_pools`` が
 ``findChildren(GuardedStream)`` で列挙して有界ドレインに載せるので、
 「``shutdown()`` への配線を足し忘れる」が原理的に起こせない。
@@ -237,8 +235,8 @@ class GuardedStream(QObject):
         super().__init__(parent)
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(max(1, int(max_threads)))
-        # 世代 + 協調キャンセルは対で動かす（項目#35 の不変条件をそのまま
-        # 再利用 — 片方だけ進めた手書きが本レビュー項目#2 の配線漏れを産んだ）。
+        # 世代 + 協調キャンセルは対で動かす（片方だけ進めると、キャンセル
+        # されない古い世代や shutdown 配線の漏れが生まれる）。
         self._owner = SessionOwner()
         # 投入済みで未完了のタスク（強参照。理由はクラス docstring）。
         # GUI スレッドが ``add`` / ``clear``、ワーカースレッドが ``discard``
@@ -534,13 +532,13 @@ class GuardedStream(QObject):
     def request_shutdown(self, timeout_ms: int) -> bool:
         """Drop queued work and bounded-wait for the in-flight one (teardown).
 
-        **必ず closeEvent の予算内から呼ぶこと**（レビュー 2026-09-03 項目#54）。
+        **必ず closeEvent の予算内から呼ぶこと**。
         ``QThreadPool`` のデストラクタは in-flight な ``QRunnable`` を**無制限
         に**待つ — プールは所有ウィジェットの子なので、この待ちが起きるのは
         ``closeEvent`` が終わったあとのウィジェット木の破棄中、つまり
-        issue #132 が入れた予算付き teardown の**外側**。死んだ SMB 共有では
+        予算付き teardown の**外側**。死んだ SMB 共有では
         1 回の I/O が 15〜195 秒ブロックする（VM 実測）ので、窓を閉じても
-        プロセスがその分だけ終われなかった。
+        プロセスがその分だけ終われない。
 
         :meth:`cancel` は「キュー済みを捨ててトークンを進める」だけで走行中
         は止められない（Qt に走行中 ``QRunnable`` のキャンセル API は無い）
@@ -632,7 +630,7 @@ def emit_or_drop(signal, *args) -> bool:
     必ずこれを通すこと（``thumbnail_loader._ThumbnailTask._emit_failed_safe``
     と同じ判断の共通形）。
 
-    ``RuntimeError`` 以外は握らない — それは本物のバグ。
+    ``RuntimeError`` 以外は握らない — それは本物の不具合。
     """
     try:
         signal.emit(*args)

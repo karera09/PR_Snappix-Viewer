@@ -56,6 +56,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt
@@ -113,6 +114,18 @@ _NEUTRAL_DISPLAY_UNIT = NEUTRAL_DISPLAY_UNIT
 # 大きいとそのガードが黙って効かなくなる。定数 1 本で 3 つの呼び出し側
 # （provider / window_cap / 補完リフレッシュ）を歩調させる。
 _TAG_SUGGEST_LIMIT = 20
+
+# 0 件カードの緩和のうち、条件チップの × と同じ「1 軸だけを中立化する」もの
+# → その × の次元 id（``condition_chips.ACTION_IDS`` の鍵）。
+_RELAX_TO_CONDITION_DIMENSION: dict[str, str] = {
+    "relax_locked_only": "locked",
+    "relax_name_filter": "filter",
+    "relax_ai_tags": "ai_tags",
+    "relax_threshold": "ai_precision",
+    "relax_coverage": "ai_unit",
+    "relax_rating": "rating",
+    "relax_date": "date",
+}
 
 
 def _memoized_suggest(tag_index):
@@ -1406,20 +1419,24 @@ class AdvancedSearchController(QObject):
 
         **不変**: 鍵は :data:`~.grid_empty_state.ADVANCED_ACTION_IDS` と集合
         一致すること（片側だけ増えると「押せるのに何も起きないボタン」が戻る）。
+
+        1 軸だけを中立化する緩和は条件チップの × と同じ操作なので、
+        :data:`_RELAX_TO_CONDITION_DIMENSION` 経由でホストの × 実装
+        （``clear_condition_dimension``）へ戻す — 手書きの複製を持つと、選択
+        保持や「チップが見せている語だけを消す」規律が片側だけずれる。
+        ここに実装を持つのは × に対応が無い固有の動作だけ。
         """
-        return {
-            "relax_locked_only": self._relax_locked_only,
-            "relax_name_filter": self._relax_name_filter,
+        callbacks: dict[str, Callable[[], None]] = {
+            action: partial(self.host.clear_condition_dimension, dim_id)
+            for action, dim_id in _RELAX_TO_CONDITION_DIMENSION.items()
+        }
+        callbacks.update({
             "relax_hide_nsfw": self._relax_hide_nsfw,
-            "relax_ai_tags": self._relax_ai_tags,
-            "relax_threshold": self._relax_threshold,
             "relax_excludes": self._relax_excludes,
-            "relax_coverage": self._relax_coverage,
-            "relax_rating": self._relax_rating,
-            "relax_date": self._relax_date,
             "open_ai_popover": self._relax_open_ai_popover,
             "reload_tag_db": self._on_reload_tag_db_clicked,
-        }
+        })
+        return callbacks
 
     def _build_empty_actions(
         self, specs: list[grid_empty_state.ActionSpec],
@@ -1489,7 +1506,8 @@ class AdvancedSearchController(QObject):
         """効いている軸ごとに 1 つ、条件をゆるめるボタン。
 
         並びの決定は :func:`grid_empty_state.plan_relaxations`（Qt 非依存）。
-        ここは観測値を渡し、返ってきた動作 id を ``_relax_*`` へ戻すだけ。
+        ここは観測値を渡し、返ってきた動作 id を押下先（:meth:`_relaxation_callbacks`）
+        へ戻すだけ。
         """
         return self._build_empty_actions(
             grid_empty_state.plan_relaxations(self._advanced_empty_inputs())
@@ -1498,11 +1516,6 @@ class AdvancedSearchController(QObject):
     def _tag_terms_narrow_query(self, mode: str | None) -> bool:
         """AIタグ欄が *mode* のクエリに実際に効いているか（判定は純関数側）."""
         return tag_terms_narrow_query(self._query, mode)
-
-    def _relax_ai_tags(self) -> None:
-        # AIタグチップは通常の signal 経路で空にする（``_relax_excludes`` と
-        # 同じ）ので、引き直し / 自動 OFF は入力ハンドラが持つ。
-        self.tag_input.set_text("")
 
     def _relax_open_ai_popover(self) -> None:
         # 0 件カードのフォールバック動作 — ``open_ai_popover`` そのものでは
@@ -1518,45 +1531,11 @@ class AdvancedSearchController(QObject):
         """
         return max(self.tag_threshold_slider.minimum(), DEFAULT_TAG_THRESHOLD)
 
-    def _relax_threshold(self) -> None:
-        # ``score:`` トークンを先に落とす（残すと次の絞り込み欄の編集で旧精度が
-        # 再適用される）。
-        self.host.strip_filter_control_field("score")
-        # 戻し先も中立点（既定）— スライダ下限まで落とすと、条件チップが点かな
-        # い＝ × で戻せない値が保存されてしまう。
-        self.tag_threshold_slider.setValue(self._precision_neutral())
-
-    def _relax_name_filter(self) -> None:
-        # 通常の signal 経路で（blockSignals しない）: textChanged が絞り込み
-        # 状態の同期とグリッド再構築を持つ — 手で消したときと同じ。
-        self.host.clear_filter_text()
-
-    def _relax_locked_only(self) -> None:
-        # QAction を通して切り替えるので ▾ オプションメニューも同期する。
-        self.host.set_locked_only_checked(False)
-
     def _relax_hide_nsfw(self) -> None:
         # 永続のビュー設定を「隠さない」へ戻す。``set_hide_nsfw`` がメニューの
         # ラジオ同期と再構築まで面倒を見る唯一の入口なので、ここはそれを呼ぶ
         # だけ（他の緩和と同じ「正規の経路で 1 次元だけ中立化する」作法）。
         self.host.set_hide_nsfw("off")
-
-    def _relax_rating(self) -> None:
-        # ``rating:`` トークンを先に落とす（× の実装と同じ順序）。
-        self.host.strip_filter_control_field("rating")
-        select_combo_data(self.host.rating_combo, "all")
-        self._on_tag_rating_changed()
-
-    def _relax_date(self) -> None:
-        # 投稿日の席はフィルターポップオーバー側にあるので、ユーザー操作と同じ
-        # ハンドラを通す。前半だけ呼ぶと、軸は中立化されたのにコンボの
-        # アクセント枠だけ残る。
-        select_combo_data(self.host.date_combo, "all")
-        self.host.on_date_filter_changed()
-
-    def _relax_coverage(self) -> None:
-        select_combo_data(self.tag_display_unit_combo, "folder_coverage")
-        self._on_tag_display_unit_changed()
 
     def _relax_excludes(self) -> None:
         # 除外を**外した** include テキストを組み直す（OR 群は保つ — 複数
@@ -1880,6 +1859,12 @@ class AdvancedSearchController(QObject):
         # （``_set_ai_mode("similar")`` は既存のシードを落とさない）。
         self._set_ai_mode("similar")
         self.set_query(replace(self._query, similar_seed=str(path)))
+        # 種別走査（すべて / 画像 以外）は ``query_mode`` の最優先分岐なので、
+        # 残したままではシードが署名にもワーカー要求にも載らず、利用者の直近の
+        # 命令が無言で捨てられる。シード要求は明示操作なので AI 側の種別を
+        # 中立へ戻す（条件チップ × の ``_clear_dim_ai_media`` と同じ行き先）。
+        # 未適用の繰り延べ復元も、後から点灯して種別走査へ戻さないよう落とす。
+        self._neutralise_media_walk_for_seed()
         # 外部プレビューの記憶（または忘却）は、どの更新よりも**先**に —
         # シード行の表示は再構築のたびにサムネを引き直すので、pixmap はそれが
         # 見つけられる場所に居なければならない。
@@ -1897,6 +1882,16 @@ class AdvancedSearchController(QObject):
             t("viewer.advanced_search.status_searching_similar")
         )
         self._maybe_start_tag_scan()
+
+    def _neutralise_media_walk_for_seed(self) -> None:
+        """種別走査中なら AI 側の種別を「すべて」へ戻す（シード要求の前提）."""
+        deferred = self._deferred_media_restore
+        if deferred is not None and deferred not in ("all", "image"):
+            self._deferred_media_restore = None
+        if self._query.media_type in ("all", "image"):
+            return
+        select_combo_data(self.tag_media_combo, "all")
+        self.set_query(replace(self._query, media_type="all"))
 
     def _on_similar_clear_clicked(self) -> None:
         """参照画像だけを外す（意味検索モードには留まる）.

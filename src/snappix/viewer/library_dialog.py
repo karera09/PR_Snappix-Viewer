@@ -6,7 +6,7 @@ and set the order they appear in the ファイル → ライブラリ submenu.  
 editor over a ``list[str]`` of paths — the owning
 :class:`~snappix.viewer.main_window.ViewerWindow` diffs the result against the
 baseline it handed in and applies that diff (with the presented order) through
-:func:`~snappix.common.shared_prefs.apply_library_roots` (項目#80/#82).
+:func:`~snappix.common.shared_prefs.apply_library_roots`.
 
 Existence is probed **once, off-thread** (a dead NAS ``is_dir()`` blocks for
 tens of seconds): stale rows paint red as a hint but are never auto-removed —
@@ -83,17 +83,15 @@ class LibraryDialog(QDialog):
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
 
-        # UIレビュー 07-25 #85: このダイアログだけ表示名列が無く、ナビレール
-        # /メニューのフォルダ名表示（末尾セグメント）と突き合わせにくかった
-        # — 読み取り専用の「名前」列を追加する（並べ替え・削除等の対象は
-        # 従来どおりフルパス基準・列は表示のみ）。
+        # ナビレール / メニューのフォルダ名表示（末尾セグメント）と突き合わせ
+        # られるよう、読み取り専用の「名前」列を持つ（並べ替え・削除等の対象は
+        # フルパス基準・列は表示のみ）。
         self._table = QTableWidget()
         self._table.setColumnCount(2)
         self._table.setHorizontalHeaderLabels(
             [t("common.label.name"), t("common.label.path")]
         )
-        # 見出しの揃え = 内容の揃え（どちらもテキスト = 左）
-        # — UIレビュー 07-25 #97。
+        # 見出しの揃え = 内容の揃え（どちらもテキスト = 左）。
         align_header(self._table)
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -108,7 +106,7 @@ class LibraryDialog(QDialog):
         self._table.setColumnWidth(0, NAME_COLUMN_WIDTH)
         self._table.itemSelectionChanged.connect(self._sync_controls)
         # 空のときは大きな空テーブルではなく中央寄せの案内に切り替える
-        # （UIレビュー #15 — detail_window のタグ表と同じ見せ方に統一）。
+        # （detail_window のタグ表と同じ見せ方）。
         self._stack, self._empty_label = empty_state_stack(
             self._table, icon_name="folder"
         )
@@ -128,7 +126,7 @@ class LibraryDialog(QDialog):
         outer.addLayout(btn_row)
 
         # 追加はメニュー側にしかない — その導線をダイアログ内でも案内し、
-        # 空のときは空である旨も添える（UIレビュー #28）。
+        # 空のときは空である旨も添える。
         self._hint = QLabel("")
         self._hint.setWordWrap(True)
         self._hint.setStyleSheet(hint_style())
@@ -192,7 +190,7 @@ class LibraryDialog(QDialog):
 
     def _sync_controls(self) -> None:
         # 未選択（や先頭/末尾）で押しても無反応なボタンは無効化して
-        # フィードバック欠如を防ぐ（UIレビュー #14）。
+        # フィードバック欠如を防ぐ。
         row = self._selected_row()
         n = len(self._paths)
         self._up_btn.setEnabled(row > 0)
@@ -202,8 +200,8 @@ class LibraryDialog(QDialog):
             t("viewer.library_dialog.empty_hint") if n == 0
             else t("viewer.library_dialog.add_hint")
         )
-        # 空: 案内は中央のスタックへ昇格し、下端ヒントは隠して二重表示を避ける
-        # （UIレビュー #15）。項目あり: 表を出し下端に追加導線ヒントを残す。
+        # 空: 案内は中央のスタックへ昇格し、下端ヒントは隠して二重表示を避ける。
+        # 項目あり: 表を出し下端に追加導線ヒントを残す。
         if n == 0:
             self._empty_label.setText(t("viewer.library_dialog.empty_hint"))
             self._stack.setCurrentWidget(self._empty_label)

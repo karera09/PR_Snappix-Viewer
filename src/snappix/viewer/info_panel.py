@@ -1,8 +1,7 @@
-"""Right pane — the "information panel" (layout redesign 2026-07, Phase 2-2).
+"""Right pane — the "information panel".
 
 The right seat is the **detail area** for whatever the centre pane has as its
-main selection (製品オーナー 2026-07-20 の役割再定義: 中央がメインのファイル
-選択、右がその詳細表示エリア).  It stacks, top → bottom:
+main selection (中央がメインのファイル選択、右がその詳細表示エリア).  It stacks, top → bottom:
 
 * a **file-detail card** — shown when a concrete *file* (image / video / PDF /
   … ) is selected.  A thumbnail + name + 種別 / サイズ / 更新日時 / 解像度 /
@@ -15,8 +14,8 @@ main selection (製品オーナー 2026-07-20 の役割再定義: 中央がメ�
   :class:`~snappix.viewer.markdown_view.MarkdownView` meta card.  Shown when a
   folder / post tile is selected (its "detail" is the post metadata).  Hidden
   when the current selection has no ``post.md``, and collapsed while the centre
-  is already showing that same ``post.md`` on the stage (UIレビュー #22 —
-  中央 markdown ヘッダと右メタカードの 7 行二重表示を避ける).
+  is already showing that same ``post.md`` on the stage (中央 markdown
+  ヘッダと右メタカードの 7 行二重表示を避ける).
 * the existing **file list** (passed in and reparented here), under its own
   :class:`~snappix.common.ui.PanelHeader`.  Kept below both cards as the
   selection-synced navigation strip.
@@ -88,15 +87,12 @@ class FileDetail:
     mtime_text: str = "…"
     resolution_text: str = ""
     star: int = 0
-    #: The user's own tags for this file (UIレビュー 07-25 #13).  Curation's third
-    #: dimension had no display surface anywhere in the product — ★ and
-    #: 「あとで見る」 had badges, filters and chips, while a user tag could only be
-    #: recovered by reopening the edit dialog.  Empty = the row is omitted.
+    #: The user's own tags for this file — curation's third dimension needs a
+    #: display surface like ★ and 「あとで見る」, not only the edit dialog.
+    #: Empty = the row is omitted.
     user_tags: tuple[str, ...] = ()
-    #: 「あとで見る」 flag (UIレビュー 2026-08-28 N-11).  The three curation
-    #: dimensions were shown on 3 different surfaces in 3 different amounts —
-    #: 詳細情報ウィンドウ had all three, this card had ★ + ユーザータグ, and the
-    #: post meta card had none.  ``False`` = the row is omitted.
+    #: 「あとで見る」 flag, so the three curation dimensions are shown in the
+    #: same amount on every surface.  ``False`` = the row is omitted.
     later: bool = False
 
 
@@ -105,7 +101,7 @@ def curation_rows(
 ) -> list[tuple[str, str]]:
     """The ★ / あとで見る / ユーザータグ rows, in the one canonical order.
 
-    UIレビュー 2026-08-28 N-11: every surface that shows user curation as
+    Every surface that shows user curation as
     text rows (詳細情報ウィンドウ ``detail_window._update_curation``) must show
     the **same three rows with the same labels and the same "hide an empty
     row" rule**.  Labels are the existing catalog keys (no new wording); rows
@@ -138,10 +134,9 @@ def _meta_rows(parsed: ParsedPost) -> list[tuple[str, str, str | None, str | Non
     same field order — so the compact panel card and the central document card
     stay visually consistent.  ``href`` is non-``None`` only for the 投稿ページ
     link row (its ``value`` is the link text).  ``badge`` names a
-    :mod:`._indicator` badge kind to draw **in front of** the value: the ♡ / 🔒
-    indicators used to be emoji baked into the i18n value, which follows neither
-    the theme nor the installed fonts (UIレビュー 08-28 N-52) and disagreed with
-    the vector artwork the tiles draw.  Values are plain text (the caller
+    :mod:`._indicator` badge kind to draw **in front of** the value: an emoji
+    baked into the i18n value would follow neither the theme nor the installed
+    fonts and would disagree with the vector artwork the tiles draw.  Values are plain text (the caller
     escapes when building the link).
     """
     rows: list[tuple[str, str, str | None, str | None]] = []
@@ -220,6 +215,7 @@ class _FileDetailCard(QWidget):
 
         self._header = PanelHeader(t("viewer.info_panel.detail_title"))
         layout.addWidget(self._header)
+        self.header = self._header
 
         body = QWidget()
         body_layout = QVBoxLayout(body)
@@ -239,6 +235,15 @@ class _FileDetailCard(QWidget):
         self._name.setStyleSheet("font-weight: bold;")
         self._name.setWordWrap(True)
         self._name.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        # 幅の要求には参加させない（Ignored + 最小幅 0）: wordWrap の QLabel
+        # でも折り返し位置の無い名前（空白の無い booru 形式など）は
+        # minimumSizeHint が文字列全幅になり、外殻 QSplitter がそれを情報
+        # パネルの最小幅として扱うため、中央席が潰れ窓ごと画面外へ広がって
+        # いた（text_view のタイトル・detail_window の名前行と同じ手当て）。
+        # 折り返せる名前は従来どおり折り返し、折れない分は右で切れる —
+        # 全文はツールチップ（populate）と選択コピーで読める。
+        self._name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._name.setMinimumWidth(0)
         body_layout.addWidget(self._name)
 
         # Field grid (種別 / サイズ / 更新日時 / 解像度 / スター) — same
@@ -251,10 +256,9 @@ class _FileDetailCard(QWidget):
         body_layout.addLayout(self._grid)
 
         # Full path — muted, middle-elided, full value in the tooltip.
-        # UIレビュー 2026-08-28 N-55: the previous read-only ``QLineEdit`` cut
-        # the tail mid-character with no ellipsis — exactly the defect
-        # ``detail_window`` already fixed for its own path row (07-25 #45) and
-        # the reason the shared ``ElidedLabel`` part exists (項目#195).  The
+        # A read-only ``QLineEdit`` would cut the tail mid-character with no
+        # ellipsis — the reason the shared ``ElidedLabel`` part exists (the
+        # ``detail_window`` path row uses it too).  The
         # part deliberately does not set ``TextSelectableByMouse``, so the
         # QLineEdit's built-in copy affordance is replaced by an explicit
         # context menu reusing ``context_menus.copy_path_to_clipboard``.
@@ -269,17 +273,18 @@ class _FileDetailCard(QWidget):
     def populate(self, detail: FileDetail) -> None:
         self._path = detail.path
         self._name.setText(detail.name)
+        self._name.setToolTip(detail.name)
         # ``ElidedLabel.setText`` already installs the full value as the
         # tooltip (its documented contract).
         self._path_label.setText(str(detail.path))
         self._rebuild_grid(detail)
 
     def path_context_menu(self) -> QMenu | None:
-        """The path row's right-click menu — フルパスをコピー (N-55).
+        """The path row's right-click menu — フルパスをコピー.
 
         ``ElidedLabel`` paints over the whole widget and therefore does not
-        set ``TextSelectableByMouse``, so the copy affordance the old
-        read-only ``QLineEdit`` got from Qt for free has to be provided
+        set ``TextSelectableByMouse``, so the copy affordance a read-only
+        ``QLineEdit`` gets from Qt for free has to be provided
         explicitly.  Reuses ``context_menus.copy_path_to_clipboard`` (the same
         action the grid / file-list menus offer).
         """
@@ -336,7 +341,7 @@ class _FileDetailCard(QWidget):
         rows: list[tuple[str, str]] = [
             (t("common.label.type"), detail.kind),
             (t("common.label.size"), detail.size_text),
-            (t("viewer.content_view.col_mtime"), detail.mtime_text),
+            (t("common.label.modified"), detail.mtime_text),
         ]
         if detail.resolution_text:
             rows.append((t("viewer.detail_window.resolution"), detail.resolution_text))
@@ -375,16 +380,15 @@ class InfoPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # --- 印ストリップ（UIレビュー 2026-09-11 E2）: 最上段に常設。post.md の
-        # 有無に従属しない（以前は投稿情報カードの中の 3 行だったので、post.md
-        # の無いフォルダでは印が面ごと消えた — N-53）。店が無ければ節ごと隠す。
+        # --- 印ストリップ: 最上段に常設。post.md の有無に従属しない（投稿情報
+        # カードの中に置くと、post.md の無いフォルダでは印が面ごと消える）。
+        # 店が無ければ節ごと隠す。
         self._curation_section = QWidget()
         # 幅の要求には参加させない（Ignored）: ★×5 + あとで見る + タグ列の自然幅
-        # （数百 px）がパネルの最小幅になると、分割バーの記憶幅（項目#8）を
-        # 侵食し、狭いパネルで畳めなくなる。足りない幅の扱いは**部品側**が
-        # 持つ（自分で畳む）ので、ここは Ignored のままでよい — 以前はこの
-        # コメントが「右端から切れるだけ」と書いていたが、実際には左の子が
-        # 右の子に踏まれていた。
+        # （数百 px）がパネルの最小幅になると、分割バーの記憶幅を侵食し、
+        # 狭いパネルで畳めなくなる。足りない幅の扱いは**部品側**が持つ
+        # （自分で畳む — 放置すると「右端から切れる」のではなく左の子が右の子に
+        # 踏まれる）ので、ここは Ignored のままでよい。
         self._curation_section.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
@@ -408,8 +412,8 @@ class InfoPanel(QWidget):
         # ウィンドウ（空状態オーケストレータ）の割当が ``NONE`` の間は
         # :meth:`apply_empty_guidance` が一切触らないので、フォルダ固有の
         # 空状態（スキャン失敗の ⚠+[再試行] /「このフォルダにはファイルが
-        # ありません」）は自然に生き残る (UIレビュー07-25 追修 #118 の規律を
-        # 役割割当へ一般化したもの — 旧 ``_search_empty_active`` は不要)。
+        # ありません」）は自然に生き残る（ペイン側に空状態のフラグを持たずに
+        # 済むのはこのため）。
 
         # --- Meta-card section (hidden until a post with metadata is shown).
         self._meta_section = QWidget()
@@ -434,6 +438,19 @@ class InfoPanel(QWidget):
 
     # ------------------------------------------------------------------ API
 
+    def focus_band_targets(self) -> list[tuple[QWidget, PanelHeader]]:
+        """フォーカス帯の ``(節, 見出し)`` — 印ストリップ / ファイル詳細 / 投稿情報 /
+        ファイル一覧の 4 節。ファイル一覧の見出しは一覧自身が持つ。"""
+        targets: list[tuple[QWidget, PanelHeader]] = [
+            (self._curation_section, self._curation_header),
+            (self._file_card, self._file_card.header),
+            (self._meta_section, self._meta_header),
+        ]
+        header = getattr(self.file_list, "header", None)
+        if isinstance(header, PanelHeader):
+            targets.append((self.file_list, header))
+        return targets
+
     def set_store_available(self, available: bool) -> None:
         """印ストリップの節を出す / 隠す（user_meta 店の有無 — 右クリックと同じ劣化）."""
         self.curation_strip.set_store_available(available)
@@ -445,12 +462,18 @@ class InfoPanel(QWidget):
         star: int = 0,
         later: bool = False,
         tags: tuple[str, ...] = (),
+        *,
+        display_name: str | None = None,
     ) -> None:
         """印ストリップの対象と現在値（ウィンドウが選択変更 / 印の変更ごとに呼ぶ）.
 
         対象名は節見出しの右端（``PanelHeader`` の件数ラベルの席）に省略付きで
         出す — 「この印はどれに付くか」を面が名乗る（ストリップ内に置くと
         パネル幅 310px では潰れる）。ツールチップはフルパス。
+
+        *display_name* は窓が場所の名乗りの正本（``locations.location_label``）
+        から渡す表示名 — 既定ライブラリの「ライブラリ」や ZIP 展開先の
+        アーカイブ名。省略時は ``path.name``（パネル単体で使うとき）。
         """
         self.curation_strip.set_target(path, star, later, tags)
         header = self._curation_header
@@ -459,7 +482,8 @@ class InfoPanel(QWidget):
             header.setToolTip("")
             return
         fm = QFontMetrics(header.font())
-        header.set_count_text(fm.elidedText(path.name, Qt.ElideMiddle, _TARGET_NAME_MAX_PX))
+        name = display_name if display_name is not None else path.name
+        header.set_count_text(fm.elidedText(name, Qt.ElideMiddle, _TARGET_NAME_MAX_PX))
         header.setToolTip(str(path))
 
     def set_file_detail(
@@ -495,10 +519,9 @@ class InfoPanel(QWidget):
         *text* はウィンドウの :mod:`empty_state` リゾルバが決めた ``SECONDARY``
         の 1 行、``None`` は割当 ``NONE`` = 「この面については何も主張しない」。
         このペインは主案内（``PRIMARY``）を持たないので、アイコンもボタンも
-        付けない（N-101 — 従属面は「アイコン無し・1 行・控えめ」）。
+        付けない（従属面は「アイコン無し・1 行・控えめ」）。
 
-        **``NONE`` では一切書かない**のが要点 (UIレビュー07-25 追修 #118 の
-        一般化): 呼び出し元 (``_on_counts_changed``) は絞り込み 1 文字ごとに
+        **``NONE`` では一切書かない**のが要点: 呼び出し元 (``_on_counts_changed``) は絞り込み 1 文字ごとに
         走るため、無条件に既定文言を書き戻すと**このペインが自分で出した**
         フォルダ固有の空状態（スキャン失敗の ⚠+[再試行] /「このフォルダには
         ファイルがありません」）を踏み潰す。リゾルバは選択中のとき必ず
@@ -547,8 +570,8 @@ class InfoPanel(QWidget):
 
         印（★ / あとで見る / ユーザータグ）はこのカードには載せない — 最上段の
         印ストリップ（:class:`CurationStrip`）が post.md の有無に関係なく同じ
-        席で見せて操作もできるので、同じペインに二重に出さない（E2。N-11 の
-        「3 面で同じ 3 行」は詳細情報ウィンドウ側の :func:`curation_rows` が残す）。
+        席で見せて操作もできるので、同じペインに二重に出さない（「各面で同じ
+        3 行」は詳細情報ウィンドウ側の :func:`curation_rows` が担う）。
         """
         self._clear_grid()
         rows = _meta_rows(parsed) if parsed is not None else []
@@ -613,7 +636,7 @@ class InfoPanel(QWidget):
 
         The badge is the same pixmap the grid tile draws (``badge_pixmap``), so
         「タイル上のバッジと同じ絵が同じ意味で並ぶ」 — and no pictograph has to be
-        spelled out as an emoji inside an i18n value (UIレビュー 08-28 N-52).
+        spelled out as an emoji inside an i18n value.
         """
         row = QWidget()
         lay = QHBoxLayout(row)
@@ -624,7 +647,7 @@ class InfoPanel(QWidget):
         # ``text=""`` = 図像だけのチップ。実数は隣の値ラベルが持つので、凡例用の
         # 見本文字（"N"）まで描くと「♥N 128 件」と二重に読める。
         # UI 面（カード）に載るので画像用スクリム配色ではなく面用の配色で描く
-        # （UIレビュー 2026-09-11 N-119 — ライトテーマで黒く浮いていた）。
+        # （スクリム配色のままだとライトテーマで黒く浮く）。
         chip.setPixmap(badge_pixmap(kind, dpr=max(1.0, dpr), text="", on_surface=True))
         chip.setToolTip(badge_name(kind))
         chip.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)

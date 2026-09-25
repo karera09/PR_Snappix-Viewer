@@ -128,7 +128,7 @@ class SharedPrefs(BaseModel):
     #: "not yet chosen"
     #: (the unset sentinel), kept DISTINCT from the explicit "system" choice so
     #: that an explicit reset-to-system is authoritative and durable rather than
-    #: being re-promoted from a stale local value (#11 — see
+    #: being re-promoted from a stale local value (see
     #: :func:`decide_startup_theme`).  Plain str (not Literal) so an unknown
     #: on-disk value degrades to unset in the validator instead of failing the
     #: whole load — same field-level-drop philosophy as ``viewer/state.py``.
@@ -149,7 +149,7 @@ class SharedPrefs(BaseModel):
 
     # Field-level type tolerance: a hand-edited / half-written file with ONE
     # mistyped field (``"theme": 123`` / ``"library_roots": "C:/x"``) must not
-    # fail whole-model validation — that used to make load_shared_prefs treat
+    # fail whole-model validation — that would make load_shared_prefs treat
     # the entire file as corrupt and reset every other (perfectly fine)
     # setting.  These ``mode="before"`` coercers drop just the bad value, so
     # the after-validator below only ever sees well-typed data.
@@ -216,8 +216,7 @@ def load_shared_prefs() -> SharedPrefs:
     exists (``viewer/app.py`` resolves the startup language/theme through it,
     outside the ``except OSError`` startup guard), so anything escaping here
     ends the process without a window — and a windowed frozen build has no
-    stderr to say why.  Non-UTF-8 content counts as unreadable, not corrupt
-    (レビュー 2026-09-03 項目 #115).
+    stderr to say why.  Non-UTF-8 content counts as unreadable, not corrupt.
     """
     path = _prefs_path()
     if not path.exists():
@@ -233,8 +232,8 @@ def load_shared_prefs() -> SharedPrefs:
         # ``UnicodeDecodeError`` is a ``ValueError``, *not* an ``OSError``:
         # a file saved as ANSI (cp932) by 日本語 Windows のメモ帳 — or a
         # backup restored with the wrong encoding — would otherwise escape
-        # this whole function (項目 #115; same defect class already fixed in
-        # ``viewer/plugin_host/manifest.py``).  Its content is very likely
+        # this whole function (``viewer/plugin_host/manifest.py`` guards the
+        # same way).  Its content is very likely
         # intact user data in another encoding, so it takes the *unreadable*
         # branch (file left untouched) rather than the corrupt one.
         # Unreadable is NOT corruption — the file may be perfectly fine.
@@ -274,7 +273,7 @@ def _existing_prefs_intact(path: Path) -> bool:
 
     Non-UTF-8 bytes are unreadable, not lost — and ``UnicodeDecodeError`` is
     a ``ValueError``, so it must be named explicitly or it escapes the guard
-    it is part of (項目 #115).
+    it is part of.
     """
     try:
         raw = path.read_text(encoding="utf-8")
@@ -391,7 +390,7 @@ def _decide_startup_scalar(
     "Not yet chosen" is the empty-string sentinel, kept DISTINCT from any
     explicit choice that happens to equal *default* (e.g. theme "system"): an
     explicit value in shared is authoritative and wins, so a reset-to-default
-    is durable and never re-promoted from a stale local value (#11).  A shared
+    is durable and never re-promoted from a stale local value.  A shared
     value that is empty or outside *valid* is unset; a local value outside
     *valid* is treated as *default* so a junk local field can never win or be
     promoted.
@@ -476,7 +475,7 @@ def decide_startup_theme(shared_theme: str, local_theme: str) -> tuple[str, str 
     "Not yet chosen" is the empty-string sentinel, kept DISTINCT from the
     explicit "system" choice: an explicit "system" in shared is authoritative
     and wins (so a reset-to-system is durable and never re-promoted from a
-    stale local value — #11).  A shared value that is empty or junk is unset;
+    stale local value).  A shared value that is empty or junk is unset;
     a local value outside :data:`_VALID_THEMES` is treated as the tool default
     so a junk local field can never win or be promoted.
 
@@ -569,15 +568,15 @@ def apply_library_roots(
     removed: list[str],
     order: list[str] | None = None,
 ) -> list[str]:
-    """Apply a library-root **diff** onto the freshest on-disk list (項目#80/#82).
+    """Apply a library-root **diff** onto the freshest on-disk list.
 
-    ライブラリルートの書き込みは従来「セッション開始時に読んだリスト全体を
-    置換する」（旧 ``set_library_roots``）で、:func:`update_shared_prefs` が
-    docstring で約束する「直前に読み直した最新のディスク内容へ変更を載せる」
-    契約から唯一外れていた。degraded フラグは *書込時点* の読み取り可否しか
-    表現できないため、「起動時に読めず → 書込時にはファイルが復帰」の経路で
-    起動時スナップショット由来の全置換が実データを消せた（項目#82 の実測）。
-    書込を「値の置換」ではなく「差分の適用」へ変えることで、スナップショット
+    ライブラリルートの書き込みを「セッション開始時に読んだリスト全体の置換」に
+    すると、:func:`update_shared_prefs` が docstring で約束する「直前に読み
+    直した最新のディスク内容へ変更を載せる」契約から外れる。degraded フラグは
+    *書込時点* の読み取り可否しか表現できないため、「起動時に読めず →
+    書込時にはファイルが復帰」の経路で
+    起動時スナップショット由来の全置換が実データを消せてしまう。
+    書込を「値の置換」ではなく「差分の適用」にすることで、スナップショット
     の古さが構造的に無害になる: 他プロセス（書き込み側のプラグイン等）が途中で足した
     ルートも保存される。
 
@@ -637,8 +636,8 @@ def add_library_root(path: str) -> None:
     """Append *path* to the shared library-root list (best effort, deduped).
 
     Called when a tool establishes an effective library root — the viewer's
-    browse root, or a plugin's output root.  The 1-element form of :func:`apply_library_roots`
-    (項目#80), so it applies onto the freshest on-disk list; re-adding an
+    browse root, or a plugin's output root.  The 1-element form of :func:`apply_library_roots`,
+    so it applies onto the freshest on-disk list; re-adding an
     existing root is a harmless no-op and a blank path is ignored.  Write
     failures are logged and swallowed inside :func:`apply_library_roots`.
     """
@@ -650,8 +649,8 @@ def add_library_root(path: str) -> None:
 def remove_library_root(path: str) -> None:
     """Drop *path* from the shared library-root list (best effort).
 
-    The mirror of :func:`add_library_root` for the library-management UI (M02)
-    — the 1-element removal form of :func:`apply_library_roots` (項目#80).
+    The mirror of :func:`add_library_root` for the library-management UI
+    — the 1-element removal form of :func:`apply_library_roots`.
     A no-op when *path* is blank or not currently registered.
     """
     if not path:

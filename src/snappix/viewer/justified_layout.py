@@ -150,13 +150,13 @@ def compute_justified_layout(
     1:1 box.  Clamps keep extreme rows sane (see :class:`LayoutParams`).
 
     The lookahead is what keeps a row's height near the slider value in a
-    narrow pane (review 2026-09-03 #67).  The older rule — close the row
-    *before* the tile that would overflow — could only ever stretch a row,
-    so a narrow pane produced runs of single-tile rows pinned at
+    narrow pane.  The simpler rule — close the row
+    *before* the tile that would overflow — can only ever stretch a row,
+    so a narrow pane produces runs of single-tile rows pinned at
     ``max_row_height`` with a wide gap on the right.  Measured over 1200
     tiles at a 538px viewport with ``target_row_height=160``: 556 rows /
     105 single-tile rows / 7 rows with a >5% right gap / tallest row 400px
-    before, 410 / 0 / 0 / 208 after.
+    with that rule, 410 / 0 / 0 / 208 with the lookahead.
 
     Rows made only of non-``expandable`` placeholders are the exception:
     they are never scaled (see :func:`_should_close_row`), so they keep the
@@ -210,6 +210,7 @@ def compute_justified_layout(
             content_w=content_w,
             spacing=spacing,
             target_h=target_row_height,
+            min_h=eff_min,
             justified=_row_will_justify(
                 row_expandable or t.expandable,
                 last=i == len(tiles) - 1,
@@ -305,6 +306,7 @@ def _should_close_row(
     content_w: int,
     spacing: int,
     target_h: int,
+    min_h: int,
     justified: bool,
 ) -> bool:
     """Whether the (non-empty) current row closes before ``candidate``.
@@ -317,7 +319,19 @@ def _should_close_row(
       as it stands with the height it would get after taking the candidate,
       and keep whichever is nearer ``target_h``.  Both a too-tall sparse row
       and a too-short crowded one are therefore avoided, which is the whole
-      point of the rule (review 2026-09-03 #67).
+      point of the rule.
+    * ...except that a candidate which would drag the row below its floor
+      (``max(min_h, target_h / 2)``) is never taken, however the linear
+      distance compares.  An extreme panorama (10:1, 100:1 strip) joining
+      a row of ordinary tiles otherwise wins on distance — a 3px row is
+      "nearer" 120 than a 300px one — and the emit step's min-clamp →
+      overflow → shrink then squeezes the *neighbours* to dots.  Closing
+      leaves the ordinary tiles on their own (tall, capped by
+      ``max_row_height``) and lets the strip thin only itself.  A ratio
+      distance (``|log(h/target)|``) was measured to break the narrow-pane
+      balance above, so the guard is a floor, not a new metric.  The
+      ``target_h / 2`` half keeps hosts that pass no ``min_row_height``
+      (default 1) covered too.
     * Placeholder-only rows are never scaled, so a row that overflows would
       be fixed up by shaving its last tile into a sliver (and, at very
       narrow widths, could still overflow ``content_w``).  Those keep the
@@ -331,6 +345,8 @@ def _should_close_row(
     height_with = (content_w - row_len * spacing) / max(
         row_aspect_sum + candidate_aspect, 1e-9
     )
+    if height_with < max(min_h, target_h / 2):
+        return True
     return abs(height_without - target_h) <= abs(height_with - target_h)
 
 
@@ -649,6 +665,75 @@ def nearest_in_adjacent_row(
     return best
 
 
+# ------------------------------------------------------------ scroll anchor
+
+
+@dataclass(frozen=True)
+class ScrollAnchor:
+    """レイアウトに依存しないスクロール位置 = 「どのタイルのどこを、
+    ビューポートの上から何 px に見せているか」.
+
+    スクロール値（px）はレイアウトごとに意味が変わる — タイルサイズ・幅・
+    上側の行のアスペクトが変わると全行の y が動くので、同じ値が数百枚先を
+    指す。リレイアウトの前にこれを取り、後で :func:`scroll_for_anchor` で
+    新しいレイアウトの値へ訳し直す。
+
+    ``index`` はタイル添字、``fraction`` はそのタイルの**行**（画像 +
+    キャプション、``RowBand.top``〜``bottom``）の中の位置（0 = 上端、1 =
+    下端。行間の余白では 1 を超え、先頭行の上余白では負になり得る）、
+    ``view_offset`` はその点をビューポート上端から何 px に置くか。
+    同じレイアウトへ訳し直すと元の値に戻る（丸めの範囲で）。
+    """
+
+    index: int
+    fraction: float
+    view_offset: int = 0
+
+
+def anchor_at_top(result: LayoutResult, *, scroll_y: int) -> ScrollAnchor | None:
+    """ビューポート上端の行の先頭タイルに掛けたアンカー。行が無ければ ``None``."""
+    rows = result.rows
+    if not rows:
+        return None
+    r = max(0, bisect.bisect_right(result.row_tops, scroll_y) - 1)
+    band = rows[r]
+    height = max(1, band.bottom - band.top)
+    return ScrollAnchor(
+        index=band.first, fraction=(scroll_y - band.top) / height, view_offset=0,
+    )
+
+
+def anchor_on_tile(
+    result: LayoutResult, index: int, *, scroll_y: int, fraction: float = 0.5,
+) -> ScrollAnchor | None:
+    """タイル *index* の行内 *fraction* の点を、いまのビューポート位置に留める
+    アンカー（既定は行の中央）。タイルが無ければ ``None``."""
+    row = _row_of_tile(result, index)
+    if row is None:
+        return None
+    band = result.rows[row]
+    point = band.top + fraction * max(1, band.bottom - band.top)
+    # :func:`scroll_for_anchor` と同じく点を先に丸める — ``round(point -
+    # scroll_y)`` は .5 の点で偶数丸めが逆へ振れ、同じレイアウトへ訳し直すと
+    # 1 px ずれる。
+    return ScrollAnchor(
+        index=index, fraction=fraction, view_offset=int(round(point)) - scroll_y,
+    )
+
+
+def scroll_for_anchor(result: LayoutResult, anchor: ScrollAnchor) -> int | None:
+    """*anchor* を *result* でのスクロール値へ訳す（クランプは呼び出し側）.
+
+    アンカーのタイルがこのレイアウトに無ければ ``None``（タイル列が変わった）。
+    """
+    row = _row_of_tile(result, anchor.index)
+    if row is None:
+        return None
+    band = result.rows[row]
+    point = band.top + anchor.fraction * max(1, band.bottom - band.top)
+    return int(round(point)) - anchor.view_offset
+
+
 def _row_index_at_y(result: LayoutResult, y: int) -> int | None:
     """Index of the row whose [top, bottom) contains ``y`` (or the row the
     point falls within the spacing after).  Binary search on the layout's
@@ -691,4 +776,8 @@ __all__ = [
     "hit_test",
     "visible_range",
     "nearest_in_adjacent_row",
+    "ScrollAnchor",
+    "anchor_at_top",
+    "anchor_on_tile",
+    "scroll_for_anchor",
 ]

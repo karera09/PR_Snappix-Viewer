@@ -5,7 +5,7 @@
 と、行の同一性を決めるキー計算（:func:`~snappix.viewer.user_meta.absolute_spelling`
 / :func:`~snappix.viewer.user_meta.normalize_entry_key`）は ``user_meta.py`` に
 残る — キー経路があのファイルの中で閉じることを
-``tests/test_viewer_user_meta_path_keys.py`` が静的に要求しているため（#133。
+``tests/test_viewer_user_meta_path_keys.py`` が静的に要求しているため（
 呼び先が別モジュールにあると閉包走査が本体を一度も検査しないまま素通りする）。
 
 ここに居るのは 3 組:
@@ -14,8 +14,7 @@
   :func:`_anchor_reachable`。「消えた」と「読めなかった」を取り違えないための
   判定で、ストアの張り替え
   （:meth:`~snappix.viewer.user_meta.UserMetaStore.resolve_moved_entries`）と
-  横断一覧の解決（:func:`resolve_curation_paths`）が同じ 1 実装を共有する
-  （#151）。
+  横断一覧の解決（:func:`resolve_curation_paths`）が同じ 1 実装を共有する。
 * **改名追従の台帳** — :class:`MovedResolver` と、``post.md`` の頭だけを読んで
   それを組む :func:`build_moved_resolver`（ワーカースレッド専用）。
 * **横断一覧のパス解決** — :func:`build_curation_entry` /
@@ -56,7 +55,7 @@ def _is_definitely_gone(path: Path) -> bool:
     answer by **rewriting** the row's path (the only non-regenerable user data
     the viewer holds, with no undo), so "we couldn't tell" must not be read as
     "it's gone" — an unreachable NAS entry would otherwise have its star moved
-    onto a local copy carrying the same postref (#151).
+    onto a local copy carrying the same postref.
     """
     try:
         path.stat()
@@ -77,7 +76,7 @@ def _anchor_reachable(path: Path, cache: dict[str, bool]) -> bool:
     a genuinely deleted folder.  Probing the **anchor** (``D:\\`` /
     ``\\\\nas\\lib\\``) separates the two: a reachable anchor means the entry
     really did move, an unreachable one means the whole volume is offline and
-    nothing under it may be repointed (#151).  Cached per anchor so a store
+    nothing under it may be repointed.  Cached per anchor so a store
     full of NAS rows costs one probe, not one per row.
     """
     anchor = path.anchor
@@ -125,37 +124,34 @@ def build_moved_resolver(
     + reads) — never call it on the GUI thread.
 
     走査そのものは共有 BFS :func:`snappix.viewer.folder_scan._iter_tree` に
-    委ねる（レビュー 2026-09-03 項目#88）。以前はここに 3 本目の手書きウォークが
-    あり、共有された性質のうち**サイクルガードだけ**を借りて残りを落として
-    いた:
+    委ねる。これで次の 3 点が揃う:
 
-    * **キャンセルが無かった** — 呼び出し元 (``ViewerWindow._kick_rename_follow``)
-      の世代トークンは**結果を捨てる**だけでウォークは止まらず、
-      窓を閉じてもルートを切り替えても最大 ``max_folders`` 件ぶんの NAS
+    * **キャンセル** — 呼び出し元 (``ViewerWindow._kick_rename_follow``)
+      の世代トークンは**結果を捨てる**だけでウォークを止めないので、
+      自前で止めないと窓を閉じてもルートを切り替えても最大 ``max_folders`` 件ぶんの NAS
       ``os.scandir`` が最後まで走り、同居する短命プローブがグローバル
-      ``QThreadPool`` の枠をこの長寿命タスクに食われていた。いまは
+      ``QThreadPool`` の枠をこの長寿命タスクに食われる。
       *should_cancel* を受け、``_iter_tree`` の 256 件刻みのポーリングで
       協調的に止まる（早期終了 = 「欲しい postref が全部見つかった」も
       同じ述語に畳んである）。
-    * **フォルダごとに余分な ``stat``** — ``(folder / "post.md").is_file()`` は
+    * **フォルダごとの余分な ``stat`` を持たない** — ``(folder / "post.md").is_file()`` は
       1 フォルダ 1 往復で、直後の ``os.scandir`` が同じ子一覧を返すので完全な
-      重複だった。``_iter_tree`` が返す**ファイルエントリ**の名前を見る形に
+      重複になる。``_iter_tree`` が返す**ファイルエントリ**の名前を見る形に
       すれば往復はゼロ（20,000 フォルダで 20,000 回の NAS stat 削減）。
-    * **読めなかったフォルダを誰にも言わなかった** — ``except OSError:
-      continue`` で黙って落としていたので、一時的に読めなかったサブツリー
-      配下の★は追従されず、その事実がログにも残らなかった。いまは
+    * **読めなかったフォルダを報告する** — ``except OSError: continue`` で黙って
+      落とすと、一時的に読めなかったサブツリー配下の★は追従されず、その事実が
+      ログにも残らない。
       ``on_dir_error`` で数えて 1 行の警告にする。
 
     Cycles are guarded the same way every other recursive walk in the viewer
     guards them — the shared :func:`snappix.viewer.folder_scan.should_descend`
-    predicate (#44), now reached through ``_iter_tree``: junctions / symlinks
+    predicate, reached through ``_iter_tree``: junctions / symlinks
     are **followed** and only identity de-duplication stops loops, so stars
-    under a junction-mounted subtree keep following renames too (方針決定
-    2026-08-28 — the walk is read-only, so descending links carries none of the
+    under a junction-mounted subtree keep following renames too (the
+    walk is read-only, so descending links carries none of the
     health check's deletion risk).  Without the guard an ancestor-pointing link
     re-walks the same subtree until ``max_folders`` is burnt, so folders outside
-    the loop are never reached and the rename following silently loses stars
-    (#96).
+    the loop are never reached and the rename following silently loses stars.
 
     Returns a :class:`MovedResolver` (possibly partial) for
     :meth:`UserMetaStore.resolve_moved_entries`.
@@ -205,7 +201,7 @@ def build_moved_resolver(
                 if not remaining:
                     break
     if unreadable:
-        # 「読めなかった」を「移動していない」として黙らせない（#64 と同じ弁）。
+        # 「読めなかった」を「移動していない」として黙らせない。
         logger.warning(
             "rename following could not read {} folder(s) under {} —"
             " stars below them may not follow their rename this time",
@@ -229,10 +225,10 @@ def _curation_display_name(
     ambiguous.  The caption therefore names **where in the library** the entry
     lives.
 
-    UIレビュー 2026-08-28 N-49: 旧実装は ``path.parts[-3:]`` 固定だったため、
+    ``path.parts[-3:]`` 固定にすると、
     投稿フォルダ（``library/作家/投稿``）は無意味な先頭「library」が付き、
     ファイル（``library/作家/投稿/img.jpg``）は「作家/投稿/img.jpg」と、
-    **種別で基準の深さが変わっていた**。基準はパンくず / ナビレール / 全文検索と
+    **種別で基準の深さが変わる**。基準はパンくず / ナビレール / 全文検索と
     同じ :func:`~snappix.common.fsutil.pick_library_base`（最も浅い登録
     ライブラリ）へ一本化し、そこからの相対パスを出す。深すぎるときだけ先頭を
     ``…`` に畳むので、末尾（＝実体の名前）は必ず残る。
@@ -270,8 +266,8 @@ def build_curation_entry(path: Path, *, is_dir: bool, mtime: float, size: int):
     a metadata pass over the whole pool would be a NAS round-trip per entry
     before a single tile appears.  Folders therefore land with
     ``metadata_loaded=False`` and the grid resolves post.md **for the visible
-    tiles only**, after the fact (``PostGrid._schedule_curation_meta``, UIレビュー
-    2026-08-28 N-49 後半) — the same "viewport-limited resolution" discipline the
+    tiles only**, after the fact (``PostGrid._schedule_curation_meta``) —
+    the same "viewport-limited resolution" discipline the
     thumbnail loader and the aspect prober follow.
     """
     from ..folder_scan import THUMBNAILABLE_SUFFIXES, FolderEntry
@@ -294,11 +290,11 @@ def build_curation_entry(path: Path, *, is_dir: bool, mtime: float, size: int):
 class CurationResolve:
     """Outcome of :func:`resolve_curation_paths` (H01).
 
-    ``missing`` and ``unreadable`` are deliberately **separate** buckets
-    (UIレビュー 2026-08-28 N-09 / 旧 N-68).  The historical single ``missing``
-    folded every ``OSError`` together and the UI then asserted 「移動または
-    削除済み」 — so an unplugged NAS was reported as deleted curation, and a
-    list whose entries all lived on that share showed 「まだありません」, i.e.
+    ``missing`` and ``unreadable`` are deliberately **separate** buckets.
+    A single ``missing`` bucket folds every ``OSError`` together and the UI
+    then asserts 「移動または
+    削除済み」 — so an unplugged NAS reads as deleted curation, and a
+    list whose entries all live on that share shows 「まだありません」, i.e.
     「印を付けていない」.  Both readings are the opposite of the truth.
 
     * ``missing_paths`` — **provably** gone (``ENOENT`` / ``ENOTDIR`` on a
@@ -307,7 +303,7 @@ class CurationResolve:
     * ``unreadable_paths`` — the probe failed for any other reason, or the
       entry's whole volume is offline: we simply could not tell.
 
-    落ちた行は**件数ではなくパスそのもの**で持つ (#133 項目 3):
+    落ちた行は**件数ではなくパスそのもの**で持つ:
     ``viewer/curation_recovery.py`` がこれをプレースホルダタイルとして一覧
     末尾に出し、「現在の場所を指定…」→ :meth:`UserMetaStore.rebind_path` の
     張り替え起点にする。件数だけだと「どの行が失われたか」が UI に一切
@@ -346,10 +342,10 @@ def resolve_curation_paths(
 
     *library_bases* is ``ViewerWindow._compute_library_bases()`` — the same
     ``(path, label)`` list the breadcrumb gets — used only to make the caption
-    library-relative (N-49).  Pure path arithmetic, no extra I/O.
+    library-relative.  Pure path arithmetic, no extra I/O.
 
-    *should_cancel* is polled before every ``os.stat`` (レビュー 2026-09-03
-    項目 #215 追補): the owning ``GuardedStream`` passes its job's
+    *should_cancel* is polled before every ``os.stat``: the owning
+    ``GuardedStream`` passes its job's
     ``cancel.is_cancelled`` so that an exit / re-enter / window close stops
     the per-path loop cooperatively instead of grinding through the rest of a
     dead share (one stat there can block 15–195 s).  A cancelled call returns
@@ -369,10 +365,10 @@ def resolve_curation_paths(
         try:
             info = path.stat()
         except OSError as exc:
-            # 「消えた」と「読めない」を取り違えない (#151 と同じ判定を再利用):
+            # 「消えた」と「読めない」を取り違えない (改名追従と同じ判定を再利用):
             # 確実に不在 かつ そのボリュームが応答している ときだけ missing。
             # パスは捨てずに持ち帰る — プレースホルダ表示と張り替え導線の
-            # 母集合になる (#133 項目 3)。判定は**今握っている例外**から行う
+            # 母集合になる。判定は**今握っている例外**から行う
             # （`_is_definitely_gone` を呼ぶと同じパスを 2 度 stat することに
             # なり、死んだ共有ではその 1 回が 15〜195 秒ブロックする）。
             if _is_gone_exc(exc) and _anchor_reachable(path, anchor_ok):

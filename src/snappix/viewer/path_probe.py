@@ -1,4 +1,4 @@
-"""GUI スレッドを凍らせないパス種別プローブ（B05 / L02 / 項目#109）.
+"""GUI スレッドを凍らせないパス種別プローブ.
 
 オフライン / スリープ中のネットワーク共有に対する ``Path.is_dir()`` は
 SMB タイムアウト（数十秒）まで呼び出しスレッドをブロックする。GUI
@@ -7,15 +7,15 @@ SMB タイムアウト（数十秒）まで呼び出しスレッドをブロッ�
 
 **同期的に見えるナビゲーションの存在確認は、例外なくここを通すこと**。
 利用者は起動経路（``viewer/app.py`` — 引数起動 / ``last_root`` 復帰）、
-ブックマークジャンプ（``main_window._jump_to_bookmark`` — 項目#109）、
+ブックマークジャンプ（``main_window._jump_to_bookmark``）、
 そして ``main_window`` の同期ゲート一式 — ``set_root`` / ↑Up /
 パンくずの祖先クリック / ドロップ受け / 投稿本文の 📁 リンク（いずれも
 ``_is_reachable_dir`` 経由、ドロップだけは dir/file の判別が要るので
-:func:`probe_path_kind` を直接呼ぶ）— で、issue #132 で MRU クリックの
-15.75 秒フリーズが実測されたのを機に合流した。健全性チェックの
+:func:`probe_path_kind` を直接呼ぶ）— で、応答しない共有上の MRU クリックが
+十数秒フリーズしうるため全てここへ合流している。健全性チェックの
 「エクスプローラで開く」（``health_dialog._open_path`` — 渡るのは走査が
 「読めない」と判定した行そのもので、最も止まりやすい）も同じ理由でここを
-通る（レビュー 2026-09-03 項目 #105）。Qt 非依存・純 threading。
+通る。Qt 非依存・純 threading。
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ def probe_path_kind(path_str: str, timeout: float = 2.0) -> str | None:
     any real failure with the 再試行 card.
 
     The single probe helper serves every synchronous-feeling navigation
-    entry (レビュー 2026-08-27 項目#110 / #109 — the thread / timeout /
+    entry (the thread / timeout /
     "empty result means timeout" skeleton must not be re-duplicated per
     caller):
 

@@ -11,7 +11,7 @@
   :func:`similar_seat` が唯一の真実源で、当たり判定側（ビュー）も同じ関数を
   通る — 描かれていないボタンが押せる / 押せないボタンが描かれる、という
   対実装の片側欠落を構造的に封じるため。
-* 画像が実際に落ちる矩形は :func:`drawn_image_rect` 1 本（#12）。
+* 画像が実際に落ちる矩形は :func:`drawn_image_rect` 1 本。
 """
 
 from __future__ import annotations
@@ -55,8 +55,8 @@ from .tiles import IconSeats, Tile, is_image_tile
 FALLBACK_BORDER_THICKNESS = 2
 
 # Spinner overlay drawn ON TOP OF thumbnail content.  Fixed dark-scrim +
-# white colours are the registered design-system exception (docs/claude/
-# design.md 使用ルール 2): overlays anchored to image content must stay
+# white colours are the registered design-system exception (image-anchored
+# overlays): overlays anchored to image content must stay
 # legible on arbitrary photos, so they deliberately do NOT follow the
 # theme tokens.  Values come from common/ui/overlay.py (the single overlay
 # palette), same source as the badge/chip colours in _indicator.py.
@@ -64,10 +64,10 @@ SPINNER_SCRIM = overlay.SPINNER_SCRIM
 SPINNER_TRACK = overlay.SPINNER_TRACK
 SPINNER_ARC = overlay.SPINNER_ARC
 
-# Bottom title-band gradient scrim (redesign 2026-07 Phase 3-2).  Transparent
+# Bottom title-band gradient scrim.  Transparent
 # at the top fading to a near-opaque dark at the image's bottom edge so the
 # on-image title stays legible over any photo.  Fixed dark + white text is the
-# registered design-system exception (design.md 使用ルール 2), same rationale
+# registered design-system exception (image-anchored overlays), same rationale
 # as the badge / spinner overlays above.
 SCRIM_TOP = overlay.TILE_SCRIM_TOP
 SCRIM_MID = overlay.TILE_SCRIM_MID
@@ -75,9 +75,9 @@ SCRIM_BOTTOM = overlay.TILE_SCRIM_BOTTOM
 TITLE_TEXT = overlay.OVERLAY_TEXT_STRONG
 TITLE_TEXT_DIM = overlay.OVERLAY_TEXT_DIM
 # Run-up (px) the scrim gains ABOVE the text band so the gradient has room to
-# reach SCRIM_MID before the first caption line starts (UIレビュー
-# 2026-08-28 N-20).  With a plain 2-stop ramp over the text band alone the
-# first line only ever saw α20–100 = 2.7–6.2:1 on bright thumbnails; the band
+# reach SCRIM_MID before the first caption line starts.  With a plain 2-stop
+# ramp over the text band alone the
+# first line only sees α20–100 = 2.7–6.2:1 on bright thumbnails; the band
 # is grown by this much and the mid stop pinned at ``SCRIM_RAMP / band_h``,
 # so text starts at α≥140 (≈4.7:1 against white) instead.
 SCRIM_RAMP = 18
@@ -93,7 +93,7 @@ ROW_SCRIM_PAD = 6
 # Minimum usable title width (px) — below this the badges own the whole bottom
 # and the title is dropped rather than overlapped.
 MIN_TITLE_W = 24
-# 極細タイル対策 (#116) — justified はタイル幅に下限を持たないので、縦長画像
+# 極細タイル対策 — justified はタイル幅に下限を持たないので、縦長画像
 # (webtoon 等の 1:10〜1:30)は数px〜20px 幅のスリバーになり得る。その幅では
 # 標準座席が全滅する(タイトルは MIN_TITLE_W ガードで落ち、種別バッジ・◇ は
 # 箱からはみ出す)ため:
@@ -104,12 +104,12 @@ MIN_BADGE_TILE_W = _BADGE_SIZE + 2 * _BADGE_MARGIN
 NARROW_PAD_X = 1
 
 #: Similarity-overlay button geometry (image-area corner, item 2-4).
-#: 24px = the WCAG 2.5.8 minimum target size (UIレビュー 08-28 N-63); the
+#: 24px = the WCAG 2.5.8 minimum target size; the
 #: seat and the hit test both read this constant, so the click area follows.
 SIMILAR_BTN_SIZE = 24
 SIMILAR_BTN_MARGIN = 4
 
-#: 非フォーカス時に選択強調へ掛ける不透明度の係数 (UIレビュー 07-25 #47)。
+#: 非フォーカス時に選択強調へ掛ける不透明度の係数。
 #: 色そのものは既存トークン（QPalette の highlight = accent）のままで、
 #: **弱めるのは alpha だけ** — QAbstractItemView の非アクティブ選択と同じ
 #: 見え方を、色のハードコードなしで得るための唯一の定数。
@@ -119,7 +119,7 @@ UNFOCUSED_SELECTION_ALPHA = 0.42
 def selection_color(
     palette: QPalette, active: bool, alpha: int = 255,
 ) -> QColor:
-    """選択強調色（palette の highlight）を *alpha* で返す (#47)。
+    """選択強調色（palette の highlight）を *alpha* で返す。
 
     非フォーカス時は :data:`UNFOCUSED_SELECTION_ALPHA` を掛けて減光する
     （色は変えない — トークンは 1 つのまま）。
@@ -146,7 +146,7 @@ class ScrimCache:
     def brush(self, height: int):
         """Return the reused vertical scrim gradient sized to *height* px.
 
-        Three stops (N-20): the middle one pins SCRIM_MID at ``SCRIM_RAMP``
+        Three stops: the middle one pins SCRIM_MID at ``SCRIM_RAMP``
         px from the top — the run-up :func:`icon_overlay_seats` adds above the
         text band — so the first caption line starts on α≥140 instead of the
         α20–100 a plain 2-stop ramp left it on.
@@ -197,7 +197,7 @@ class TileStyle:
     scrim: ScrimCache = field(default_factory=ScrimCache)
 
     def seated(self) -> bool:
-        """Whether icon tiles use the on-image seating chart (Phase 3-2).
+        """Whether icon tiles use the on-image seating chart.
 
         Triggered when the layout reserves NO caption strip in icon mode
         (``caption_height == 0``): the caption then rides the image bottom on a
@@ -229,7 +229,7 @@ def drawn_image_rect(rect: QRect, tile: Tile) -> QRect:
     """Rect the tile's pixmap is *actually* painted into within *rect*.
 
     The single source of truth shared by :func:`paint_thumb` (drawing)
-    and the icon-cell overlay seats / badges / warning frame (review #12):
+    and the icon-cell overlay seats / badges / warning frame:
     a min-clamped justified box can be wider than the KeepAspectRatio
     image it holds, and seats anchored to the box then land in the blank
     letterbox area instead of on the image.  With no decoded pixmap the
@@ -260,7 +260,7 @@ def folder_seat(img_rect: QRect) -> QRect:
 def similar_seat(img_rect: QRect, *, seated: bool) -> QRect:
     """◇ similar-hover button rect within *img_rect*'s coordinate space.
 
-    Phase 3-2 seats it TOP-RIGHT (the badge row now owns bottom-right); the
+    The seating chart seats it TOP-RIGHT (the badge row owns bottom-right); the
     legacy layout keeps it bottom-right (favorites was bottom-left there).
     Single source of truth for both the painter and the hit test.
     """
@@ -275,7 +275,7 @@ def similar_seat(img_rect: QRect, *, seated: bool) -> QRect:
 
 
 def similar_seat_fits(img_rect: QRect) -> bool:
-    """Whether *img_rect* is wide enough to hold the ◇ button (#116).
+    """Whether *img_rect* is wide enough to hold the ◇ button.
 
     On a sliver tile the fixed-size seat would start left of the tile
     itself — painted into the neighbour (now clipped away) and, worse,
@@ -295,13 +295,13 @@ def icon_overlay_seats(
     the bottom-right ``badge_bounds`` so text and badges never overlap — the
     contract the unit tests assert.  Coordinates share ``img_rect``'s space.
 
-    極細タイル (#116): 標準の帯パディングで最低タイトル幅すら確保できない
+    極細タイル: 標準の帯パディングで最低タイトル幅すら確保できない
     幅では標準座席が全滅する(タイトルは丸ごと落ち、バッジは箱からはみ出す)
     ため、バッジ行・種別バッジ・◇ を諦めて**全幅の下帯キャプション座席**
     (縮小パディング)へフォールバックする — レガシー座席が保っていた
     「狭くても省略キャプションは必ず出る」を座席モデルでも守る。
     """
-    # 極細タイル判定 (#116) — 下帯フォールバック時はバッジ行を組まない。
+    # 極細タイル判定 — 下帯フォールバック時はバッジ行を組まない。
     narrow = img_rect.width() - 2 * BAND_PAD_X < MIN_TITLE_W
 
     # --- bottom-right badge row --------------------------------------
@@ -321,7 +321,7 @@ def icon_overlay_seats(
             favorites=fav, star=star, later=later, relevance=rel,
         )
 
-    # --- top corners (empty when the seat doesn't fit the width, #116) --
+    # --- top corners (empty when the seat doesn't fit the width) --
     folder = (
         folder_seat(img_rect)
         if tile.is_dir and img_rect.width() >= MIN_BADGE_TILE_W
@@ -344,7 +344,7 @@ def icon_overlay_seats(
     # ぶん詰める).  Earlier rows keep the full band width — the badges only
     # ever occupy the bottom row (_indicator.badge_row_layout seats one chip
     # height above the image's bottom margin), so making every row pay for
-    # them threw away the badge row's width on every line (N-105).
+    # them would throw away the badge row's width on every line.
     if not badge_bounds.isNull():
         right_limit = badge_bounds.left() - BAND_BADGE_GAP
     else:
@@ -363,11 +363,11 @@ def icon_overlay_seats(
             style.font, fm, tile.caption, full_w, last_w,
             cache=style.elide_cache,
         )
-        # 高さ軸のガード (#F1D-2) — 幅の ``narrow`` 判定と対になる片割れ。
-        # 単独タイル行の min クランプ緩和 (#12) 以降、30:1 の画像は行高
+        # 高さ軸のガード — 幅の ``narrow`` 判定と対になる片割れ。
+        # 単独タイル行は min クランプが緩いので、30:1 の画像は行高
         # 18px まで潰れ得る。2 行キャプション(≈32px)はそのタイルに入らず、
         # 下端から積む ``rows_top`` がタイルの**外**に出て
-        # ``paint_icon_cell`` の setClipRect に丸ごと切り落とされていた
+        # ``paint_icon_cell`` の setClipRect に丸ごと切り落とされる
         # （＝ファイル名が完全に消え、スクリムだけがタイル高の 100% を
         # 覆って画像も黒帯になる）。入る行数まで落とし、1 行も入らない
         # なら帯ごと出さない。
@@ -410,7 +410,7 @@ def icon_overlay_seats(
             band_h = max(
                 band_h, img_rect.bottom() - badge_bounds.top() + ROW_SCRIM_PAD
             )
-        # N-20: reserve the gradient's run-up above the text band.
+        # Reserve the gradient's run-up above the text band.
         band_h = min(band_h + SCRIM_RAMP, img_rect.height())
         scrim_top = img_rect.bottom() - band_h + 1
         if rows:
@@ -437,10 +437,10 @@ def seated_title_color(tile: Tile):
 
     :func:`.captions.paint_caption` (下帯キャプション / リスト表示) drops
     post.md and ``#thumb#`` markers to the Disabled text role so they don't
-    read as 本編 (UIレビュー 07-25 #52).  The seating model added a second
-    title painter and only that one was updated for the flag, so the
-    demotion silently stopped applying on the **main post grid** — the one
-    surface the decision was made for (#F1D-4).  Palette roles are unusable
+    read as 本編.  A second title painter (the seating model) must honour
+    the same flag, or the
+    demotion silently stops applying on the **main post grid** — the one
+    surface the decision was made for.  Palette roles are unusable
     over image content, hence the overlay-palette twin.
     """
     return TITLE_TEXT_DIM if tile.dimmed else TITLE_TEXT
@@ -453,7 +453,7 @@ def paint_icon_cell(painter, box, tile: Tile, scroll_y: int, *, style: TileStyle
     img_rect = QRect(box.x, box.y - scroll_y, box.w, box.h)
     cap_h = style.caption_height
     cell_rect = QRect(box.x, box.y - scroll_y, box.w, box.h + cap_h)
-    # 極細タイル (#116): バッジ・◇ は固定サイズのオーバーレイなので、狭い
+    # 極細タイル: バッジ・◇ は固定サイズのオーバーレイなので、狭い
     # 箱ではセル外(=隣タイルの領域)へ描画がはみ出し得る。タイル毎にセル
     # 矩形へクリップして構造的に封じる(誤クリック側は座席のゲートで抑止)。
     # try/finally で restore を保証 — paintEvent はタイル単位で例外を隔離
@@ -477,7 +477,7 @@ def paint_icon_cell_body(
     if selected:
         painter.save()
         painter.setPen(Qt.NoPen)
-        # 非フォーカス時は減光（UIレビュー 07-25 #47 — ``selection_color``）。
+        # 非フォーカス時は減光（``selection_color``）。
         painter.setBrush(style.selection_color(60))
         painter.drawRoundedRect(
             cell_rect.adjusted(0, 0, -1, -1), RADIUS_SM, RADIUS_SM
@@ -498,7 +498,7 @@ def paint_icon_cell_body(
 
     paint_thumb(painter, img_rect, tile, style=style)
 
-    # Overlays anchor to the rect the image is ACTUALLY drawn into (#12):
+    # Overlays anchor to the rect the image is ACTUALLY drawn into:
     # a min-clamped justified box can be wider than its KeepAspectRatio
     # image, and box-anchored seats would float in the letterbox blank.
     drawn = drawn_image_rect(img_rect, tile)
@@ -506,7 +506,7 @@ def paint_icon_cell_body(
     if tile.is_fallback:
         paint_fallback_border(painter, drawn)
     # Top-left seat: entry-type indicator (both seating models).  Skipped
-    # when the chip doesn't fit the tile width (#116) — a clipped sliver
+    # when the chip doesn't fit the tile width — a clipped sliver
     # of a badge reads as garbage, not as a type cue.
     if drawn.width() >= MIN_BADGE_TILE_W:
         if tile.warn:
@@ -516,9 +516,9 @@ def paint_icon_cell_body(
         elif tile.is_dir:
             paint_folder_badge_icon_mode(painter, drawn)
         elif style.seated():
-            # UIレビュー 07-25 #125: ライブラリルート直下では裸ファイルのタイルと
+            # ライブラリルート直下では裸ファイルのタイルと
             # フォルダのタイルが同じ「写真カード」に見え、区別はフォルダ側の
-            # 図像の**有無**（= 無標）だけだった。ファイル側にも控えめな種別
+            # 図像の**有無**（= 無標）だけになる。ファイル側にも控えめな種別
             # 図像を置いて、種別が常に有標になるようにする。
             # 座席モデル（メインの投稿グリッド）限定 — レガシー座席では★が
             # この左上に来るため、ここに置くと衝突する。
@@ -594,7 +594,7 @@ def paint_icon_badges_legacy(
 def paint_icon_seated(
     painter, img_rect: QRect, index: int, tile: Tile, *, style: TileStyle,
 ) -> None:
-    """Draw the Phase 3-2 seating overlays (scrim → title → badges → ◇)."""
+    """Draw the on-image seating overlays (scrim → title → badges → ◇)."""
     seats = icon_overlay_seats(img_rect, tile, style=style)
     # 1) gradient scrim (behind both the title and the badge row).
     if not seats.scrim.isNull():
@@ -606,7 +606,7 @@ def paint_icon_seated(
         )
         painter.restore()
     # 2) title text on the scrim — one drawText per seated row, since the
-    #    rows can have different widths (N-105) and are already shaped /
+    #    rows can have different widths and are already shaped /
     #    elided by ``title_rows`` (no TextWordWrap re-flow here).
     if seats.title_rows:
         painter.save()
@@ -662,7 +662,7 @@ def paint_list_row_body(
     painter, box, tile: Tile, row_rect: QRect, *, style: TileStyle,
 ) -> None:
     selected = (box.index == style.selected_index)
-    # UIレビュー 07-25 #47: フォーカスを持たないペインの選択行は減光して
+    # フォーカスを持たないペインの選択行は減光して
     # 描く。塗りが薄くなると highlightedText（白系）が読めなくなるため、
     # 文字色も通常の text へ戻す（= QAbstractItemView の非アクティブ選択）。
     selected_active = selected and style.selection_active
@@ -690,7 +690,7 @@ def paint_list_row_body(
         # The low-alpha row wash alone is nearly invisible over the light
         # theme's white surface, so a folder read identically to a file in
         # list mode.  Draw the same gold folder pictogram used in icon mode
-        # on the row's thumbnail — a theme-independent, unmistakable cue (#12).
+        # on the row's thumbnail — a theme-independent, unmistakable cue.
         paint_folder_badge_icon_mode(painter, icon_rect)
     if tile.is_fallback:
         paint_fallback_border(painter, icon_rect)
@@ -792,7 +792,7 @@ def paint_caption_band(
     """Fill the below-image caption strip with a surface-token plate.
 
     Themed (``palette(alternate-base)`` = the ``bg_raised`` card token, per
-    docs/claude/design.md) so it reads against the ``bg_surface`` grid
+    the design tokens) so it reads against the ``bg_surface`` grid
     viewport and stays legible in every theme — no hardcoded colour.  Drawn
     under the caption text (which keeps the normal ``text`` foreground) so
     the tile becomes an image + label-plate card in 「画像の下に表示」 mode.
@@ -814,17 +814,17 @@ def paint_similar_overlay(painter, img_rect: QRect, *, seated: bool) -> None:
     """Draw the faint 「類似検索」 overlay button in *img_rect*'s corner.
 
     Content-anchored overlay (like the spinner / badges — the registered
-    design-system exception, docs/claude/design.md 使用ルール 2): fixed
+    design-system exception for image-anchored overlays): fixed
     dark scrim + light glyph so it stays legible on any thumbnail, and kept
     translucent so it never masks the image underneath.
 
     The artwork comes from the badge vocabulary registry
     (``_indicator.paint_similar_button``) — it used to be a ``drawText`` of
     the literal 「◇」 (U+25C7), which carried the same missing-glyph risk
-    the ♡ / ★ badges were vectorised to escape (UIレビュー 08-28 N-63).
+    the ♡ / ★ badges were vectorised to escape.
     """
     if not similar_seat_fits(img_rect):
-        return  # sliver tile (#116) — matches similar_seat's hit-test gate
+        return  # sliver tile — matches similar_seat's hit-test gate
     btn = similar_seat(img_rect, seated=seated)
     painter.save()
     painter.setOpacity(0.78)

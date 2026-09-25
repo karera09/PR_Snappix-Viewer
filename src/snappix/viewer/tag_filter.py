@@ -38,7 +38,7 @@ def preset_range(
     * ``range`` → ``(start_midnight, end_midnight + 1 day)`` so the end day is
       fully included.  A missing *start* or *end* leaves that bound ``None``.
       A reversed pair (*start* after *end*) is normalised by **swapping the
-      two dates** (項目188): returning the raw ``lo > hi`` window would be
+      two dates**: returning the raw ``lo > hi`` window would be
       unsatisfiable for every dated entry, and with ``keep_unknown=True`` the
       result set would silently degrade to "only entries without a date" —
       an inexplicable screen, not an obviously-empty one.  The date editors
@@ -61,7 +61,7 @@ def preset_range(
         e = end.date() if end is not None else None
         if s is not None and e is not None and s > e:
             # 逆転入力(開始 > 終了)は充足不能な窓になるため日付を入れ替えて
-            # 正規化する(項目188 — docstring 参照)。
+            # 正規化する(docstring 参照)。
             s, e = e, s
         lo = datetime.combine(s, time.min) if s is not None else None
         hi = (
@@ -87,8 +87,8 @@ def date_matches(
       are kept by default rather than dropped by a relative preset).
     * otherwise → ``(lo is None or lo <= posted) and (hi is None or posted < hi)``.
 
-    ``posted_at`` may be tz-aware (``post.md``'s ``- posted_at:`` line is the
-    orchestrator's ``datetime.isoformat()`` **with** timezone) while the bounds
+    ``posted_at`` may be tz-aware (``post.md``'s ``- posted_at:`` line is
+    ISO 8601 and usually carries a timezone) while the bounds
     from :func:`preset_range` are naive local — an aware value is normalised to
     local naive before comparing so the mix never raises ``TypeError``.
     """

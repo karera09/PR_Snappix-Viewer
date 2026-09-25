@@ -5,7 +5,7 @@ calls on its ``cache_controller`` (``cache_stats`` / ``tag_index_stats`` /
 ``cache_build_in_progress`` / ``clear_persistent_caches`` /
 ``build_cache_interactive``) plus the modal and background
 :class:`~snappix.viewer.cache_builder.CacheBuilder` orchestration that used to
-live directly on ``ViewerWindow`` (#96).  Behaviour, dialog texts and the
+live directly on ``ViewerWindow``.  Behaviour, dialog texts and the
 throttling / teardown contracts are unchanged.
 
 The window constructs one instance with its caches / loaders / status widget
@@ -69,8 +69,8 @@ class CacheBuildController(QObject):
         ``clear_persistent_caches`` flushes — either a fixed sequence or a
         **callable provider** returning the current set (the window passes
         ``ViewerWindow._all_loaders`` so its lazily-built filmstrip /
-        lightbox loaders are included whenever they exist, レビュー
-        2026-09-03 項目 #45); ``status_message(text, ms)``
+        lightbox loaders are included whenever they exist);
+        ``status_message(text, ms)``
         posts a transient status-bar message; ``current_root`` supplies the
         folder-picker's starting directory; ``notify(message, kind, duration_ms=…)`` (I06)
         raises a non-modal toast on the host window for build completion /
@@ -110,7 +110,7 @@ class CacheBuildController(QObject):
         # still surfaces.
         self._tearing_down = False
         # Builders retired from use but whose worker pools may still hold
-        # in-flight runnables (項目16).  QThreadPool's destructor waits
+        # in-flight runnables.  QThreadPool's destructor waits
         # *unbounded* for in-flight work, so ``deleteLater()`` right after a
         # user cancel would freeze the GUI on the next event-loop turn until
         # an in-flight NAS decode completes (seconds; tens of seconds on an
@@ -203,14 +203,14 @@ class CacheBuildController(QObject):
         DB the builder is writing would corrupt the batched commits) while a
         background build is in flight.
 
-        ``_bg_builder is None`` alone is NOT "nobody is writing" (項目#136):
+        ``_bg_builder is None`` alone is NOT "nobody is writing":
         :meth:`_on_bg_build_finished` clears ``_bg_builder`` and then parks the
-        builder in :attr:`_retiring` while its pools drain (項目16 の deferred
+        builder in :attr:`_retiring` while its pools drain (deferred
         destruction).  Those parked workers keep writing — ``_ThumbnailTask``
         の ``_produce_cached`` はキャンセルを見ずに ``disk_cache.store`` する —
         so a clear issued in that window reports a success the caches don't
         match (``ThumbDiskCache.clear`` は DELETE 後に store された行/blob を
-        意図的に掃かない、#95)。:meth:`shutdown` は既に同じ非対称を手当て
+        意図的に掃かない)。:meth:`shutdown` は同じ非対称を手当て
         しているので、ゲート側もリタイア待ちを含めて判定する。
         """
         return self._bg_builder is not None or bool(self._retiring)
@@ -250,7 +250,7 @@ class CacheBuildController(QObject):
 
         ``loaders`` may be a callable provider (the window's
         ``_all_loaders``); resolve it at use time so lazily-built loaders
-        created after construction are included (レビュー 2026-09-03 項目 #45).
+        created after construction are included.
         """
         loaders = self._loaders
         return loaders() if callable(loaders) else loaders
@@ -271,7 +271,7 @@ class CacheBuildController(QObject):
         ``{ok, failed, total}``.  Returns ``None`` if the user cancels the
         folder / mode prompt.
 
-        *confirm_background* (UIレビュー 08-28 N-82) lets a caller whose own
+        *confirm_background* lets a caller whose own
         contract is broken by the background path veto it **before anything
         starts**: the settings dialog promises 「「OK」を押すと適用されます」 yet
         has to ``accept()`` itself (committing every edited tab) so the user can
@@ -280,10 +280,9 @@ class CacheBuildController(QObject):
         returning ``False`` aborts without starting a build.  The 診断メニュー
         path commits nothing and passes nothing.
 
-        *notify* は**モーダル経路の完了通知**をここから出すかどうか（UIレビュー
-        2026-09-11 N-11）。背景経路は元から cancel / 部分失敗 / 成功の 3 分岐を
-        通知するのに、モーダル経路は結果を返すだけで無言だった — 戻り値を捨てる
-        診断メニュー経路では「押したのに何も起きない」に見える。既定 ``True``
+        *notify* は**モーダル経路の完了通知**をここから出すかどうか。背景経路は
+        cancel / 部分失敗 / 成功の 3 分岐を通知するので、モーダル経路も結果を
+        返すだけで無言にはしない — 戻り値を捨てる診断メニュー経路では無言だと「押したのに何も起きない」に見える。既定 ``True``
         でここから出し、**設定ダイアログだけ ``False``** を渡して自前の通知を
         残す: トーストは ``window.window()`` へ親付けされるので、``exec()`` の
         アプリケーションモーダルな設定ダイアログの**裏**に出てしまう。
@@ -410,7 +409,7 @@ class CacheBuildController(QObject):
         progress.setAutoReset(False)
         result: dict = {}
         # キャンセル判定は「builder の ``finished`` より先にダイアログが閉じた
-        # か」という **1 つの弁**に集約する（#139）。``QProgressDialog`` の
+        # か」という **1 つの弁**に集約する。``QProgressDialog`` の
         # ``wasCanceled()`` は両方向に嘘をつくので使わない:
         #   ① Esc / タイトルバーの × / 明示的な ``reject()`` は
         #      ``QDialog::reject`` を通るだけで ``canceled()`` を出さない
@@ -488,7 +487,7 @@ class CacheBuildController(QObject):
         finally:
             if not build_finished:
                 # Esc / タイトルバーの × / 明示的な ``reject()``: ``canceled()``
-                # が出ない閉じ方はここだけが入り口（#139）。ビルドは走行中な
+                # が出ない閉じ方はここだけが入り口。ビルドは走行中な
                 # ので、UI を失ったまま走り続けさせない。``cancel`` は同期で
                 # ``finished`` を回すため、下の disconnect より **先に** 呼んで
                 # 途中経過を ``result`` へ載せる = キャンセルボタン経路と同じ
@@ -505,14 +504,14 @@ class CacheBuildController(QObject):
             builder.finished.disconnect(on_finished)
             # A parented QProgressDialog survives ``exec`` — the parent owns
             # the C++ side — so without this every 診断 ▸ キャッシュを事前作成…
-            # run would leave another hidden dialog under the window (#125 と
-            # 同型).  ``deleteLater``, never ``WA_DeleteOnClose``: the latter
-            # frees the C++ object from inside the close signal's emission
-            # stack, which is the #111 crash shape.
+            # run would leave another hidden dialog under the window.
+            # ``deleteLater``, never ``WA_DeleteOnClose``: the latter frees the
+            # C++ object from inside the close signal's emission stack, which
+            # crashes.
             progress.deleteLater()
         # NOT a bare ``deleteLater()``: a user cancel leaves in-flight decodes
         # running, and destroying the builder's child QThreadPools then blocks
-        # the GUI unbounded (項目16) — defer until the pools drain.
+        # the GUI unbounded — defer until the pools drain.
         self._retire_builder(builder)
         if not user_cancelled:
             # A full build can overshoot the disk-cache byte budget by a wide
@@ -521,7 +520,7 @@ class CacheBuildController(QObject):
             self._prune_caches_async()
         totals = result or {"ok": 0, "failed": 0, "total": 0}
         # 背景経路 (:_on_bg_build_finished) と同じ 3 分岐・同じキー・同じ
-        # ``duration_ms`` で通知する（モーダル経路だけが無言だった — N-11）。
+        # ``duration_ms`` で通知する（モーダル経路だけ無言にしない）。
         # teardown 中は出さない不変条件も背景経路と揃える。
         if notify and not self._tearing_down:
             ok = totals.get("ok", 0)
@@ -553,10 +552,10 @@ class CacheBuildController(QObject):
                     ),
                     "success",
                 )
-        # N-29: 実際に走ったモード（モーダル）を呼び出し側へ返す。設定
+        # 実際に走ったモード（モーダル）を呼び出し側へ返す。設定
         # ダイアログはこれを見て自分のチェックボックスを実態へ合わせる。
         totals.setdefault("background", False)
-        # N-11: ``notify=False`` で自前通知する呼び出し側（設定ダイアログ）も
+        # ``notify=False`` で自前通知する呼び出し側（設定ダイアログ）も
         # キャンセルを「完了」と誤報告しないよう、判定結果を載せる。
         totals["cancelled"] = user_cancelled
         return totals
@@ -620,7 +619,7 @@ class CacheBuildController(QObject):
             # I06: promote the completion note from a 5s status line to a toast
             # (right-corner, harder to miss).  A partial failure (failed>0) is a
             # warning so the count stands out and points at the log.
-            # (UIレビュー 07-25 #10) その部分失敗だけは duration_ms=0 —
+            # その部分失敗だけは duration_ms=0 —
             # 数分〜数十分かかるビルドの「N 件失敗」が 3 秒で自動消滅すると、
             # 離席したユーザーは失敗の事実ごと失う（クリックするまで残す）。
             if failed > 0:
@@ -652,7 +651,7 @@ class CacheBuildController(QObject):
         self._bg_build_phase = ""
         self._bg_build_cancelled = False
         if builder is not None:
-            # Deferred destruction (項目16): a user cancel reaches here with
+            # Deferred destruction: a user cancel reaches here with
             # decodes still in flight, and QThreadPool's destructor would
             # block the GUI unbounded on them (NAS read + WebP encode; SMB
             # timeout if the NAS hangs).  Delete only once the pools drain.
@@ -664,7 +663,7 @@ class CacheBuildController(QObject):
         QThreadPool のデストラクタは in-flight QRunnable を**無制限**に待つ
         （``waitForDone`` 相当）。キャンセル直後は in-flight のデコード/
         プローブ/post 読みが残っているため、即 ``deleteLater()`` すると次の
-        イベントループ周回で GUI がその完了までフリーズする（項目16）。
+        イベントループ周回で GUI がその完了までフリーズする。
         ここでは非ブロッキングの :meth:`CacheBuilder.pools_idle` を 200ms
         ポーリングし、掃けてから破棄する。GUI スレッドは一切待たない。
         """
@@ -704,7 +703,7 @@ class CacheBuildController(QObject):
         """
         disk = self._disk_cache
         meta = self._meta_cache
-        # ビルドは FolderPreviewCache も温めるようになった（#40）ので、
+        # ビルドは FolderPreviewCache も温めるようになったので、
         # 同じ後始末でバイト枠へ戻す（枠は cache 自身が保持）。
         folder = self._folder_cache
         # ThumbDiskCache carries its own budget; ThumbMetaCache.prune takes
@@ -735,20 +734,18 @@ class CacheBuildController(QObject):
         ``None`` notifier (tests / standalone) makes this a no-op so the build
         path stays headless-friendly.
 
-        ``duration_ms`` (UIレビュー 07-25 #10) pins the toast's lifetime — ``0``
+        ``duration_ms`` pins the toast's lifetime — ``0``
         keeps it up until the user clicks it, which a multi-minute build's
         partial-failure notice needs (a 3 秒 toast is lost outright when the
-        user stepped away).  ホスト側の notifier が ``duration_ms`` を受ける
-        ようになった（``ViewerWindow._show_toast`` — UIレビュー 07-25 の
-        フォローアップ）ので、**常に notifier 1 本を通す**: 以前はここだけが
-        親ウィンドウへ ``show_toast`` を直接呼ぶ回避実装を持っており、
-        「トーストの単一ファネル」という設計上の約束を崩していた。古い
-        2 引数 notifier（外部テストのスタブ等）も引き続き通す。
+        user stepped away).  ホスト側の notifier は ``duration_ms`` を受ける
+        （``ViewerWindow._show_toast``）ので、**常に notifier 1 本を通す**:
+        親ウィンドウへ ``show_toast`` を直接呼ぶと「トーストの単一ファネル」
+        という設計上の約束が崩れる。2 引数 notifier（外部テストのスタブ等）も
+        引き続き通す。
 
-        (UIレビュー07-25 追修) 旧 notifier の判別は ``try: 3 引数呼び出し /
-        except TypeError: 2 引数で再呼び出し`` だったが、これは **3 引数
-        notifier の内部で起きた TypeError** まで飲み込み、その上でトーストを
-        二重に出していた。呼び分けは署名（arity）で先に決め、notifier 自身の
+        notifier の判別を ``try: 3 引数呼び出し / except TypeError: 2 引数で
+        再呼び出し`` にすると、**3 引数 notifier の内部で起きた TypeError**
+        まで飲み込み、その上でトーストを二重に出してしまう。呼び分けは署名（arity）で先に決め、notifier 自身の
         例外はそのまま外へ抜けさせる。
         """
         if self._notify is None:
@@ -819,7 +816,7 @@ class CacheBuildController(QObject):
         """Prompt for the build mode.  Returns ``(mode, background)`` or ``None``.
 
         *mode* is ``'full'``/``'aspect'``/``'index'``; *background* is the
-        「バックグラウンドで実行」 answer.  (UIレビュー 08-28 N-80) That choice
+        「バックグラウンドで実行」 answer.  That choice
         used to live **only** in the settings dialog's cache tab, so whoever
         started a build from 診断 ▸ キャッシュを事前作成… could not decide, in
         the moment, whether the build would seize the window in a modal — a
@@ -827,12 +824,12 @@ class CacheBuildController(QObject):
         carries a checkbox natively, so it rides along with the mode buttons
         here; the persisted ``cache_build_background`` seeds it.
 
-        *chosen* は直前に選ばれた対象フォルダ（UIレビュー 2026-09-11 N-50）。
+        *chosen* は直前に選ばれた対象フォルダ。
         「どこに対して作るのか」がこのモーダルから読めず、直前のフォルダ
         ピッカーの記憶だけが頼りだった。パスは省略せずそのまま出す
         （対象を誤認させないため — 折り返しは ``QMessageBox`` に任せる）。
 
-        チェックボックスの文言は**このモーダル専用のキー**を使う（N-29）:
+        チェックボックスの文言は**このモーダル専用のキー**を使う:
         設定タブと同じ文言を貼っていたため「永続設定を編集している」と読め、
         実際には今回のビルドにしか効かなかった。実際に走ったモードは
         :meth:`build_cache_interactive` の戻り値の ``background`` に載るので、
@@ -865,9 +862,9 @@ class CacheBuildController(QObject):
         box.addButton(t("common.action.cancel"), QMessageBox.RejectRole)
         box.setDefaultButton(aspect_btn)
         # Read the answers INSIDE the try, before the dialog is destroyed:
-        # ``clickedButton`` / the checkbox live on the box (#125 と同型 —
-        # 親付きなので exec を抜けてもウィンドウの隠れ子として残る).
-        # ``deleteLater``, never ``WA_DeleteOnClose`` (#111 型の即時解放を作る).
+        # ``clickedButton`` / the checkbox live on the box (親付きなので exec を
+        # 抜けてもウィンドウの隠れ子として残る).  ``deleteLater``, never
+        # ``WA_DeleteOnClose`` (シグナル送出中の即時解放を作る).
         try:
             box.exec()
             clicked = box.clickedButton()
@@ -900,13 +897,13 @@ class CacheBuildController(QObject):
         stay silent on the being-destroyed window.
 
         **リタイア待ちの builder も必ずドレインする**: ユーザーがキャンセル
-        したビルドは in-flight が残る間 :attr:`_retiring` に退避され（項目16
-        の deferred destruction）、``_bg_builder`` は既に ``None`` になって
+        したビルドは in-flight が残る間 :attr:`_retiring` に退避され（deferred
+        destruction）、``_bg_builder`` は既に ``None`` になって
         いる。ここを素通りすると、その窓でウィンドウを閉じたときにパーク中
         のワーカーが close 済みの disk_cache / search_index へ書き込む
-        （scanning.md の「close 前に writer を残さない」順序契約が破れる）。
-        残り時間を共有デッドラインとして按分し、GUI を無制限に待たせない
-        （項目#41）: ``wait_for_pools`` は受け取った ms を「今から」の持ち時間
+        （「close 前に writer を残さない」順序契約が破れる）。
+        残り時間を共有デッドラインとして按分し、GUI を無制限に待たせない:
+        ``wait_for_pools`` は受け取った ms を「今から」の持ち時間
         として自前で絶対デッドラインへ変換するので、各 builder に
         ``timeout_ms`` を満額で渡すと ``1 + len(_retiring)`` 本ぶんが直列に
         積み上がる。ここで 1 本の絶対デッドラインを持ち、残り時間だけを渡す。
@@ -924,7 +921,7 @@ class CacheBuildController(QObject):
             # ここは closeEvent 限定なので one-way の decode シャットダウンで
             # よい: パーク中の動画デコードを解放しないと下の bounded 待ちが
             # タイムアウトし、close 済みキャッシュへの書き込み・プロセス
-            # 常駐（#69）につながる。
+            # 常駐につながる。
             builder.request_decode_shutdown()
             if not builder.wait_for_pools(_remaining_ms()):
                 logger.warning(

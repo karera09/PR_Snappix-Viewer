@@ -16,7 +16,7 @@ destructive bulk-delete confirmation stays a blocking modal, and the window's
 
 Design-system rules apply throughout: themed widgets + tokens only, SVG icons
 from ``common/ui/icons`` (no emoji), success feedback via ``show_toast``,
-destructive actions gated behind a confirm modal (docs/claude/design.md).
+destructive actions gated behind a confirm modal.
 
 走査も一括削除も :class:`~snappix.viewer._runnable.GuardedStream` の
 ``submit_detached``（**プール外**のデーモンスレッド）で走る: 分オーダーの
@@ -90,10 +90,10 @@ from ._runnable import GuardedStream, StreamJob, StreamOutcome
 _PROGRESS_STRIDE = 25
 
 #: Append-only record of every path the bulk delete removed, under
-#: ``data/logs/`` (UIレビュー 2026-08-28 N-40 — see :func:`log_deleted_paths`).
+#: ``data/logs/`` (see :func:`log_deleted_paths`).
 DELETION_LOG_NAME = "health_deletions.log"
 
-#: Size above which the deletion log is rotated to ``….log.1`` (項目#256).
+#: Size above which the deletion log is rotated to ``….log.1``.
 #: Same house policy as ``common/logging.py`` の ``_LOG_ROTATION_BYTES``.
 _DELETION_LOG_ROTATION_BYTES = 5 * 1024 * 1024
 
@@ -174,16 +174,15 @@ def _run_bulk_delete(
     Cancel is cooperative (checked between paths); whatever was already
     deleted stays deleted — the rescan afterwards shows the true state.
 
-    Progress is throttled with the same :data:`_PROGRESS_STRIDE` as the scan
-    (レビュー 2026-08-27 #173): the receiving ``QProgressDialog`` is
-    ``WindowModal``, and ``QProgressDialog::setValue`` spins
-    ``processEvents()`` in that state — a per-path emit therefore ran a full
-    GUI event-loop turn for **every** deleted path (数万件の .part 一括削除で
-    off-thread 化の効果を進捗表示側で相殺し、その再入窓で ``finished`` が
-    ``setValue`` の内側に配送され得た)。
+    Progress is throttled with the same :data:`_PROGRESS_STRIDE` as the scan:
+    the receiving ``QProgressDialog`` is ``WindowModal``, and
+    ``QProgressDialog::setValue`` spins ``processEvents()`` in that state — a
+    per-path emit would therefore run a full GUI event-loop turn for **every**
+    deleted path (数万件の .part 一括削除で off-thread 化の効果を進捗表示側で
+    相殺し、その再入窓で ``finished`` が ``setValue`` の内側に配送され得る)。
 
     戻り値は ``(削除したパス, エラー, スキップ数, 削除ログのパス)``。削除した
-    **パス**（件数ではない — N-40）を運ぶ。
+    **パス**（件数ではない）を運ぶ。
     """
     deleted: list[Path] = []
     skipped = 0
@@ -208,13 +207,13 @@ def _run_bulk_delete(
         if done - last >= _PROGRESS_STRIDE:
             last = done
             job.report(done)
-    # 削除ログはこのワーカースレッドで書く（レビュー 2026-09-03 項目
-    # #217）。1 パス 1 行の追記は数万件の一括削除で秒単位の同期 I/O に
-    # なり、GUI スレッド側（``_on_delete_finished``）で書くと off-thread
-    # 化した削除の効果を報告の瞬間に相殺していた。``log_deleted_paths``
+    # 削除ログはこのワーカースレッドで書く。1 パス 1 行の追記は数万件の
+    # 一括削除で秒単位の同期 I/O になり、GUI スレッド側
+    # （``_on_delete_finished``）で書くと off-thread 化した削除の効果を
+    # 報告の瞬間に相殺してしまう。``log_deleted_paths``
     # は Qt 非依存で、``get_paths()`` はキャッシュ済みの読み出しなので
     # ワーカーから呼んで安全。**返す前**に書くのは、窓が閉じられて報告先が
-    # 消えても記録は必ず残す、という N-40 の意図。
+    # 消えても記録は必ず残す、という意図。
     log_path = log_deleted_paths(deleted, label=label)
     return (deleted, errors, skipped, log_path)
 
@@ -225,10 +224,10 @@ class _ElideMiddleDelegate(QStyledItemDelegate):
     ``QAbstractItemView.setTextElideMode`` is view-wide, but only the path
     column wants a middle ellipsis (a middle-elided sentence is harder to read
     than a right-elided one).  Setting the option per column is the smallest
-    way to have both in one tree (UIレビュー 08-28 N-23).
+    way to have both in one tree.
 
-    Column 0 also carries **sentences**: the category head row (見出し + 説明,
-    N-06) and the 「他 N 件」 row.  Those are told apart by the absence of
+    Column 0 also carries **sentences**: the category head row (見出し + 説明)
+    and the 「他 N 件」 row.  Those are told apart by the absence of
     :data:`_ISSUE_ROLE` — the same marker the selection / double-click
     handlers use — and fall back to a trailing ellipsis, because a
     middle-elided sentence loses its own subject.
@@ -266,13 +265,13 @@ class HealthCheckDialog(QDialog):
         self._token: CancelToken | None = None
 
         # Parent the relays to self so a pooled worker mid-``emit`` can't be
-        # GC'd during teardown (exit-139), matching image_view/markdown_view (#8).
-        # (UIレビュー 07-25 #18) ライブラリ全体に post.md が 1 つでもあるか。
+        # GC'd during teardown (exit-139), matching image_view/markdown_view.
+        # ライブラリ全体に post.md が 1 つでもあるか。
         # 判明するまで（＝走査中）は True＝抑制しない側に倒しておく。
         # 走査完了時に ``HealthReport.library_has_post_md``（走査自身の
         # post-order 畳み込みが計上する値 — 別 walker 無し）で更新される。
         self._has_any_post_md = True
-        # 実行中の一括削除が対象にしたパス（完了後に #71 の再スキャン通知へ）。
+        # 実行中の一括削除が対象にしたパス（完了後にホストへの再スキャン通知へ）。
         self._delete_targets: list[Path] = []
 
         # 走査 / 一括削除の 2 ストリーム。どちらも :meth:`~._runnable
@@ -285,6 +284,10 @@ class HealthCheckDialog(QDialog):
         self._scan_stream.bind_progress(self._on_progress)
         self._delete_stream = GuardedStream(self)
         self._delete_stream.bind(self._on_delete_finished)
+        # ワーカーが例外で落ちた着地（``None``）の受け口。これが無いと
+        # ``_on_delete_finished`` が黙って捨て、単一スロット（token / 進捗
+        # ダイアログ / 通知対象）が畳まれずにダイアログが恒久的に固まる。
+        self._delete_stream.bind_failed(self._on_delete_failed)
         self._delete_stream.bind_progress(self._on_delete_progress)
         self._delete_token: CancelToken | None = None
         self._delete_progress: QProgressDialog | None = None
@@ -345,17 +348,17 @@ class HealthCheckDialog(QDialog):
         scan_row = QHBoxLayout()
         self._progress = QProgressBar(self)
         self._progress.setRange(0, 0)  # indeterminate while scanning
-        # (レビュー 2026-08-27 #72) 不確定モード（min == max）の QProgressBar は
+        # 不確定モード（min == max）の QProgressBar は
         # ``text()`` が常に空 — バーへ書式を載せても走査済みフォルダ数は 1 文字も
         # 出ない（``setFormat`` も ``setValue`` も画面に現れない）。件数は隣の
         # ステータスラベルへ出し、バーは「動いている」ことだけを示す。
         self._progress.setTextVisible(False)
         scan_row.addWidget(self._progress, 1)
-        # (UIレビュー 07-25 #117) 走査が終わったあとまでアクセント色で満杯の
+        # 走査が終わったあとまでアクセント色で満杯の
         # バーを残すと「まだ動いている」ように読め、しかも満杯バーの上の
         # テキストはコントラストが落ちる — 完了後はバーを隠してこのラベルに
         # 結果テキストだけを出す。走査中はバー（動作中）とこのラベル
-        # （走査済みフォルダ数）が並ぶ (#72)。
+        # （走査済みフォルダ数）が並ぶ。
         self._scan_status = QLabel(
             t("viewer.health_dialog.scanning_fmt", n=0), self,
         )
@@ -372,20 +375,20 @@ class HealthCheckDialog(QDialog):
         # Results tree.
         self._tree = QTreeWidget(self)
         self._tree.setHeaderLabels([
-            # (UIレビュー 07-25 #117) 「問題」ではなく「検出内容」— この列には
+            # 「問題」ではなく「検出内容」— この列には
             # 【情報】カテゴリ（old/ 肥大・post.md 欠落）の行も混ざる。
             t("viewer.health_dialog.col_detected"),
             t("common.label.details"),
             t("common.label.size"),
         ])
-        # 見出しの揃えは内容の揃えに合わせる (UIレビュー 07-25 #97) —
+        # 見出しの揃えは内容の揃えに合わせる —
         # サイズ列（列2）は数値なので内容もろとも右揃えへ。
         align_header(self._tree, right=(2,))
-        # (UIレビュー 08-28 N-23) 生の setColumnWidth だけでは
+        # 生の setColumnWidth だけでは
         # ``stretchLastSection``（既定 True）が余白を全部「サイズ」列へ渡し、
         # 「128 B」しか入らない列が約 300px を占める一方で「検出内容」
         # （パス）と「詳細」（カテゴリの平易な説明）が既定幅で一度も読み切れ
-        # なかった。姉妹実装 ``shortcuts_dialog``（07-25 #36）と同じ規約へ:
+        # なかった。姉妹実装 ``shortcuts_dialog``と同じ規約へ:
         # 最終列の伸長を切り、余白は最長テキストを持つ列 0 が受け取る。
         hdr = self._tree.header()
         hdr.setStretchLastSection(False)
@@ -403,7 +406,7 @@ class HealthCheckDialog(QDialog):
 
         # Per-row action buttons (enabled by selection).
         row_actions = QHBoxLayout()
-        # (UIレビュー 07-25 #56) ラベルは「フォルダを開く」ではなく
+        # ラベルは「フォルダを開く」ではなく
         # 「エクスプローラで開く」— 同じ語がルート選択（アプリ内でフォルダを
         # 開く）にも使われており、実際の挙動（OS のファイラ起動）と食い違う。
         # 図像も OS 起動系専用の folder-output へ（folder-open はアプリ内で
@@ -414,7 +417,7 @@ class HealthCheckDialog(QDialog):
         self._open_btn.setEnabled(False)
         row_actions.addWidget(self._open_btn)
         row_actions.addStretch(1)
-        # (UIレビュー 07-25 #18) post.md が 1 つも無いライブラリでは
+        # post.md が 1 つも無いライブラリでは
         # 「post.md 欠落」はライブラリの正常な姿そのもの — 既定では畳み、
         # あえて見たいときだけこのチェックで開く（畳んだときだけ出す）。
         self._show_missing_md_cb = QCheckBox(
@@ -432,13 +435,13 @@ class HealthCheckDialog(QDialog):
 
         # Bulk actions.
         bulk = QHBoxLayout()
-        # UIレビュー #13: 一括削除は不可逆な破壊的操作 — danger トークンの
+        # 一括削除は不可逆な破壊的操作 — danger トークンの
         # 危険信号を付ける objectName マーカー（実際のスタイルは
         # common/ui/qss.py の QPushButton#destructiveButton ルール）。
-        # (UIレビュー 07-25 #32) 危険配色のボタンが対象 0 件でも押せる状態で
+        # 危険配色のボタンが対象 0 件でも押せる状態で
         # 並んでいると「押したら何か起きる」と読める — 件数はラベルに出し、
         # 有効化もカテゴリごとの件数で行う（_refresh_bulk_actions）。
-        # (UIレビュー 07-25 #87) 0 バイトファイルにも .part と同格の一括手段。
+        # 0 バイトファイルにも .part と同格の一括手段。
         self._del_part_btn = QPushButton(self)
         self._del_part_btn.setObjectName("destructiveButton")
         self._del_part_btn.clicked.connect(self._on_delete_all_parts)
@@ -452,7 +455,7 @@ class HealthCheckDialog(QDialog):
         self._del_empty_btn.clicked.connect(self._on_delete_all_empty)
         bulk.addWidget(self._del_empty_btn)
         bulk.addStretch(1)
-        # (UIレビュー 07-25 #86) 走査対象をダイアログ内から変え直せるように
+        # 走査対象をダイアログ内から変え直せるように
         # する（従来はウィンドウ側のルートを変えて開き直すしかなかった）。
         self._pick_target_btn = QPushButton(
             t("viewer.health_dialog.choose_target"), self,
@@ -469,10 +472,10 @@ class HealthCheckDialog(QDialog):
         bulk.addWidget(self._close_btn)
         outer.addLayout(bulk)
 
-        # UIレビュー #4: この閲覧専用ダイアログに主要な肯定アクションは無い。
+        # この閲覧専用ダイアログに主要な肯定アクションは無い。
         # 「閉じる」だけでなく**全ボタン**の default を降ろす — 自前レイアウト
         # のダイアログでは先頭の QPushButton（= 一括削除）が Qt の暗黙 default
-        # になり、Enter の着地先が破壊操作になっていた。
+        # になり、Enter の着地先が破壊操作になってしまう。
         demote_all_defaults(
             self._cancel_scan_btn,
             self._open_btn,
@@ -501,9 +504,9 @@ class HealthCheckDialog(QDialog):
 
         再スキャン・対象フォルダ選択は素直に *enabled* をたどるが、削除ボタンは
         さらに「そのカテゴリの対象が 1 件以上あるか」で決まる
-        (UIレビュー 07-25 #32) — :meth:`_refresh_bulk_actions` を見ること。
+        — :meth:`_refresh_bulk_actions` を見ること。
 
-        (レビュー 2026-08-27 #77) 一括削除が実行中のあいだは *enabled* が何で
+        一括削除が実行中のあいだは *enabled* が何で
         あろうと全部落とす。ダイアログはモードレスで :meth:`rescan` は公開 API
         （ウィンドウの診断メニューがいつでも呼べる）なので、削除中に着地した
         再走査の ``_on_finished`` がボタンを復活させると 2 本目の削除が起動し、
@@ -518,7 +521,7 @@ class HealthCheckDialog(QDialog):
         self._refresh_bulk_actions(enabled)
 
     def _refresh_bulk_actions(self, enabled: bool = True) -> None:
-        """Label + enable each bulk-delete button from its live count (#32).
+        """Label + enable each bulk-delete button from its live count.
 
         対象 0 件のときは危険配色のまま押せる状態にせず、件数もラベルに出す
         （「.part をすべて削除 (3)」）。レポートが無い間は件数の付かない
@@ -544,8 +547,8 @@ class HealthCheckDialog(QDialog):
         self._show_missing_md_cb.setVisible(False)
         self._tree.clear()
         self._summary_label.setText("")
-        # (UIレビュー 07-25 #117) 走査中はバー + 件数テキスト、完了後はテキスト
-        # だけ（#72 — 不確定バーは自前のテキストを描けない）。
+        # 走査中はバー + 件数テキスト、完了後はテキスト
+        # だけ（不確定バーは自前のテキストを描けない）。
         self._progress.setVisible(True)
         self._scan_status.setVisible(True)
         self._scan_status.setText(t("viewer.health_dialog.scanning_fmt", n=0))
@@ -567,7 +570,7 @@ class HealthCheckDialog(QDialog):
         )
 
     def _on_progress(self, n: object) -> None:
-        # 走査済みフォルダ数はラベルへ (#72) — 不確定バーは ``setValue`` の値も
+        # 走査済みフォルダ数はラベルへ — 不確定バーは ``setValue`` の値も
         # 書式も描画しないため、ここでバーを触っても画面には何も出ない。
         self._scan_status.setText(
             t("viewer.health_dialog.scanning_fmt", n=int(cast(int, n)))
@@ -593,24 +596,24 @@ class HealthCheckDialog(QDialog):
 
     def _on_failed(self, message: str) -> None:
         self._cancel_scan_btn.setEnabled(False)
-        # 完了状態はバーではなく ``_scan_status`` が出す（#117 でバーは隠す）
+        # 完了状態はバーではなく ``_scan_status`` が出す（バーは隠す）
         # ので、ここでバーの range / value / format を書いても画面には一切
-        # 現れない（レビュー 2026-09-03 項目 #255）。
+        # 現れない。
         self._show_scan_status(t("viewer.health_dialog.scan_failed_fmt"))
         # No report → the delete buttons stay dark, but 再スキャン must come
-        # back so a transient failure (NAS hiccup) can be retried (#30).
+        # back so a transient failure (NAS hiccup) can be retried.
         # 対象フォルダの選び直しも同様（消えたルートから抜ける手段として、
-        # 失敗時こそ必要 — UIレビュー 07-25 #86）。
+        # 失敗時こそ必要）。
         self._rescan_btn.setEnabled(True)
         self._pick_target_btn.setEnabled(True)
-        # A failure is modal (design.md 失敗=モーダル).
+        # A failure is modal (design-system rule: 失敗=モーダル).
         QMessageBox.warning(
             self, t("viewer.health_dialog.scan_failed_title"), message,
         )
 
     def _on_finished(self, report: HealthReport) -> None:
         self._report = report
-        # (UIレビュー 07-25 #18) 「post.md 欠落」を畳むかどうかの判定材料は
+        # 「post.md 欠落」を畳むかどうかの判定材料は
         # レポート自身が運ぶ（走査の post-order 畳み込みで確定済み）。
         # キャンセルされた部分走査は既定 True = 抑制しない側のまま。
         self._has_any_post_md = bool(report.library_has_post_md)
@@ -620,13 +623,13 @@ class HealthCheckDialog(QDialog):
             done_text = t("viewer.health_dialog.cancelled_fmt", n=scanned)
         else:
             done_text = t("viewer.health_dialog.done_fmt", n=scanned)
-        self._show_scan_status(done_text)  # (UIレビュー 07-25 #117)
+        self._show_scan_status(done_text)
         self._sync_missing_md_default(report)
         self._populate_tree(report)
         self._set_bulk_enabled(True)
 
     def _show_scan_status(self, text: str) -> None:
-        """Swap the finished progress bar for a plain status line (#117).
+        """Swap the finished progress bar for a plain status line.
 
         走査が終わったあともアクセント色で満杯のバーが残ると「まだ動いて
         いる」ように見え、満杯バーの上に描かれる文字はコントラストも落ちる。
@@ -637,7 +640,7 @@ class HealthCheckDialog(QDialog):
         self._scan_status.setVisible(True)
 
     def _missing_post_md_suppressed(self) -> bool:
-        """True when the 「post.md 欠落」 category must stay folded (#18).
+        """True when the 「post.md 欠落」 category must stay folded.
 
         post.md が 1 つも無いライブラリでは全コンテンツフォルダが 1 行ずつ
         並ぶだけ（= このライブラリの正常な姿）なので既定で畳む。混在
@@ -700,7 +703,7 @@ class HealthCheckDialog(QDialog):
     def _populate_tree_inner(self, report: HealthReport) -> None:
         self._tree.clear()
         counts = report.counts()
-        # (UIレビュー 07-25 #18) 畳んだカテゴリは行だけでなく集計からも外す
+        # 畳んだカテゴリは行だけでなく集計からも外す
         # （「post.md 欠落 3000 件」とだけ言って何も出ないのは不可解）。
         # チェックボックスは畳める状況＝抑制の余地があるときだけ出す。
         suppressed = (
@@ -755,11 +758,11 @@ class HealthCheckDialog(QDialog):
             )
             explanation = self._category_explanation(cat)
             head_text = t(head_key, label=category_label(cat), n=len(issues))
-            # (UIレビュー 2026-09-11 N-06) 説明を「詳細」列（幅 300px 固定・
-            # パス行と共有）へ入れていたため、カテゴリごとの平易な説明が
-            # どのカテゴリでも途中で切れて読めなかった。見出し行だけを全幅に
+            # 説明を「詳細」列（幅 300px 固定・パス行と共有）へ入れると、
+            # カテゴリごとの平易な説明がどのカテゴリでも途中で切れて読めない。
+            # 見出し行だけを全幅に
             # 伸ばし（``setFirstColumnSpanned``）、見出しと説明を 1 つの
-            # セルに連結する — 子の issue 行は 3 列のまま。
+            # セルに連結する — 子の検出行は 3 列のまま。
             head = QTreeWidgetItem(
                 self._tree,
                 [
@@ -788,7 +791,7 @@ class HealthCheckDialog(QDialog):
                 )
                 more = QTreeWidgetItem(head, [more_text, "", ""])
                 # ``_ISSUE_ROLE`` を持たない行 — 選択しても「開く」は無効の
-                # まま、ダブルクリックも無反応（issue が無いので当然）。
+                # まま、ダブルクリックも無反応（検出内容が無いので当然）。
                 more.setToolTip(0, more_text)
 
     def _add_issue_row(
@@ -798,7 +801,7 @@ class HealthCheckDialog(QDialog):
         detail = issue.detail
         # docs/formats/post-md.md が公開機能として謳う「文脈付与」— post.md を
         # 持つ投稿の中の問題には、それがどの投稿かを添える。走査は既にこの値を
-        # 読んでいる（issue が出たときだけ・ファイル単位でメモ化）ので、出さ
+        # 読んでいる（検出が出たときだけ・ファイル単位でメモ化）ので、出さ
         # ないと読んだ結果が丸ごと捨てられる。
         ref_text = _postref_text(issue.postref)
         if ref_text:
@@ -808,12 +811,12 @@ class HealthCheckDialog(QDialog):
             )
         row = QTreeWidgetItem(parent, [str(issue.path), detail, size_text])
         row.setData(0, _ISSUE_ROLE, issue)
-        # UIレビュー #7: パス（列0）・詳細（列1）はどちらも幅が固定で長い値が
+        # パス（列0）・詳細（列1）はどちらも幅が固定で長い値が
         # 切り詰められる — 見出し行と同様にツールチップで全文を読めるように
-        # する（切れたセルの復旧手段が手動リサイズしかなかった）。
+        # する（無いと切れたセルの復旧手段が手動リサイズしかない）。
         row.setToolTip(0, str(issue.path))
         row.setToolTip(1, detail)
-        # サイズは数値 — 桁が縦に揃うよう右寄せ（見出しも右: #97）。
+        # サイズは数値 — 桁が縦に揃うよう右寄せ（見出しも右）。
         row.setTextAlignment(2, Qt.AlignRight | Qt.AlignVCenter)
 
     # ---------------------------------------------------------- row helpers
@@ -842,7 +845,7 @@ class HealthCheckDialog(QDialog):
             self._open_path(issue.path)
 
     def _on_pick_target(self) -> None:
-        """Re-target the scan from inside the dialog (UIレビュー 07-25 #86).
+        """Re-target the scan from inside the dialog.
 
         走査対象はこれまでウィンドウ側のルートに固定で、サブフォルダだけを
         調べ直すにはビューアのルートごと動かすしかなかった。選び直しは既存の
@@ -866,8 +869,8 @@ class HealthCheckDialog(QDialog):
         走査が「壊れている / 読めない」と判定した行そのもの（``unreadable``
         = オフラインの共有）なので、生の ``Path.is_dir()`` は SMB タイムアウト
         （数十秒）まで GUI スレッドを止める。このダイアログはモードレスなので
-        止まるのはダイアログだけでなくアプリ全体（レビュー 2026-09-03 項目
-        #105。ブックマーク経路の項目#109 と同一機構の別の呼び出し口）。
+        止まるのはダイアログだけでなくアプリ全体（ブックマーク経路と同一機構の
+        別の呼び出し口）。
         タイムアウト（``None``）はフォルダ扱いにせず、開く相手を確定できない
         ので ``dir`` のときだけフォルダ自身、それ以外は親を開く。
         """
@@ -881,7 +884,7 @@ class HealthCheckDialog(QDialog):
         self._bulk_delete(CATEGORY_PART, is_dir=False)
 
     def _on_delete_all_zero_byte(self) -> None:
-        # (UIレビュー 07-25 #87) .part と同格の一括手段（確認モーダル・既定 No）。
+        # .part と同格の一括手段（確認モーダル・既定 No）。
         self._bulk_delete(CATEGORY_ZERO_BYTE, is_dir=False)
 
     def _on_delete_all_empty(self) -> None:
@@ -892,11 +895,10 @@ class HealthCheckDialog(QDialog):
 
         ``part`` / ``empty_folder`` はホスト側の
         :func:`~snappix.viewer.health_check.deletable_paths` がそのまま答える。
-        ``zero_byte`` (UIレビュー 07-25 #87) はそこでは「削除直前に再確認が要る
+        ``zero_byte`` はそこでは「削除直前に再確認が要る
         カテゴリ」として除外されているため、同じ重複排除・順序維持の規約を
         持つ :func:`~snappix.viewer.health_check.paths_for_category` へ回す
-        （UIレビュー07-25 追修: 以前はここでそのループを書き写しており、規約が
-        二重実装になっていた）— 削除直前の再確認は ``_run_bulk_delete`` の
+        （ここでそのループを書き写すと規約が二重実装になる）— 削除直前の再確認は ``_run_bulk_delete`` の
         ``recheck_zero_byte``。
         """
         if self._report is None:
@@ -914,7 +916,7 @@ class HealthCheckDialog(QDialog):
     def _bulk_delete(self, category: str, *, is_dir: bool) -> None:
         if self._report is None:
             return
-        # (レビュー 2026-08-27 #77) 削除は単一スロット（token / 進捗ダイアログ /
+        # 削除は単一スロット（token / 進捗ダイアログ /
         # 通知対象）で回っている — 2 本目を起動させない。ボタンは
         # ``_set_bulk_enabled`` が既に落としているが、キーボード操作や
         # ``_on_delete_all_*`` の直接呼び出しでも成立するようここでも弾く。
@@ -938,9 +940,8 @@ class HealthCheckDialog(QDialog):
         kind_word = (
             t("common.label.folder") if is_dir else t("common.label.file")
         )
-        # 動詞ラベル + 「ごみ箱には入りません」の明示（N-01 / N-40）。ごみ箱
-        # 経由化は既決の見送り（docs/claude/viewer.md — send2trash 等の新規
-        # 依存なし）なので、**取り消せないことを言い切る**のと削除ログを残す
+        # 動詞ラベル + 「ごみ箱には入りません」の明示。ごみ箱
+        # 経由化は既決の見送り（send2trash 等の新規依存なし）なので、**取り消せないことを言い切る**のと削除ログを残す
         # のが復旧手段の代わりになる。
         if not confirm_action(
             self,
@@ -956,8 +957,7 @@ class HealthCheckDialog(QDialog):
             # 本文には実ファイルパス（外部由来の文字列）が埋まる。AutoText の
             # まま渡すと ``mightBeRichText`` が真になった瞬間に HTML として
             # 解釈され、``<...>`` を含む名前で文面そのものが化ける
-            # （レビュー 2026-09-03 項目 #254。姉妹実装
-            # ``curation_recovery`` と同じ理由・同じ指定）。
+            # （姉妹実装 ``curation_recovery`` と同じ理由・同じ指定）。
             plain_text=True,
         ):
             return
@@ -965,8 +965,8 @@ class HealthCheckDialog(QDialog):
         # including the empty-folder re-check, lives there).  A window-modal
         # progress dialog provides per-path progress and a cancel button that
         # flips the shared cooperative token.
-        # (項目#172) .part は削除直前に「走査時の (size, mtime) から変わって
-        # いないか」を再確認する — 走査時スナップショットを issue から拾って
+        # .part は削除直前に「走査時の (size, mtime) から変わって
+        # いないか」を再確認する — 走査時スナップショットを検出行から拾って
         # ワーカーへ渡す（空フォルダ / 0 バイトの再確認と同格の安全弁）。
         file_snapshots = None
         if category in (CATEGORY_PART, CATEGORY_ZERO_BYTE):
@@ -990,10 +990,10 @@ class HealthCheckDialog(QDialog):
         # ``setValue`` で初めて走る。ワーカーの ``progress`` は
         # ``_PROGRESS_STRIDE``(25) で間引かれるので、これが無いと対象 24 件
         # 以下（.part 数件などの典型的な小バッチ = 実運用の常態）では
-        # ``setValue`` が一度も呼ばれず、進捗も中止ボタンも最後まで出なかった
-        # （レビュー 2026-09-03 項目 #106）。ワーカーを start する**前**に
+        # ``setValue`` が一度も呼ばれず、進捗も中止ボタンも最後まで出ない。
+        # ワーカーを start する**前**に
         # 済ませるので、WindowModal な ``setValue`` の ``processEvents`` が
-        # ``finished`` の配送と入れ子になることはない（項目#173）。
+        # ``finished`` の配送と入れ子になることはない。
         progress.setValue(0)
         # 削除も放棄できる FS 仕事（上の走査と同じ理由でプールに載せない）。
         self._delete_stream.submit_detached(
@@ -1016,9 +1016,45 @@ class HealthCheckDialog(QDialog):
     def _on_delete_finished(self, payload: object) -> None:
         """一括削除が着地した — ``(deleted, errors, skipped, log_path)``。"""
         if not isinstance(payload, tuple) or len(payload) != 4:
-            return  # the worker raised
+            self._on_delete_failed()
+            return
         deleted, errors, skipped, log_path = payload
         self._apply_delete_result(deleted, errors, int(skipped), log_path)
+
+    def _on_delete_failed(self) -> None:
+        """一括削除のワーカーが例外で落ちた着地を結末へ畳む。
+
+        削除は途中（あるいは全部）まで済んでいる可能性があり、何件消えたかは
+        分からない。それでも成功着地と同じ後始末 — 進捗ダイアログを閉じる・
+        単一スロットの token を解放してボタンを戻す・グリッドへ変更を通知する・
+        再走査で実際の状態を見せる — を必ず行い、利用者には異常終了を
+        消えないトーストで伝える。畳まないと WindowModal の進捗ダイアログが
+        残り、``_set_bulk_enabled`` が以後ずっとボタンを落とし続けた。
+        """
+        logger.warning("health check bulk delete ended abnormally")
+        self._close_delete_session()
+        if not self.isVisible():
+            return
+        show_toast(
+            self.window(),
+            t("viewer.health_dialog.delete_aborted"),
+            kind="warning",
+            duration_ms=0,
+        )
+        self._start_scan()
+
+    def _close_delete_session(self) -> None:
+        """一括削除の単一スロット（進捗ダイアログ・token・通知対象）を畳む。
+
+        成功・失敗どちらの着地も通る共通の後始末。グリッドへの通知は
+        可視性に関係なく必ず行う（:meth:`_apply_delete_result` 参照）。
+        """
+        if self._delete_progress is not None:
+            self._delete_progress.close()
+            self._delete_progress.deleteLater()
+            self._delete_progress = None
+        self._delete_token = None
+        self._notify_library_changed()
 
     def _apply_delete_result(
         self,
@@ -1027,7 +1063,7 @@ class HealthCheckDialog(QDialog):
         skipped: int,
         log_path: Path | None = None,
     ) -> None:
-        # ``deleted`` は削除済みパスの一覧（N-40）。件数だけを渡していた頃の
+        # ``deleted`` は削除済みパスの一覧。件数だけを渡していた頃の
         # 呼び出し（テスト等）も壊さないよう int を許容する。
         if isinstance(deleted, int):
             deleted_count = deleted
@@ -1035,33 +1071,30 @@ class HealthCheckDialog(QDialog):
             deleted_count = len(list(deleted))  # type: ignore[arg-type]
         errs: list[tuple[Path, str]] = list(errors)  # type: ignore[arg-type]
         # 削除ログ（ごみ箱を経由しない以上、消したパスの記録だけが唯一の
-        # 事後手段 — N-40）はワーカーが既に書いている（項目#217）。ここは
+        # 事後手段）はワーカーが既に書いている。ここは
         # その結果を受け取るだけ。
         #
-        # (UIレビュー 2026-09-11 N-72) 中止で抜けたかどうかは token でしか
+        # 中止で抜けたかどうかは token でしか
         # 分からない — ``self._delete_token`` を畳む**前**に読む。開始直後に
-        # 中止すると deleted は 0 件で、従来はそれが「0 件を削除しました」の
-        # success トーストとして出ていた（押した中止が効いたのか分からない）。
+        # 中止すると deleted は 0 件で、それを「0 件を削除しました」の
+        # success トーストとして出すと、押した中止が効いたのか分からない。
         cancelled = (
             self._delete_token is not None and self._delete_token.is_cancelled()
         )
         remaining = max(
             0, len(self._delete_targets) - deleted_count - skipped,
         )
-        if self._delete_progress is not None:
-            self._delete_progress.close()
-            self._delete_progress.deleteLater()
-            self._delete_progress = None
-        self._delete_token = None
-        # (UIレビュー 07-25 #71) 背後のグリッドは削除を知らないまま古い内容を
+        # 背後のグリッドは削除を知らないまま古い内容を
         # 描き続ける — ホストの公開 API に「この範囲が変わった」と通知して
         # フォルダプレビューキャッシュの無効化 + 再スキャンを任せる。
-        # (UIレビュー07-25 追修) この通知と内部状態（``_delete_targets``）の
+        # この通知と内部状態（``_delete_targets``）の
         # 後始末は**可視性に関係なく必ず**行う。一括削除の途中でダイアログを
         # 閉じると、既に消えたフォルダのプレビューキャッシュが永久に無効化
         # されず（親フォルダの mtime は変わらない — notify_library_changed の
-        # docstring 参照）、グリッドが存在しないフォルダを描き続けていた。
-        self._notify_library_changed()
+        # docstring 参照）、グリッドが存在しないフォルダを描き続ける。
+        # 進捗ダイアログ・token の解放と合わせて :meth:`_close_delete_session`
+        # が持つ（失敗着地と共通）。
+        self._close_delete_session()
         if not self.isVisible():
             # The dialog was closed mid-delete (done() cancelled the token) —
             # 報告する相手も走査し直す木も無いので UI だけを畳む。
@@ -1077,7 +1110,7 @@ class HealthCheckDialog(QDialog):
             )
         else:
             if cancelled:
-                # 中止は「途中まで消えた」状態 — 成功として畳まない（N-72）。
+                # 中止は「途中まで消えた」状態 — 成功として畳まない。
                 msg = t(
                     "viewer.health_dialog.delete_cancelled",
                     done=deleted_count, rest=remaining,
@@ -1099,17 +1132,17 @@ class HealthCheckDialog(QDialog):
                 self.window(),
                 msg,
                 kind="warning" if partial else "success",
-                # (UIレビュー 07-25 #10) 部分失敗（失敗・スキップ）は
+                # 部分失敗（失敗・スキップ）は
                 # クリックされるまで残す — 数分かかる一括削除の「N 件失敗」が
                 # 3 秒で自動消滅すると、離席したユーザーは事実ごと失う。
                 # 削除ログの導線が付くときは 3 秒では押しに行けないので
-                # 伸ばす（N-40）。
+                # 伸ばす。
                 duration_ms=(
                     0
                     if partial
                     else (_ACTION_TOAST_MS if log_path is not None else 3000)
                 ),
-                # (N-40) ごみ箱に入らない削除の唯一の事後手段 = 記録。トースト
+                # ごみ箱に入らない削除の唯一の事後手段 = 記録。トースト
                 # から 1 クリックで開けるようにする（消えても data/logs に
                 # 残っているので、これは近道であって唯一の入口ではない）。
                 action_text=(
@@ -1129,7 +1162,7 @@ class HealthCheckDialog(QDialog):
         self._start_scan()
 
     def _notify_library_changed(self) -> None:
-        """Tell the host window that the deleted subtrees changed (#71).
+        """Tell the host window that the deleted subtrees changed.
 
         影響範囲は削除したパスの親フォルダ（ファイルを消してもフォルダ自体の
         エントリは残るため、親を渡さないとプレビューキャッシュが落ちない）。
@@ -1172,7 +1205,7 @@ def _file_changed_since_scan(
     was still 0 bytes when the walk passed — can be the destination of a
     download in flight by the time the delete button is pressed.  Size alone
     cannot see that in the zero-byte case: the file is 0 bytes until the first
-    byte lands, so the snapshot's mtime is what tells the two apart (項目#172).
+    byte lands, so the snapshot's mtime is what tells the two apart.
 
     倒し方は空フォルダ側の
     :func:`~snappix.viewer.health_check.dir_has_any_file` と揃える:
@@ -1184,7 +1217,7 @@ def _file_changed_since_scan(
 
     ``stat`` 失敗でスキップした分は「内容が変わった」わけではないので、報告
     文言は 2 つの理由（状態が変わった / 状態を確認できなかった）の両方を言う
-    — ``deleted_skipped_suffix``（レビュー 2026-08-27 #176）。
+    — ``deleted_skipped_suffix``。
     """
     try:
         st = path.stat()
@@ -1207,10 +1240,9 @@ def _delete_paths(
 
     Pure filesystem side effects (no Qt) so it is independently testable.
     Uses ``shutil.rmtree`` for folders and ``os.remove`` for files — no new
-    dependency (send2trash etc.: ごみ箱経由化は既決の見送り —
-    docs/claude/viewer.md).
+    dependency (send2trash etc.: ごみ箱経由化は既決の見送り).
 
-    ``deleted`` は**件数ではなくパスの一覧**（UIレビュー 2026-08-28 N-40）。
+    ``deleted`` は**件数ではなくパスの一覧**。
     ごみ箱に入らない以上、何を消したかの記録だけが唯一の事後手段なので、
     呼び出し側が data/logs の削除ログへ書き出せるよう一覧で返す — ログ出力
     自体はここでは行わない（この関数を Qt 非依存・副作用がファイル削除だけ
@@ -1242,7 +1274,7 @@ def _delete_paths(
 def _rotate_deletion_log(log_path: Path) -> None:
     """Move an over-sized deletion log aside so the live file starts fresh.
 
-    (レビュー 2026-09-03 項目 #256) 追記専用で上限が無いと、数万件の一括削除を
+    追記専用で上限が無いと、数万件の一括削除を
     繰り返すライブラリでは 1 パス 1 行がそのまま積み上がる。保持方針は
     ``common/logging.py`` の house policy に合わせて **上限
     :data:`_DELETION_LOG_ROTATION_BYTES` ・退避は ``.1`` の 1 世代**（そこより
@@ -1250,7 +1282,7 @@ def _rotate_deletion_log(log_path: Path) -> None:
     永久保存ではない）。
 
     失敗は握って続行する: 退避できなくても追記は続けられるし、削除自体は
-    もう起きている。ワーカースレッドから呼ばれる（項目#217）ので複数の
+    もう起きている。ワーカースレッドから呼ばれるので複数の
     一括削除が同時に回ると ``os.replace`` が競合し得るが、負け側は例外を
     握って追記へ進むだけなので記録は失われない。
     """
@@ -1267,14 +1299,14 @@ def _rotate_deletion_log(log_path: Path) -> None:
 def log_deleted_paths(paths: list[Path], *, label: str) -> Path | None:
     """Append *paths* to the portable deletion log; returns the log file.
 
-    (UIレビュー 2026-08-28 N-40) 一括削除はごみ箱を経由しないので、誤った
-    対象で数千件消したときに「何が在ったか」を思い出す手段がゼロだった。
+    一括削除はごみ箱を経由しないので、誤った
+    対象で数千件消したときに「何が在ったか」を思い出す手段が他に無い。
     完全な復旧にはならないが、パスの一覧さえ残れば再取得・再構成の起点には
     なる。
 
     Portability: the log lives under ``get_paths().logs`` like every other
     runtime artefact — never ``Path.home()`` / ``%APPDATA%``.  Written from
-    the **worker thread** by :func:`_run_bulk_delete` (項目#217 — the append is
+    the **worker thread** by :func:`_run_bulk_delete` (the append is
     per-path I/O and must not land on the GUI thread; the pure
     :func:`_delete_paths` deliberately stays log-free), appended so a session
     never overwrites an earlier one.  Size is bounded by
@@ -1288,11 +1320,16 @@ def log_deleted_paths(paths: list[Path], *, label: str) -> Path | None:
         log_path = get_paths().logs / DELETION_LOG_NAME
         _rotate_deletion_log(log_path)
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with log_path.open("a", encoding="utf-8") as fh:
+        # Windows の ``scandir`` は不対サロゲートを含む名前をそのまま str で
+        # 返す。strict な UTF-8 ではそれが ``UnicodeEncodeError`` になり
+        # 記録が途中で切れるので、エスケープして 1 行に残す。
+        with log_path.open(
+            "a", encoding="utf-8", errors="backslashreplace",
+        ) as fh:
             fh.write(f"# {stamp}\t{label}\t{len(paths)}\n")
             for path in paths:
                 fh.write(f"{path}\n")
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         logger.warning("could not write the deletion log: {}", exc)
         return None
     logger.info("deleted {} path(s) [{}] -> {}", len(paths), label, log_path)

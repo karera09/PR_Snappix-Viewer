@@ -36,7 +36,9 @@ PATCH_PREVIEW_SMOOTH_MAX_PIXELS = 8_000_000
 #: 領域を埋める背景なので、ビューポート級の精細度があれば十分。
 PATCH_BASE_MAX_PIXELS = 4_000_000
 
-#: ズーム操作の下限 / 上限（上限は :func:`zoom_ceiling` がさらに絞る）。
+#: ズーム操作の下限 / 上限。静止画は予算超のズーム域を可視領域パッチが、
+#: アニメーションは原寸フレームの描画時スケール（露出領域基準）が引き受ける
+#: ので、どちらも上限は元画素数と無関係にこの値。
 ZOOM_MIN = 0.05
 ZOOM_MAX = 20.0
 
@@ -105,26 +107,6 @@ def target_phys_box(
     ))
 
 
-def zoom_ceiling(*, is_gif: bool, natural: QSize | None) -> float:
-    """ズーム操作（ホイール / ±）の上限倍率。
-
-    静止画は、全体レンダが予算を超えるズーム域を可視領域パッチレンダが引き
-    受けるため常に :data:`ZOOM_MAX` — 表示は常に実効解像度と一致する。
-
-    ``QMovie``（GIF / アニメ WebP）はパッチ対象外で、フレームごとの全体
-    スケールのクランプが実表示の上限のまま。予算クランプが効き始める倍率で
-    頭打ちにし、「画面が変わらないのに数値だけ上がる」乖離を防ぐ。QMovie の
-    クランプは論理ピクセルに掛かるので dpr は寄与しない。
-    """
-    if not is_gif or natural is None:
-        return ZOOM_MAX
-    area = natural.width() * natural.height()
-    if area <= 0:
-        return ZOOM_MAX
-    ceiling = (MAX_TARGET_PIXELS / area) ** 0.5
-    return max(ZOOM_MIN, min(ZOOM_MAX, ceiling))
-
-
 def effective_zoom(
     *,
     natural: QSize | None,
@@ -132,7 +114,6 @@ def effective_zoom(
     zoom: float,
     viewport: QSize,
     no_upscale: bool,
-    ceiling: float,
 ) -> float:
     """いま画面に出ている倍率（原寸を 1.0 とする）。
 
@@ -140,12 +121,11 @@ def effective_zoom(
     表さない — 画像はビューポートへ縮めて描かれている。ホイールズームはこの
     実効倍率から始めないと、1 ノッチ目でフィット表示から飛び離れる。
 
-    非フィット時は *ceiling* で頭打ちにする。静止画はパッチレンダが *zoom*
-    どおりの実表示を出すので実質そのまま返り、QMovie では予算クランプ済みの
-    実効倍率（画面に出ている倍率）を返す。
+    非フィット時は :data:`ZOOM_MAX` で頭打ちにする（静止画はパッチレンダ、
+    アニメーションは描画時スケールが *zoom* どおりの実表示を出す）。
     """
     if not fit_mode:
-        return min(zoom, ceiling)
+        return min(zoom, ZOOM_MAX)
     if natural is None:
         return zoom
     box = viewport - FIT_MARGIN
@@ -161,9 +141,9 @@ def effective_zoom(
     return ratio
 
 
-def step_zoom_value(base: float, factor: float, ceiling: float) -> float:
+def step_zoom_value(base: float, factor: float) -> float:
     """1 段ズーム後の倍率（ホイール / ± キー共通のクランプ）。"""
-    return max(ZOOM_MIN, min(ceiling, base * factor))
+    return max(ZOOM_MIN, min(ZOOM_MAX, base * factor))
 
 
 def full_zoom_size(natural: QSize, zoom: float) -> QSize:
@@ -177,17 +157,17 @@ def full_zoom_size(natural: QSize, zoom: float) -> QSize:
 def patch_mode_wanted(
     *,
     fit_mode: bool,
-    is_gif: bool,
     natural: QSize | None,
     zoom: float,
     dpr: float,
 ) -> bool:
     """全体レンダが予算を超える静止画ズームか（= パッチ描画へ切り替える）。
 
-    フィット表示はビューポート束縛で予算内、``QMovie`` はフレームごとの全体
-    スケールしかできないため対象外。
+    *natural* は静止画ソースの原寸（無ければ ``None`` = 対象外）。フィット
+    表示はビューポート束縛で予算内。アニメーションは原寸フレームを常に
+    canvas へ渡して描画時にスケールするので、そもそもこの判定を通らない。
     """
-    if fit_mode or is_gif or natural is None:
+    if fit_mode or natural is None:
         return False
     size = full_zoom_size(natural, zoom)
     scale = max(1.0, dpr or 1.0)
@@ -255,7 +235,7 @@ def patch_geometry(
     return target, (x0, y0, x1, y1), phys_size
 
 
-def gif_scale_target(
+def movie_label_size(
     *,
     natural: QSize,
     fit_mode: bool,
@@ -263,10 +243,11 @@ def gif_scale_target(
     viewport: QSize,
     no_upscale: bool,
 ) -> QSize | None:
-    """``QMovie.setScaledSize`` に渡す論理寸。描けないときは ``None``。
+    """アニメーションを描くラベルの論理寸。描けないときは ``None``。
 
-    非フィット時は :func:`target_phys_box` と同じ予算クランプを掛ける —
-    掛けないと QMovie がフレームごとにズーム後の全面を確保する。
+    静止画と同じ計算（フィット枠へ縦横比を保って収める / 原寸 × 倍率）。
+    フレームは原寸でデコードされ描画時に露出領域だけが伸縮されるので、
+    ズーム後の全面を確保することは無く、画素予算のクランプは要らない。
     """
     if natural.width() <= 0 or natural.height() <= 0:
         return None
@@ -276,10 +257,7 @@ def gif_scale_target(
             return None
         target = natural.scaled(box, Qt.AspectRatioMode.KeepAspectRatio)
     else:
-        target = clamp_pixel_budget(QSize(
-            max(1, round(natural.width() * zoom)),
-            max(1, round(natural.height() * zoom)),
-        ))
+        target = full_zoom_size(natural, zoom)
     if target.width() <= 0 or target.height() <= 0:
         return None
     return target
@@ -362,6 +340,42 @@ def minimap_pan_values(
     )
 
 
+def dodge_keepout(
+    rect: QRect,
+    keepout: QRect | None,
+    bounds: QRect,
+    *,
+    gap: int,
+    prefer_above: bool = False,
+) -> QPoint:
+    """*rect* を *keepout* と重ならない位置へずらした左上を返す。
+
+    ビューポート下端の浮遊部品（操作カプセル・ズームのピル）と右下の
+    ミニマップは互いの位置を知らずに置かれるので、狭い分割幅では重なって
+    読み値やボタンが隠れる。*keepout*（ミニマップの占有矩形）から *gap*
+    以内に入るときだけ、左へ（*prefer_above* なら上へ）逃がす。優先側が
+    *bounds* に収まらなければもう一方を試し、どちらも無理なら元の位置の
+    まま（クランプは呼び出し側の仕事）。
+    """
+    if (
+        keepout is None
+        or keepout.isEmpty()
+        or not rect.intersects(keepout.adjusted(-gap, -gap, gap, gap))
+    ):
+        return rect.topLeft()
+    left = QPoint(keepout.left() - gap - rect.width(), rect.y())
+    above = QPoint(rect.x(), keepout.top() - gap - rect.height())
+    left_ok = left.x() >= bounds.left()
+    above_ok = above.y() >= bounds.top()
+    order = ((above, above_ok), (left, left_ok)) if prefer_above else (
+        (left, left_ok), (above, above_ok)
+    )
+    for point, ok in order:
+        if ok:
+            return point
+    return rect.topLeft()
+
+
 __all__ = [
     "FIT_MARGIN",
     "MAX_TARGET_PIXELS",
@@ -373,12 +387,13 @@ __all__ = [
     "anchor_fraction",
     "anchor_scroll_values",
     "clamp_pixel_budget",
+    "dodge_keepout",
     "effective_zoom",
     "fit_logical_box",
     "full_zoom_size",
-    "gif_scale_target",
     "minimap_pan_values",
     "minimap_view_rect",
+    "movie_label_size",
     "patch_geometry",
     "patch_mode_wanted",
     "restore_scroll_values",
@@ -386,5 +401,4 @@ __all__ = [
     "step_zoom_value",
     "target_phys_box",
     "visible_label_rect",
-    "zoom_ceiling",
 ]

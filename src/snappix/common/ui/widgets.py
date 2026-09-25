@@ -3,23 +3,21 @@
 Things live here:
 
 * :class:`EmptyStateCard` — the unified empty-state visual (icon + heading +
-  optional description + optional action button(s)) introduced by the layout
-  redesign (docs/claude/design.md, `EmptyStateCard` section): every "nothing here"
+  optional description + optional action button(s)): every "nothing here"
   surface (management-dialog empty lists, the content pane's welcome / empty
   cards, ...) reads as the same card grammar instead of ad-hoc per-widget
   hint labels.
-* :func:`empty_state_stack` — used by the management dialogs (UIレビュー
-  #15) and ``NavRail``: a big empty table reads as "broken / not loaded", so
+* :func:`empty_state_stack` — used by the management dialogs and
+  ``NavRail``: a big empty table reads as "broken / not loaded", so
   when a list has no rows we swap the table out for a centred guidance
   widget — the same ``QStackedWidget`` pattern ``detail_window`` uses for its
   tag table.  Kept as a tiny constructor helper (the caller drives
   ``setCurrentWidget`` itself, since the "is it empty?" condition differs per
   dialog) rather than a full widget subclass.
-* :class:`PanelHeader` — the standardised 28px pane-header strip introduced by
-  the layout redesign (docs/claude/design.md, `PanelHeader` section): a caption
+* :class:`PanelHeader` — the standardised 28px pane-header strip: a caption
   title + optional item-count label + optional "⋯" overflow entry point.
 * :func:`align_header` — 「見出しの揃え = 内容の揃え」 for the management
-  dialogs' tables / trees (UIレビュー 07-25 #97).
+  dialogs' tables / trees.
 """
 
 from __future__ import annotations
@@ -39,8 +37,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .focus_band import FocusBandMixin
 from .icons import set_icon, set_icon_pixmap
-from .qss import hint_style
+from .qss import caption_size_style, hint_style
 from .tokens import (
     FONT_BODY_PT,
     FONT_CAPTION_PT,
@@ -51,7 +50,7 @@ from .tokens import (
 
 #: Icon pixel size range the redesign spec calls for (32-48px); the default
 #: sits in the middle so a card reads clearly without dominating a compact
-#: pane (self-review note: bigger read as "间延び" — over-padded).
+#: pane (bigger reads as over-padded).
 _DEFAULT_ICON_SIZE = 40
 
 #: Heading emphasis levels (see :class:`EmptyStateCard`).
@@ -61,8 +60,7 @@ CardEmphasis = Literal["hint", "onboarding", "secondary"]
 class EmptyStateCard(QWidget):
     """Unified empty-state visual: icon + heading + description + action(s).
 
-    docs/claude/design.md (`EmptyStateCard` section) asks for one visual grammar for
-    every "nothing here" surface: a centred, vertically-stacked
+    One visual grammar for every "nothing here" surface: a centred, vertically-stacked
     ``[icon] / heading / [description] / [action buttons]``.  ``emphasis``
     picks how loud the heading reads:
 
@@ -74,12 +72,10 @@ class EmptyStateCard(QWidget):
     * ``"onboarding"`` — a named call-to-action card (:data:`FONT_TITLE_PT`,
       bold, normal ``text`` colour) for a surface that already earns its own
       heading + body + button: the centre pane's first-run 「ようこそ」 card
-      and the drilled-into-empty-folder card (UIレビュー #3/#6) predate this
-      component and keep their stronger heading weight — only the icon and
-      the shared icon/heading/body/button scaffold are new for them.
+      and the drilled-into-empty-folder card keep this stronger heading
+      weight on top of the shared icon/heading/body/button scaffold.
     * ``"secondary"`` — the **従属面** form (:data:`FONT_CAPTION_PT`,
-      ``text_muted``) introduced by the空状態オーケストレータ
-      (UIレビュー 2026-08-28 提案3 / N-101): when another seat already owns the
+      ``text_muted``) used by the空状態オーケストレータ: when another seat already owns the
       window's ``PRIMARY`` guidance card, the remaining seats must not repeat
       it at the same visual weight.  Pass ``icon_name=None`` with it — the
       whole point is that a subordinate placeholder carries **no icon and one
@@ -112,8 +108,8 @@ class EmptyStateCard(QWidget):
             icon_label.setAlignment(Qt.AlignCenter)
             # set_icon_pixmap (not a bare ``icon(...).pixmap(...)``) so the
             # glyph is re-tinted by ``apply_theme`` → ``retint_all``: these
-            # cards live as long as the main window, and a baked pixmap kept
-            # the creation-time ``text_muted`` after a theme switch (#118).
+            # cards live as long as the main window, and a baked pixmap
+            # would keep the creation-time ``text_muted`` after a theme switch.
             set_icon_pixmap(icon_label, icon_name, role="muted", size=icon_size)
             layout.addWidget(icon_label)
             layout.addSpacing(4)
@@ -145,16 +141,16 @@ class EmptyStateCard(QWidget):
         self._button_row.addStretch(1)
         layout.addLayout(self._button_row)
 
-        # 上下同率 = 内容ブロックを垂直中央に置く。以前は下 2 / 上 1 で
-        # 「やや上寄り」だったため、3 席（ナビレール / グリッド / 情報パネル）
-        # に空状態が同時に出ると基準線が席ごとにズレて見えた。
+        # 上下同率 = 内容ブロックを垂直中央に置く。上寄りにすると、3 席
+        # （ナビレール / グリッド / 情報パネル）に空状態が同時に出たとき
+        # 基準線が席ごとにズレて見える。
         layout.addStretch(1)
 
     def _heading_style(self) -> str:
         if self._emphasis == "onboarding":
             return f"font-size: {FONT_TITLE_PT}pt; font-weight: bold;"
         if self._emphasis == "secondary":
-            # 従属面は主カードより 1 段小さく・同じ muted 色（N-101）。
+            # 従属面は主カードより 1 段小さく・同じ muted 色。
             return hint_style(font_pt=FONT_CAPTION_PT)
         return hint_style(font_pt=FONT_BODY_PT)
 
@@ -167,8 +163,8 @@ class EmptyStateCard(QWidget):
         return self._heading_label.text()
 
     # ``setText``/``text`` alias the heading so an ``EmptyStateCard`` is a
-    # drop-in replacement for the plain ``QLabel`` that :func:`empty_state_stack`
-    # used to hand back (existing callers only ever call ``setText``/``text``
+    # drop-in replacement for a plain ``QLabel`` in :func:`empty_state_stack`
+    # (callers only ever call ``setText``/``text``
     # on it, plus ``QStackedWidget.setCurrentWidget``).
     setText = set_heading
     text = heading
@@ -242,14 +238,14 @@ def align_header(
     right: Iterable[int] = (),
     center: Iterable[int] = (),
 ) -> None:
-    """Align each column heading with the content beneath it (#97).
+    """Align each column heading with the content beneath it.
 
     Qt's default heading alignment differs per widget family — a
     ``QTableWidget``'s header items come out **centred** while a
     ``QTreeWidget``'s header is **left**-aligned — so the viewer's six
     management tables (タグ一覧 / ライブラリ管理 / 保存した検索 /
-    ブックマーク / ショートカット / 健全性) disagreed with each other AND
-    with their own right-aligned numeric cells (UIレビュー 07-25 #97).
+    ブックマーク / ショートカット / 健全性) would disagree with each other AND
+    with their own right-aligned numeric cells.
     This applies one rule everywhere: **the heading takes the alignment of
     its column's content**.
 
@@ -289,8 +285,8 @@ def align_header(
         _set(col, flags)
 
 
-class PanelHeader(QWidget):
-    """Standardised pane-header strip (redesign 2026-07 Phase 1-2).
+class PanelHeader(FocusBandMixin, QWidget):
+    """Standardised pane-header strip.
 
     Fixed height :data:`PANEL_HEADER_HEIGHT` so every pane that adopts it
     lines up.  Layout, left → right:
@@ -310,11 +306,16 @@ class PanelHeader(QWidget):
       merely hidden until a caller claims it: a header without one otherwise
       pulls its count label ~37px further right than its neighbours, so a stack
       of headers (the ナビレール's four sections) shows a ragged column of
-      numbers (UIレビュー 2026-08-28 N-117).
+      numbers.
 
     The surrounding hairline (transparent background + 1px bottom border) is
     driven by the ``QWidget#panelHeader`` rule in ``qss.py`` — tokens only,
-    no literal colours here (docs/claude/design.md).
+    no literal colours here.
+
+    **フォーカス帯**（:class:`~.focus_band.FocusBandMixin`）: この見出しが
+    属する節にキーボードフォーカスがあるとき ``set_focus_band(True)`` で
+    地色が一段変わり（qss の ``[focusBand="true"]``）、左マージン内に ▸、
+    題名が帯のインク色（``tokens.focus_band_ink``）になる。レイアウトは動かない。
     """
 
     def __init__(self, title: str = "", parent: QWidget | None = None) -> None:
@@ -332,6 +333,8 @@ class PanelHeader(QWidget):
         layout.setSpacing(6)
 
         self._title_label = QLabel(title)
+        # フォーカス帯中の色は qss の ``#panelHeader[focusBand] #panelHeaderTitle``。
+        self._title_label.setObjectName("panelHeaderTitle")
         title_font = QFont(self._title_label.font())
         # Letter-spacing must go through QFont — there is no QSS equivalent —
         # while colour/size stay on the usual hint_style() stylesheet path.
@@ -347,7 +350,7 @@ class PanelHeader(QWidget):
         self._count_label.setVisible(False)
         layout.addWidget(self._count_label)
 
-        # ⋯ の席は常に確保する（N-117 — 上の docstring 参照）。実際に使うかは
+        # ⋯ の席は常に確保する（上の docstring 参照）。実際に使うかは
         # :meth:`overflow_button` を呼んだかどうかで決まる。
         btn = QToolButton(self)
         set_icon(btn, "more-horizontal")
@@ -365,6 +368,13 @@ class PanelHeader(QWidget):
     def set_title(self, title: str) -> None:
         self._title_label.setText(title)
 
+    def _apply_focus_band_title(self, on: bool) -> None:
+        # 帯中は inline の色を外して app シートの規則（祖先の動的プロパティ）
+        # に色を委ねる — inline の ``color`` は app シートより強い。
+        self._title_label.setStyleSheet(
+            caption_size_style() if on else hint_style(font_pt=FONT_CAPTION_PT)
+        )
+
     def set_count_text(self, text: str) -> None:
         """Set the count label; an empty string hides it entirely."""
         self._count_label.setText(text)
@@ -378,7 +388,7 @@ class PanelHeader(QWidget):
         itself: the caller connects ``clicked`` (or calls ``setMenu``) to
         whatever this pane wants to tuck away.
 
-        **Pick the glyph by meaning, not by habit** (UIレビュー 08-28 N-24):
+        **Pick the glyph by meaning, not by habit**:
         「⋯」(``more-horizontal``) means *the display options of this pane* and
         nothing else — a header whose button fires a single action (e.g. 「管理
         ダイアログを開く」) must pass its own glyph (``settings``) instead, or the
@@ -386,7 +396,7 @@ class PanelHeader(QWidget):
 
         The widget itself already exists (and already holds its slot) from
         construction; this only picks the glyph and makes it visible — see the
-        class docstring for why the slot is reserved either way (N-117).
+        class docstring for why the slot is reserved either way.
         """
         if not self._overflow_enabled:
             self._overflow_enabled = True
@@ -406,11 +416,9 @@ class PanelHeader(QWidget):
 def align_form_labels(*labels: QLabel) -> int:
     """Right-align *labels* to a shared width so their rows' inputs line up.
 
-    「揃っていないラベル列」は 07-18 #16 → 07-25 #24 → 08-28 N-99 と 3 度
-    指摘されている。原因は **同じ整列機構を面ごとに手書きしていた**ことで、
-    N-99 の検証は「2 面で計 7 通りの左端」を実測した上で、既に正解形を
-    持っていた AI 検索ポップオーバー（``advanced_search``）のヘルパを
-    ``common/ui`` へ引き上げて 3 面で共有することを改善案に据えた。
+    「揃っていないラベル列」は **同じ整列機構を面ごとに手書きする**と
+    起きる（面ごとに左端がばらける）ので、整列は ``common/ui`` のこの
+    ヘルパ 1 本を全ての面で共有する。
 
     行ごとに ``QHBoxLayout`` を持つ形（行が inline のコントロールを併せ
     持つため単一の ``QFormLayout`` が合わない — フィルターポップオーバーの
@@ -418,7 +426,7 @@ def align_form_labels(*labels: QLabel) -> int:
     だけで入力ウィジェットの x が揃う。幅は最も広いラベル自身のフォント
     メトリクス由来なので、マジックピクセルは入らない（design.md）。
     共有ラベル列幅を返すので、行に属するが独立行に置かれるキャプションを
-    :func:`indent_to_form_column` で同じ x へ字下げできる（07-25 #81）。
+    :func:`indent_to_form_column` で同じ x へ字下げできる。
     """
     width = 0
     for lbl in labels:
@@ -432,7 +440,7 @@ def align_form_labels(*labels: QLabel) -> int:
 def indent_to_form_column(
     widget: QWidget, label_column_width: int, spacing: int,
 ) -> None:
-    """ラベル列の幅ぶん *widget* を字下げする (UIレビュー 07-25 #81).
+    """ラベル列の幅ぶん *widget* を字下げする.
 
     ラベルを持たない独立行（入力欄直下の例示行）は
     :func:`align_form_labels` の整列から外れて左端に取り残される。行の
@@ -444,7 +452,7 @@ def indent_to_form_column(
     実装は ``setContentsMargins`` 1 本なので、``QCheckBox`` のように印と
     テキストの配置をスタイルが決めるコントロールは動かない。ラベルを持た
     ないチェック行は**空の ``QLabel`` を行の先頭に置いて**列へ載せること
-    （``filter_popover._build_row`` — N-43）。
+    （``filter_popover._build_row``）。
     """
     widget.setContentsMargins(
         max(0, label_column_width) + max(0, spacing), 0, 0, 0

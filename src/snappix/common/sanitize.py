@@ -35,7 +35,8 @@ def _is_reserved(name: str) -> bool:
     """
     return name.split(".", 1)[0].rstrip(" ").upper() in _RESERVED
 
-# Public byte-length contract values (do NOT relax — see CLAUDE.md).  They
+# Public byte-length contract values (do NOT relax — NAS filesystems cap a
+# name at 255 UTF-8 bytes).  They
 # are consumed outside this module (an optional writer plugin's storage
 # layer builds every folder / file name against them), so they are part of
 # the shared layer's public API.
@@ -127,8 +128,7 @@ def sanitize_filename(
     # into "untitled.gitignore").  Peel the leading dots off, sanitize the
     # rest with the normal rules and re-prepend them.  This covers multi-dot
     # dotfiles too (".env.local" keeps its dot and its ".local" extension) —
-    # only stripping the leading dot for THOSE was the inconsistency behind
-    # review #114.
+    # stripping the leading dot for only some of them would be inconsistent.
     stripped = name.lstrip(".")
     if stripped and name.startswith("."):
         n_dots = len(name) - len(stripped)
@@ -136,8 +136,8 @@ def sanitize_filename(
             # The leading dots alone fill (or overflow) the budget, so nothing
             # of the body would survive the cap below and the result would be a
             # dots-only name — which Windows refuses to create at all
-            # (PermissionError), the exact opposite of this function's job
-            # (review #179).  The dots cannot be preserved, so drop them and
+            # (PermissionError), the exact opposite of this function's job.
+            # The dots cannot be preserved, so drop them and
             # sanitize the body against the full budget.
             return sanitize_filename(stripped, max_bytes=max_bytes)
         dots = "." * n_dots

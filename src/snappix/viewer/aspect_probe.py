@@ -4,7 +4,7 @@ Reads image *headers* (cheap — no pixel decode) to learn each image's
 pixel ``(width, height)``, which the justified layout needs before it can
 pack rows.  Mirrors :class:`scan_worker.ChildrenScanner`'s pattern: a
 ``QThreadPool``-dispatched task carrying a
-:class:`~.cancel_token.ScanSession` (generation + cooperative cancel, #35)
+:class:`~.cancel_token.ScanSession` (generation + cooperative cancel)
 so navigating away abandons in-flight probes instead of hammering a NAS
 share.
 
@@ -36,6 +36,7 @@ ProbeSpec = Union[
 from loguru import logger
 from PySide6.QtCore import QObject, QThreadPool, Signal
 
+from ._fanout import DaemonExecutor, iter_completed
 from .cancel_token import ScanSession, SessionOwner, SessionRunnable
 from .gil_pacing import GilPacer
 from .perf import measure
@@ -83,10 +84,10 @@ class _AspectProbeTask(SessionRunnable):
     """Probe a batch of image specs on a worker thread.
 
     ``specs`` is ``[(Path, mtime, size), ...]``.  Reads headers via an
-    internal ``ThreadPoolExecutor`` (≤ ``parallelism`` concurrent) and
-    emits ``probed`` in chunks.  Polls the cancel token between results.
+    internal daemon executor (``_fanout.DaemonExecutor``, ≤ ``parallelism``
+    concurrent) and emits ``probed`` in chunks.  Polls the cancel token between results.
 
-    **Cancellation never discards a header that was already read** (#47).
+    **Cancellation never discards a header that was already read**.
     A cancel stops *issuing* new reads (queued futures are cancelled, the
     dispatch loop breaks), but results the executor already produced — the
     completed-but-unconsumed futures plus the accumulated fractional batch —
@@ -164,9 +165,10 @@ class _AspectProbeTask(SessionRunnable):
         batch: list[tuple[str, float, int, int, int]] = []
         try:
             with measure("aspect_probe", f"{len(self.specs)} specs"):
-                with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=min(self.parallelism, len(self.specs)),
-                    thread_name_prefix="viewer-aspect",
+                # デーモン版 executor: ``with`` の出口は走行中の読みを待たない
+                # （``ThreadPoolExecutor`` にしない理由は ``_fanout`` の docstring）。
+                with DaemonExecutor(
+                    min(self.parallelism, len(self.specs)), name="viewer-aspect",
                 ) as ex:
                     # A spec is ``(key_path, mtime, size)`` or, when the image
                     # to read differs from the cache key (a folder whose
@@ -178,33 +180,32 @@ class _AspectProbeTask(SessionRunnable):
                     for spec in self.specs:
                         key_path, m, s = spec[0], spec[1], spec[2]
                         image_path = spec[3] if len(spec) > 3 else spec[0]
-                        futures[ex.submit(_read_image_aspect_paced, image_path)] = (
-                            key_path, m, s
-                        )
-                    consumed: set = set()
-                    for fut in concurrent.futures.as_completed(futures):
-                        if self.cancel.is_cancelled():
-                            # Stop issuing: queued reads are cancelled.  The
-                            # ``with`` exit below still waits for the ≤
-                            # ``parallelism`` in-flight reads to finish —
-                            # their results are harvested after it.
-                            for f in futures:
-                                f.cancel()
-                            break
-                        consumed.add(fut)
-                        batch.extend(self._rows_for(fut, futures[fut]))
+                        fut = ex.submit(_read_image_aspect_paced, image_path)
+                        futures[fut] = (key_path, m, s)
+                    # 受け取った分は ``futures`` から外す — 残りが事後回収の対象。
+                    for fut in iter_completed(
+                        list(futures), should_cancel=self.cancel.is_cancelled,
+                    ):
+                        batch.extend(self._rows_for(fut, futures.pop(fut)))
                         if len(batch) >= _PROBE_BATCH_SIZE:
                             self.signals.probed.emit(self._emit_generation(), batch)
                             batch = []
-                # ``ex.__exit__`` (wait=True) has drained the workers: every
-                # future is now finished or cancelled.  Harvest the completed
-                # ones the loop never consumed — their headers were already
-                # read off the share, and the rows are valid regardless of
-                # cancellation (see the class docstring, #47).
+                    if self.cancel.is_cancelled():
+                        # Stop issuing: queued reads are cancelled.  The
+                        # ``with`` exit below does not wait for the ≤
+                        # ``parallelism`` in-flight reads — only reads that
+                        # already finished are harvested after it.
+                        for f in futures:
+                            f.cancel()
+                # ``ex.__exit__`` cancelled the queued reads without waiting
+                # for the running ones.  Harvest the completed futures the
+                # loop never consumed — their headers were already read off
+                # the share, and the rows are valid regardless of
+                # cancellation (see the class docstring).  A read still
+                # running (a stuck share) is abandoned, not awaited.
                 for fut, key in futures.items():
-                    if fut in consumed or fut.cancelled():
-                        continue
-                    batch.extend(self._rows_for(fut, key))
+                    if fut.done():  # cancelled futures yield no rows
+                        batch.extend(self._rows_for(fut, key))
         except Exception as exc:  # pragma: no cover (defensive)
             logger.warning("aspect probe batch failed: {}", exc)
         # The fractional tail batch is emitted even when cancelled — dropping
@@ -236,7 +237,7 @@ class AspectProbeScanner(QObject):
         self._signals.probed.connect(self._forward_probed)
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(1)  # one dispatch task at a time
-        # 世代とキャンセルのペアは SessionOwner が 1 箇所で持つ（項目#35）。
+        # 世代とキャンセルのペアは SessionOwner が 1 箇所で持つ。
         self._sessions = SessionOwner()
         self._parallelism = _PROBE_PARALLELISM
 
@@ -264,10 +265,10 @@ class AspectProbeScanner(QObject):
         return session.generation
 
     def cancel(self) -> None:
-        """Cancel the in-flight probe; bumps the generation too (#35) so a
+        """Cancel the in-flight probe; bumps the generation too so a
         chunk already queued for delivery goes stale — except the salvaged
         completed-read rows, which are re-stamped with the newest generation
-        by the task (#47)."""
+        by the task."""
         self._pool.clear()
         self._sessions.cancel()
 

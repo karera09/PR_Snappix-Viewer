@@ -5,10 +5,9 @@ questions:
 
 * **Qt's ``qtbase_ja.qm``** (installed at startup — see
   :mod:`snappix.common.qt_i18n`) translates every string Qt draws itself:
-  standard buttons, ``QFileDialog`` の列見出し, ``QInputDialog`` の OK/Cancel.
-  Since 2026-08 it *is* shipped (UIレビュー 2026-08-28 N-01 の裁定 = 案A) —
-  the older reasoning in this docstring ("we ship no qm, so every dialog
-  renames its buttons by hand") no longer holds and must not be re-derived.
+  standard buttons, ``QInputDialog`` の OK/Cancel.
+  It *is* shipped, so dialogs do not need to rename Qt's standard buttons
+  by hand merely to get Japanese labels.
 * **This module** keeps the wording *ours* where the wording matters.
   :func:`localize_buttons` still renames a ``QDialogButtonBox``'s standard
   buttons from the ``t()`` catalog so 「閉じる」/「既定値に戻す」 read the same
@@ -108,7 +107,7 @@ def confirm_action(
       the marker.
     * *plain_text* forces ``Qt.PlainText`` — required whenever *body* embeds
       untrusted text (plugin manifest fields), which ``AutoText`` would
-      otherwise render as HTML (レビュー #28).
+      otherwise render as HTML.
 
     Closing the modal with Escape / ✕ returns ``False`` (no button clicked).
     """
@@ -140,7 +139,7 @@ def confirm_action(
     box.setEscapeButton(reject_btn)
     box.exec()
     accepted = box.clickedButton() is accept_btn
-    # (#58) A parented QMessageBox stays owned by its parent after exec() —
+    # A parented QMessageBox stays owned by its parent after exec() —
     # release it explicitly so repeated confirmations don't pile up.
     box.deleteLater()
     return accepted
@@ -161,13 +160,13 @@ def warn_modal(
 
     * *plain_text* (default) forces ``Qt.PlainText`` — ``AutoText`` would let
       the embedded string decide it is HTML and re-render the very warning
-      that is reporting it (レビュー #28).
+      that is reporting it.
     * The box is **parented** (so it centres on the window and stays modal to
       it) and released with ``deleteLater`` after ``exec`` returns — a
       parented ``QMessageBox`` otherwise lives on as a hidden child for the
-      window's whole lifetime, once per notice (#58 / #125).  ``exec`` is not
+      window's whole lifetime, once per notice.  ``exec`` is not
       wrapped in ``WA_DeleteOnClose``: that frees the C++ object inside the
-      close signal's own stack (the #111 crash shape).
+      close signal's own stack, which aborts the process.
 
     Callers that need a yes/no answer use :func:`confirm_action` instead.
     """
@@ -185,7 +184,7 @@ def warn_modal(
 
 #: Roles that represent a dialog's primary/affirmative action (the "OK" of an
 #: OK/Cancel pair) — the one case where an accent-coloured default button is
-#: the correct read (UIレビュー #4 explicitly keeps these untouched).
+#: the correct read, so these are deliberately left untouched.
 _AFFIRMATIVE_ROLES = frozenset(
     {
         QDialogButtonBox.ButtonRole.AcceptRole,

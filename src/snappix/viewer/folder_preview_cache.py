@@ -75,6 +75,7 @@ from ._sqlite_cache import (
     SqliteStoreBase,
     iter_chunks,
     mtime_matches,
+    sqlite_text_ok,
 )
 
 # Version of the *row payload* (the set of post.md-derived columns a fully
@@ -327,7 +328,11 @@ class FolderPreviewCache(SqliteCacheBase):
         """
         if not specs:
             return {}
-        want: dict[str, float] = {str(p): m for p, m in specs}
+        # 符号化できないパス（孤立サロゲート）はバッチ全体を落とすので、
+        # その行だけ miss として外す。
+        want: dict[str, float] = {
+            key: m for p, m in specs if sqlite_text_ok(key := str(p))
+        }
         out: dict[str, FolderPreview] = {}
         # Hold the lock for the whole batch: a worker pool may be writing
         # concurrently, and sharing the one connection without serialising
@@ -363,13 +368,22 @@ class FolderPreviewCache(SqliteCacheBase):
         """Upsert the resolved *preview* for *path* keyed by *mtime*.
 
         Commits through the base class's bulk-aware
-        ``_maybe_commit_locked`` (#40): live browse writes still commit
+        ``_maybe_commit_locked``: live browse writes still commit
         per row (bulk mode off), while a cache build that streams one row
         per walked directory batches them under ``set_bulk_writes(True)``
         — per-row fsync across a whole library would otherwise dominate
         the walk.
         """
         key_path = str(path)
+        path_texts = (
+            key_path,
+            _path_to_text(preview.thumb_marker_path),
+            _path_to_text(preview.non_thumb_marker_path),
+        )
+        if not all(sqlite_text_ok(v) for v in path_texts):
+            # 符号化できないパスは保存できない（その 1 行だけの miss）。
+            # 直下のファイル名一覧は :func:`_dumps_list` がエスケープで運ぶ。
+            return
         with self._lock:
             self._conn.execute(
                 "INSERT OR REPLACE INTO preview"
@@ -496,7 +510,15 @@ def _parse_dt(s: str) -> datetime | None:
 
 
 def _dumps_list(items: list[str]) -> str:
-    return json.dumps(items, ensure_ascii=False)
+    """JSON 化する。孤立サロゲートを含む名前があるときだけ ASCII エスケープへ
+    倒す（``\\uXXXX`` は :func:`_loads_list` で元の str に戻る）— 素の
+    ``ensure_ascii=False`` だと sqlite3 が UTF-8 へ符号化できず、直下に
+    そういう名前を持つフォルダの行を一度も保存できない。
+    """
+    text = json.dumps(items, ensure_ascii=False)
+    if sqlite_text_ok(text):
+        return text
+    return json.dumps(items, ensure_ascii=True)
 
 
 def _loads_list(s: str) -> list[str]:

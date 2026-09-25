@@ -70,14 +70,13 @@ def _tinted_pixmap(
 
     ``common.ui.icons.icon()`` only exposes a fixed role→token table (text /
     muted / accent / danger / on-accent) — no "warning" role — so the
-    security-note panel (#37) renders its own pixmap from the public
-    ``svg_source`` template instead of extending that table (out of scope:
-    ``common/ui/icons.py`` isn't in this task's edit allowlist).
+    security-note panel renders its own pixmap from the public
+    ``svg_source`` template instead of extending that table.
 
-    (UIレビュー07-25 追修) *size* は**論理**サイズ。``common/ui/icons.py`` の
-    ``_render`` と同じく物理ピクセル（``size * dpr``）で描いてから
-    ``setDevicePixelRatio`` を打ち込む — 論理サイズのまま描いていたため、
-    150% / 200% スケールの Windows で ⚠ が拡大ボケしていた。
+    *size* は**論理**サイズ。``common/ui/icons.py`` の ``_render`` と同じく
+    物理ピクセル（``size * dpr``）で描いてから ``setDevicePixelRatio`` を
+    打ち込む — 論理サイズのまま描くと 150% / 200% スケールの Windows で ⚠ が
+    拡大ボケする。
     """
     renderer = QSvgRenderer(QByteArray(svg_source(name, color).encode("utf-8")))
     pm = QPixmap(int(size * dpr), int(size * dpr))
@@ -129,16 +128,15 @@ class PluginManagerDialog(QDialog):
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
 
-        # UIレビュー 07-25 #37: 「プラグインは任意コード実行できる」という
-        # 安全警告が、事務的な注記と同じ hint スタイルで一番目立たなかった。
-        # warning トークンの枠付きパネル + アイコンへ格上げする（セーフモード
-        # 注記は hint のまま残し、両者の見た目に段差を付ける）。
+        # 「プラグインは任意コード実行できる」という安全警告は、事務的な注記と
+        # 同じ hint スタイルでは一番目立たない。warning トークンの枠付き
+        # パネル + アイコンで出す（セーフモード注記は hint のまま残し、両者の
+        # 見た目に段差を付ける）。
         outer.addWidget(self._build_security_note_panel())
 
-        # (UIレビュー 2026-09-11 N-49) 状態列が「未有効化 (新規)」と言うだけで、
-        # どう操作すれば有効になるのかがこの画面のどこにも書かれていなかった
-        # （チェックボックスは行の左端にあるが、それが「有効化」だとは名乗って
-        # いない）。常設の 1 行として、再起動注記と同じ hint の段に置く。
+        # 状態列は「未有効化 (新規)」と言うだけで、どう操作すれば有効になるのか
+        # を語らない（チェックボックスは行の左端にあるが、それが「有効化」だとは
+        # 名乗っていない）。常設の 1 行として、再起動注記と同じ hint の段に置く。
         enable_hint = QLabel(t("viewer.plugins.enable_hint"))
         enable_hint.setWordWrap(True)
         enable_hint.setStyleSheet(hint_style())
@@ -169,13 +167,12 @@ class PluginManagerDialog(QDialog):
         hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self._tree.currentItemChanged.connect(lambda *_: self._sync_detail())
         self._tree.itemChanged.connect(self._on_item_changed)
-        # 空状態の案内はツリーの行（列幅で切り詰められて読めない — UIレビュー
-        # #13）ではなく、大きな空ツリーの代わりに中央寄せの折り返しラベルへ
-        # 切り替える（UIレビュー #15 — 管理系ダイアログの空状態を統一）。設置
-        # 場所の案内は有償プラグインの導入導線でもあるため全文が読めること。
-        # (UIレビュー 07-25 #126) 図像は sliders ではなく puzzle — sliders は
-        # ツールバーの検索オプション（つまみを調整する）の席で、同じ絵が
-        # 「プラグイン」も指していた二重使用を解消する。
+        # 空状態の案内はツリーの行（列幅で切り詰められて読めない）ではなく、
+        # 大きな空ツリーの代わりに中央寄せの折り返しラベルへ切り替える（管理系
+        # ダイアログの空状態と揃える）。設置場所の案内は有償プラグインの導入
+        # 導線でもあるため全文が読めること。図像は sliders ではなく puzzle —
+        # sliders はツールバーの検索オプション（つまみを調整する）の席なので、
+        # 同じ絵で「プラグイン」を指さない。
         self._stack, self._empty_label = empty_state_stack(
             self._tree, icon_name="puzzle"
         )
@@ -195,9 +192,9 @@ class PluginManagerDialog(QDialog):
         buttons_row = QHBoxLayout()
         open_btn = QPushButton(t("viewer.plugins.open_folder_btn"))
         open_btn.clicked.connect(self._open_plugins_folder)
-        # UIレビュー 07-25 #39: この行が唯一のボタンとして先にレイアウトへ
-        # 入るため、Qt の暗黙 default 付与でアクセント塗りの既定ボタンになり
-        # Enter がフォルダを開いてしまっていた（新規購入者が最初に開く画面）。
+        # この行が唯一のボタンとして先にレイアウトへ入るため、Qt の暗黙
+        # default 付与でアクセント塗りの既定ボタンになり、Enter がフォルダを
+        # 開いてしまう（新規購入者が最初に開く画面）。
         # OK/Cancel 側に本来の肯定アクションがあるので、こちらは明示的に外す。
         open_btn.setAutoDefault(False)
         open_btn.setDefault(False)
@@ -215,9 +212,9 @@ class PluginManagerDialog(QDialog):
     def _build_security_note_panel(self) -> QFrame:
         """Warning-token bordered panel for the code-execution risk notice.
 
-        UIレビュー 07-25 #37: was a plain ``hint_style`` label — the least
-        visually urgent style in the dialog, level with routine caption text
-        despite warning about arbitrary code execution. Rendered from
+        Not a plain ``hint_style`` label — that is the least visually urgent
+        style in the dialog, level with routine caption text, while this warns
+        about arbitrary code execution. Rendered from
         ``current_tokens().warning`` (no colour literals) so both themes stay
         correct.
         """
@@ -248,7 +245,7 @@ class PluginManagerDialog(QDialog):
 
     def _populate(self) -> None:
         # 行生成中の setCheckState / setText は ``itemChanged`` を鳴らす —
-        # 生成の途中で状態列を作り直しても無意味なので黙らせる（N-36）。
+        # 生成の途中で状態列を作り直しても無意味なので黙らせる。
         self._tree.blockSignals(True)
         try:
             self._populate_rows()
@@ -286,12 +283,11 @@ class PluginManagerDialog(QDialog):
             self._stack.setCurrentWidget(self._tree)
 
     def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
-        """Re-render the 状態 column when a row's checkbox is toggled (N-36).
+        """Re-render the 状態 column when a row's checkbox is toggled.
 
-        Enable flags only reach the store on OK (``_on_accept``), so the column
-        used to keep showing the *stored*状態 while the checkbox next to it said
-        the opposite — the row contradicted itself until the dialog was closed
-        and reopened.  ``_status_text`` takes the pending flag and answers
+        Enable flags only reach the store on OK (``_on_accept``), so a column
+        showing the *stored*状態 would contradict the checkbox next to it until
+        the dialog was closed and reopened.  ``_status_text`` takes the pending flag and answers
         「…予定 (OK で確定)」 for it, so ``status_enabled_inactive``
         （再起動が要る旨の唯一の告知面）is untouched.
         """
@@ -400,7 +396,7 @@ class PluginManagerDialog(QDialog):
         else:
             return True
         # 本文には未検証のマニフェスト文字列が入る（bootstrap 側と同じ理由で
-        # プレーンテキスト明示）。ボタンは動詞（N-01）。
+        # プレーンテキスト明示）。ボタンは動詞。
         return confirm_action(
             self,
             title=title,
@@ -423,7 +419,7 @@ class PluginManagerDialog(QDialog):
                 # 再確認で断られた = 記録も activate もしない（チェックは
                 # 次に開いたとき store の値で描き直される）。
                 continue
-            # 承認したフォルダ実体を束ねる（id 詐称なりすまし対策 #37）。
+            # 承認したフォルダ実体を束ねる（id 詐称なりすまし対策）。
             self._store.set_enabled(m.id, now_enabled, folder=m.dir.name)
             if now_enabled and not was_enabled:
                 if self._host is not None:

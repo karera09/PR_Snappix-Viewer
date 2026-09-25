@@ -43,6 +43,7 @@ __all__ = [
     "plan_actions",
     "plan_error_actions",
     "plan_relaxations",
+    "results_pending",
 ]
 
 #: 文言もボタンも AI パネルが供給する分類（ここは席の裁定だけを持つ）。
@@ -240,6 +241,19 @@ def classify(inp: GridEmptyInput) -> str:
     ):
         return "filtered_shallow"
     return "filtered"
+
+
+def results_pending(inp: GridEmptyInput) -> bool:
+    """検索結果がまだ着地していないか（中間状態の再構築で判定を保留する用）.
+
+    :func:`classify` が ``"searching"`` と呼ぶ検索の飛行中 3 種 — AI 検索の
+    未着地・``body:`` の判定待ち・再帰ウォーク — と同じ信号を読む。再帰の
+    シード（キャッシュ）着地はウォークが続く限り中間結果なので、着地済みとは
+    見なさない。いずれも着地時に再構築が走るので、判定はそこへ送られる。
+    """
+    if inp.advanced_active and inp.advanced_phase == "searching":
+        return True
+    return inp.recursive_scanning or inp.body_pending
 
 
 #: 分類 → 空状態カードのアイコン（``common/ui/icons.py`` のグリフ名）。

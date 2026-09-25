@@ -4,7 +4,6 @@ Two sibling subpackages live under ``src/snappix``: ``common`` (shared
 infrastructure: paths / i18n / UI design system / terms) and ``viewer`` (the
 GUI application).  The AI tag scanner lives outside this package, inside the
 paid AI plugin at ``plugins/snappix_ai/tagger/``, and is built separately.
-See CLAUDE.md for the architecture.
 
 ``__version__`` is READ from the installed distribution's metadata, which is
 built from ``pyproject.toml``'s ``project.version`` — the single source of
